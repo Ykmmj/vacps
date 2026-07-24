@@ -1,16 +1,18 @@
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import {
-  createBackendSchema,
   createScheduleSchema,
   createTaskSchema,
+  registerBackendSchema,
   updateBackendSchema,
   updateScheduleSchema,
 } from '@vps-agent/contracts';
+import { z } from 'zod';
 
 import type { Env } from './env.js';
-import { errorResponse, json, readJson } from './lib/http.js';
+import { AppError, errorResponse, json, readJson } from './lib/http.js';
 import { createMcpServer } from './mcp/server.js';
 import { BackendClient } from './registry/backend-client.js';
+import { RegistrationRepository } from './registry/registration-repository.js';
 import { BackendRepository } from './registry/repository.js';
 import { ScheduleService } from './schedules/schedule-service.js';
 import { TaskService } from './tasks/task-service.js';
@@ -36,10 +38,11 @@ export default {
 
 function createServices(env: Env) {
   const backends = new BackendRepository(env.DB);
+  const registrations = new RegistrationRepository(env.DB);
   const client = new BackendClient(env.BACKEND_SHARED_TOKEN);
   const tasks = new TaskService(env.DB, backends, client);
   const schedules = new ScheduleService(env.DB, backends, client, tasks);
-  return { backends, client, tasks, schedules };
+  return { backends, client, registrations, tasks, schedules };
 }
 
 async function handleApi(request: Request, env: Env, requestId: string): Promise<Response> {
@@ -52,10 +55,11 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     const action = segments[3];
 
     if (resource === 'dashboard' && request.method === 'GET') {
-      const [backends, tasks, schedules] = await Promise.all([
+      const [backends, tasks, schedules, pendingRegistrations] = await Promise.all([
         services.backends.list(),
         services.tasks.list(100),
         services.schedules.list(),
+        services.registrations.list('pending'),
       ]);
       const active = tasks.filter((task) => task.status === 'running').length;
       const queued = tasks.filter((task) => task.status === 'queued').length;
@@ -69,20 +73,68 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           queued,
           active,
           schedules: schedules.length,
+          pendingRegistrations: pendingRegistrations.length,
         },
-        failed,
         backends,
+        pendingRegistrations,
+        failed,
       });
+    }
+
+    if (resource === 'registrations') {
+      if (!id && request.method === 'POST') {
+        requireBackendToken(request, env);
+        return json(
+          await services.registrations.request(
+            registerBackendSchema.parse(await readJson(request)),
+          ),
+          {
+            status: 202,
+          },
+        );
+      }
+      if (!id && request.method === 'GET') return json(await services.registrations.list());
+      if (id && action === 'approve' && request.method === 'POST') {
+        const registration = await services.registrations.get(id);
+        if (registration.status === 'rejected')
+          throw new AppError(
+            'registration_rejected',
+            'A rejected registration must request approval again.',
+            409,
+          );
+        const health = await services.client.health(registration);
+        if (health.backendId !== registration.backendId)
+          throw new AppError(
+            'backend_identity_mismatch',
+            'The agent health response does not match the requested Backend ID.',
+            409,
+          );
+        let backend;
+        try {
+          backend = await services.backends.get(registration.backendId);
+        } catch {
+          backend = await services.backends.create({
+            id: registration.backendId,
+            name: registration.name,
+            baseUrl: registration.baseUrl,
+            ...(registration.region ? { region: registration.region } : {}),
+            tags: registration.tags,
+            enabled: true,
+          });
+        }
+        await services.backends.recordStatus(backend.id, health);
+        return json({ registration: await services.registrations.approve(id), backend, health });
+      }
+      if (id && action === 'reject' && request.method === 'POST') {
+        const input = z
+          .object({ reason: z.string().trim().max(500).optional() })
+          .parse(await readJson(request));
+        return json(await services.registrations.reject(id, input.reason));
+      }
     }
 
     if (resource === 'backends') {
       if (!id && request.method === 'GET') return json(await services.backends.list());
-      if (!id && request.method === 'POST') {
-        const input = createBackendSchema.parse(await readJson(request));
-        // Test first: an unreachable backend is never silently added as enabled.
-        await services.client.health(input);
-        return json(await services.backends.create(input), { status: 201 });
-      }
       if (id && !action && request.method === 'GET') return json(await services.backends.get(id));
       if (id && !action && request.method === 'PATCH')
         return json(
@@ -151,5 +203,16 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     );
   } catch (error) {
     return errorResponse(error, requestId);
+  }
+}
+
+function requireBackendToken(request: Request, env: Env): void {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  if (token !== env.BACKEND_SHARED_TOKEN) {
+    throw new AppError(
+      'unauthorized_registration',
+      'A valid Backend Shared Token is required.',
+      401,
+    );
   }
 }

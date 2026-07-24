@@ -21,9 +21,35 @@ export const backendSchema = z.object({
 export const createBackendSchema = backendSchema.omit({ createdAt: true, updatedAt: true });
 export const updateBackendSchema = createBackendSchema.omit({ id: true }).partial();
 
+export const registrationStatusSchema = z.enum(['pending', 'approved', 'rejected']);
+
+export const registerBackendSchema = z.object({
+  backendId: backendIdSchema,
+  name: z.string().trim().min(1).max(120),
+  baseUrl: z
+    .string()
+    .url()
+    .transform((value) => value.replace(/\/$/, '')),
+  region: z.string().trim().min(1).max(80).optional(),
+  tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
+  agentVersion: z.string().trim().min(1).max(48).default('unknown'),
+});
+
+export const backendRegistrationSchema = registerBackendSchema.extend({
+  id: z.string().uuid(),
+  status: registrationStatusSchema,
+  requestedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  decisionAt: z.string().datetime().optional(),
+  rejectionReason: z.string().max(500).optional(),
+});
+
 export type Backend = z.infer<typeof backendSchema>;
 export type CreateBackendInput = z.infer<typeof createBackendSchema>;
 export type UpdateBackendInput = z.infer<typeof updateBackendSchema>;
+export type RegisterBackendInput = z.infer<typeof registerBackendSchema>;
+export type BackendRegistration = z.infer<typeof backendRegistrationSchema>;
+export type RegistrationStatus = z.infer<typeof registrationStatusSchema>;
 
 export interface BackendHealth {
   ok: boolean;

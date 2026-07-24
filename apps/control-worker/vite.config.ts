@@ -1,0 +1,12 @@
+import tailwindcss from '@tailwindcss/vite';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  root: 'ui',
+  plugins: [tailwindcss(), svelte()],
+  build: {
+    emptyOutDir: true,
+    outDir: '../web',
+  },
+});

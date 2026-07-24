@@ -12,4 +12,4 @@ data/
 logs/
 *.db
 *.db-*
-apps/control-worker/web/install-agent.sh
+apps/control-worker/web/

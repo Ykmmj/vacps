@@ -54,16 +54,19 @@ unset CLOUDFLARE_API_TOKEN
 The equivalent parameter form is `pnpm setup:cloudflare -- --cloudflare-account-id <id> --cloudflare-api-token <token>`. Prefer the environment-variable form because command-line tokens can be recorded in shell history and visible to local processes.
 
 ```bash
-# Run on a VPS after creating a Redis Cloud database and a remotely managed Tunnel.
+# Create a Tunnel hostname for the VPS first, then run this on the VPS.
 curl -fsSL https://<your-worker-domain>/install-agent.sh | sudo bash -s -- \
   --repo https://github.com/<owner>/vps-agent-platform.git \
   --backend-id vps-la-01 \
+  --backend-name 'Los Angeles VPS' \
+  --control-plane-url https://<your-worker-domain> \
+  --public-url https://la-agent.example.com \
   --backend-token <token-printed-by-setup> \
   --redis-url 'rediss://default:<password>@<host>:<port>' \
   --tunnel-token <cloudflare-tunnel-token>
 ```
 
-The installer downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. A remotely managed Tunnel route must point the chosen hostname to `http://127.0.0.1:3100`.
+The installer downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. A remotely managed Tunnel route must point the chosen hostname to `http://127.0.0.1:3100`. After startup the Agent registers itself as **pending**; approve its request in the Web UI after the Tunnel health check succeeds.
 
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 
@@ -88,7 +91,7 @@ See [`docs/deployment.md`](docs/deployment.md) for the security/operations check
 
 ## Current implementation status
 
-The repository implements the v1 skeleton and the minimum VPS execution path: authenticated task admission, per-VPS queueing, SQLite task/command records, bounded Shell logs, cancellation, a five-node LangGraph flow, D1 registry/task/schedule APIs, Remote MCP tools, and a static management UI.
+The repository implements the v1 skeleton and the minimum VPS execution path: authenticated task admission, per-VPS queueing, SQLite task/command records, bounded Shell logs, cancellation, a five-node LangGraph flow, D1 registry/task/schedule APIs, Remote MCP tools, and a Svelte + Tailwind approval console. Tasks are created through MCP or schedules; the Web UI is reserved for Agent installation and registration approval.
 
 Two integration tasks are intentionally environment-specific:
 

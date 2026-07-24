@@ -29,7 +29,7 @@ As an alternative, pass `--cloudflare-account-id <id>` and
 form on a shared computer because the token may be kept in shell history and
 exposed in process arguments.
 
-Create a remotely managed Tunnel in the Cloudflare dashboard, copy its install token, and add a published route for each VPS hostname to `http://127.0.0.1:3100`. Then configure Cloudflare Access for the control-plane domain (`/` and `/api/*`).
+Create a remotely managed Tunnel in the Cloudflare dashboard, copy its install token, and add a published route for each VPS hostname to `http://127.0.0.1:3100`. Then configure Cloudflare Access for the control-plane domain (`/` and `/api/*`). The Agent uses the existing `BACKEND_SHARED_TOKEN` only to authenticate its self-registration request; the approval UI should never be exposed without Access protection.
 
 ## VPS Agent
 
@@ -39,12 +39,17 @@ Run the installer on the VPS:
 curl -fsSL https://<your-worker-domain>/install-agent.sh | sudo bash -s -- \
   --repo https://github.com/<owner>/vps-agent-platform.git \
   --backend-id vps-la-01 \
+  --backend-name 'Los Angeles VPS' \
+  --control-plane-url https://<your-worker-domain> \
+  --public-url https://agent.example.com \
   --backend-token <control-plane-token> \
   --redis-url 'rediss://default:<password>@<host>:<port>' \
   --tunnel-token <tunnel-token>
 ```
 
 Each Agent consumes only `agent-<BACKEND_ID>`, so all production nodes may share the same TLS Redis database. The installer keeps the HTTP API bound to loopback; do not open port 3100 in the host firewall.
+
+The Agent automatically posts a pending registration to the control plane after it starts, and retries every five minutes. In the Web UI, open **节点审批**, review the hostname/region/tags, and choose **批准并启用**. Approval performs an authenticated `/health` check; it will fail safely until the Tunnel route is reachable. The Web UI deliberately has no task-creation form: submit operational tasks through Remote MCP or schedules.
 
 `--allow-apt` is optional and grants `agent` passwordless `sudo apt-get`. Package maintainer scripts run as root, so treat this exactly like root access.
 
@@ -56,4 +61,4 @@ From the Worker or another trusted machine, call:
 curl -H "Authorization: Bearer $BACKEND_SHARED_TOKEN" https://agent.example.com/health
 ```
 
-Add the returned endpoint as a Backend in the Web UI. Then run a harmless Shell task such as `pwd && uname -a` with a known safe working directory.
+After the Agent appears in the approval queue and is approved, run a harmless Shell task such as `pwd && uname -a` through MCP with a known safe working directory.

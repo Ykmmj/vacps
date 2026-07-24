@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomBytes } from 'node:crypto';
-import { copyFile, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -38,7 +38,6 @@ if (!options.has('skip-login') && !hasCloudflareApiToken) {
 const databaseId = suppliedDatabaseId ?? (await createDatabase(databaseName));
 await updateDatabaseBinding(databaseId);
 await putSecret('BACKEND_SHARED_TOKEN', backendToken);
-await syncInstallerAsset();
 await run('pnpm', [
   '--filter',
   '@vps-agent/control-worker',
@@ -118,13 +117,6 @@ async function putSecret(name, value) {
     'pnpm',
     ['--filter', '@vps-agent/control-worker', 'exec', 'wrangler', 'secret', 'put', name],
     `${value}\n`,
-  );
-}
-
-async function syncInstallerAsset() {
-  await copyFile(
-    resolve(rootDirectory, 'scripts/install-agent.sh'),
-    resolve(rootDirectory, 'apps/control-worker/web/install-agent.sh'),
   );
 }
 
