@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vps-agent-control",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vps-agent-control",
+      "database_id": "replace-with-your-d1-database-id",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"],
+  },
+}

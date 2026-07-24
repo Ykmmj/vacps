@@ -1,0 +1,6 @@
+node_modules/
+dist/
+coverage/
+.wrangler/
+pnpm-lock.yaml
+cloudflare_mcp_bullmq_langgraph_vps_agent_requirements_v1.md

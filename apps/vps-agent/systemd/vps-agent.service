@@ -1,0 +1,21 @@
+[Unit]
+Description=VPS Agent Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/opt/vps-agent
+EnvironmentFile=/etc/vps-agent/vps-agent.env
+ExecStart=/usr/bin/node /opt/vps-agent/apps/vps-agent/dist/main.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/vps-agent
+
+[Install]
+WantedBy=multi-user.target

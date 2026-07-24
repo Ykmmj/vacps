@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VPS Agent Platform</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>VPS Agent Platform</h1>
+      <span id="notice" role="status"></span>
+    </header>
+    <main>
+      <section class="cards" id="totals"></section>
+      <section class="grid">
+        <article>
+          <h2>添加 Backend</h2>
+          <form id="backend-form">
+            <label
+              >Backend ID
+              <input name="id" pattern="[a-z0-9-]{1,64}" required placeholder="vps-la-01"
+            /></label>
+            <label>名称 <input name="name" required placeholder="Los Angeles VPS" /></label>
+            <label
+              >Base URL
+              <input name="baseUrl" type="url" required placeholder="https://la-agent.example.com"
+            /></label>
+            <label>区域 <input name="region" placeholder="us-west" /></label>
+            <label>标签（逗号分隔）<input name="tags" placeholder="production, full" /></label>
+            <button>测试并添加</button>
+          </form>
+        </article>
+        <article>
+          <h2>创建任务</h2>
+          <form id="task-form">
+            <label
+              >Backend
+              <select name="backendId" id="task-backend" required></select
+            ></label>
+            <label
+              >类型
+              <select name="type" id="task-type">
+                <option value="shell">Shell</option>
+                <option value="agent">Pi Agent</option>
+              </select></label
+            >
+            <label
+              ><span id="task-content-label">命令</span
+              ><textarea name="content" required placeholder="uname -a && uptime"></textarea>
+            </label>
+            <label>工作目录 <input name="cwd" value="/tmp" required /></label>
+            <label
+              >超时（秒）<input
+                name="timeoutSeconds"
+                type="number"
+                min="1"
+                max="86400"
+                value="300"
+                required
+            /></label>
+            <button>加入队列</button>
+          </form>
+        </article>
+      </section>
+      <section>
+        <div class="section-title">
+          <h2>Backends</h2>
+          <button class="secondary" id="refresh">刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>ID</th>
+                <th>区域</th>
+                <th>标签</th>
+                <th>启用</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="backends"></tbody>
+          </table>
+        </div>
+      </section>
+      <section>
+        <h2>最近任务</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Task ID</th>
+                <th>Backend</th>
+                <th>类型</th>
+                <th>摘要</th>
+                <th>状态</th>
+                <th>创建时间</th>
+              </tr>
+            </thead>
+            <tbody id="tasks"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
