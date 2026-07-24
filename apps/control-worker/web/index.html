@@ -3,95 +3,271 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VPS Agent Platform</title>
+    <meta name="theme-color" content="#070b16" />
+    <title>VPS Agent Control</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header>
-      <h1>VPS Agent Platform</h1>
-      <span id="notice" role="status"></span>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <header class="topbar">
+      <a class="brand" href="#overview" aria-label="VPS Agent Control 首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>VPS Agent <em>Control</em></span>
+      </a>
+      <nav aria-label="主导航">
+        <a class="active" href="#overview">概览</a>
+        <a href="#onboard">接入节点</a>
+        <a href="#operations">任务中心</a>
+      </nav>
+      <div class="connection-state" id="notice" role="status">
+        <span class="pulse"></span>正在连接控制平面
+      </div>
     </header>
+
     <main>
-      <section class="cards" id="totals"></section>
-      <section class="grid">
-        <article>
-          <h2>添加 Backend</h2>
-          <form id="backend-form">
-            <label
-              >Backend ID
-              <input name="id" pattern="[a-z0-9-]{1,64}" required placeholder="vps-la-01"
-            /></label>
-            <label>名称 <input name="name" required placeholder="Los Angeles VPS" /></label>
-            <label
-              >Base URL
-              <input name="baseUrl" type="url" required placeholder="https://la-agent.example.com"
-            /></label>
-            <label>区域 <input name="region" placeholder="us-west" /></label>
-            <label>标签（逗号分隔）<input name="tags" placeholder="production, full" /></label>
-            <button>测试并添加</button>
-          </form>
-        </article>
-        <article>
-          <h2>创建任务</h2>
-          <form id="task-form">
-            <label
-              >Backend
-              <select name="backendId" id="task-backend" required></select
-            ></label>
-            <label
-              >类型
-              <select name="type" id="task-type">
-                <option value="shell">Shell</option>
-                <option value="agent">Pi Agent</option>
-              </select></label
-            >
-            <label
-              ><span id="task-content-label">命令</span
-              ><textarea name="content" required placeholder="uname -a && uptime"></textarea>
-            </label>
-            <label>工作目录 <input name="cwd" value="/tmp" required /></label>
-            <label
-              >超时（秒）<input
-                name="timeoutSeconds"
-                type="number"
-                min="1"
-                max="86400"
-                value="300"
-                required
-            /></label>
-            <button>加入队列</button>
-          </form>
-        </article>
+      <section class="hero" id="overview">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="eyebrow-dot"></span>CONTROL PLANE · ONLINE</p>
+          <h1>让每台 VPS，成为<br /><span>可编排的 AI 执行节点。</span></h1>
+          <p class="hero-description">
+            统一调度 Shell 与 Agent
+            工作流，实时追踪每一个任务。先接入一台节点，再把复杂操作交给队列。
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#onboard">接入第一台 VPS <span>→</span></a>
+            <a class="button ghost" href="#operations">查看运行态</a>
+          </div>
+        </div>
+        <aside class="hero-terminal" aria-label="平台状态">
+          <div class="terminal-top">
+            <span></span><span></span><span></span><code>agent://control</code>
+          </div>
+          <div class="terminal-lines">
+            <p><b>✓</b> control plane online</p>
+            <p><b>✓</b> D1 registry connected</p>
+            <p><b>✓</b> scheduler every 5 minutes</p>
+            <p class="terminal-cursor"><span>›</span> waiting for a backend</p>
+          </div>
+        </aside>
       </section>
-      <section>
-        <div class="section-title">
-          <h2>Backends</h2>
-          <button class="secondary" id="refresh">刷新</button>
+
+      <section class="metrics" id="totals" aria-label="平台实时指标"></section>
+
+      <section class="security-note">
+        <span class="security-icon">✦</span>
+        <p>
+          <strong>上线前加一道保护。</strong> 请先为该域名配置 Cloudflare Access，再添加生产 Backend
+          或开放 MCP。
+        </p>
+        <a href="https://dash.cloudflare.com/" target="_blank" rel="noreferrer"
+          >打开 Cloudflare 控制台 ↗</a
+        >
+      </section>
+
+      <section class="onboarding panel" id="onboard">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">01 / NODE ONBOARDING</p>
+            <h2>接入一台 VPS</h2>
+            <p>填入节点信息，生成一条可直接在 VPS 执行的安装命令。</p>
+          </div>
+          <a class="script-link" id="installer-download" href="/install-agent.sh" download>
+            <span>↓</span> 下载 install-agent.sh
+          </a>
+        </div>
+
+        <div class="onboarding-grid">
+          <form class="install-form" id="installer-form">
+            <div class="field-row">
+              <label
+                >Backend ID<input
+                  id="install-backend-id"
+                  value="vps-la-01"
+                  pattern="[a-z0-9-]{1,64}"
+                  required
+              /></label>
+              <label>节点名称<input id="install-backend-name" value="Los Angeles VPS" /></label>
+            </div>
+            <label
+              >Redis TLS URL<input
+                id="install-redis-url"
+                autocomplete="off"
+                placeholder="rediss://default:password@host:port"
+            /></label>
+            <label
+              >Backend Shared Token<input
+                id="install-backend-token"
+                type="password"
+                autocomplete="off"
+                placeholder="部署 Worker 时输出的 BACKEND_SHARED_TOKEN"
+            /></label>
+            <label
+              >Cloudflare Tunnel Token <span class="optional">可选</span
+              ><input
+                id="install-tunnel-token"
+                type="password"
+                autocomplete="off"
+                placeholder="在 Tunnel 页面复制安装 Token"
+            /></label>
+            <details class="advanced-options">
+              <summary>高级选项</summary>
+              <label
+                >Git 仓库<input
+                  id="install-repo"
+                  value="https://github.com/Ykmmj/vps-agent-platform.git"
+              /></label>
+              <label class="checkbox"
+                ><input id="install-allow-apt" type="checkbox" />允许 Agent 通过 apt 安装系统包
+                <small>等同授予 root 能力</small></label
+              >
+            </details>
+          </form>
+
+          <div class="command-card">
+            <div class="command-heading">
+              <div><span class="live-dot"></span>INSTALL COMMAND</div>
+              <button
+                class="icon-button"
+                id="copy-install-command"
+                type="button"
+                title="复制安装命令"
+              >
+                复制
+              </button>
+            </div>
+            <pre id="install-command" aria-live="polite"></pre>
+            <p class="command-hint">
+              在目标 VPS 终端粘贴执行。凭据只在当前浏览器内生成命令，不会发送到控制平面。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace" id="operations">
+        <div class="workspace-heading">
+          <div>
+            <p class="eyebrow">02 / OPERATIONS</p>
+            <h2>运行中心</h2>
+          </div>
+          <button class="button compact ghost" id="refresh" type="button">
+            <span>↻</span> 刷新数据
+          </button>
+        </div>
+
+        <div class="operations-grid">
+          <article class="panel form-panel">
+            <div class="article-heading">
+              <span class="article-index">A</span>
+              <div>
+                <h3>注册 Backend</h3>
+                <p>通过 Tunnel URL 测试节点连通性。</p>
+              </div>
+            </div>
+            <form id="backend-form">
+              <label
+                >Backend ID<input
+                  name="id"
+                  pattern="[a-z0-9-]{1,64}"
+                  required
+                  placeholder="vps-la-01"
+              /></label>
+              <label>名称<input name="name" required placeholder="Los Angeles VPS" /></label>
+              <label
+                >Agent URL<input
+                  name="baseUrl"
+                  type="url"
+                  required
+                  placeholder="https://la-agent.example.com"
+              /></label>
+              <div class="field-row">
+                <label>区域<input name="region" placeholder="us-west" /></label
+                ><label>标签<input name="tags" placeholder="production, full" /></label>
+              </div>
+              <button class="button primary full" type="submit">
+                测试并添加 Backend <span>→</span>
+              </button>
+            </form>
+          </article>
+
+          <article class="panel form-panel task-panel">
+            <div class="article-heading">
+              <span class="article-index">B</span>
+              <div>
+                <h3>创建任务</h3>
+                <p>任务会被路由到对应节点的独立队列。</p>
+              </div>
+            </div>
+            <form id="task-form">
+              <div class="field-row">
+                <label>目标节点<select name="backendId" id="task-backend" required></select></label
+                ><label
+                  >执行类型<select name="type" id="task-type">
+                    <option value="shell">Shell</option>
+                    <option value="agent">Pi Agent</option>
+                  </select></label
+                >
+              </div>
+              <label
+                ><span id="task-content-label">命令</span
+                ><textarea name="content" required placeholder="uname -a && uptime"></textarea>
+              </label>
+              <div class="field-row">
+                <label>工作目录<input name="cwd" value="/tmp" required /></label
+                ><label
+                  >超时（秒）<input
+                    name="timeoutSeconds"
+                    type="number"
+                    min="1"
+                    max="86400"
+                    value="300"
+                    required
+                /></label>
+              </div>
+              <button class="button primary full" type="submit">加入执行队列 <span>→</span></button>
+            </form>
+          </article>
+        </div>
+      </section>
+
+      <section class="data-panel panel">
+        <div class="panel-heading inline-heading">
+          <div>
+            <p class="eyebrow">REGISTERED NODES</p>
+            <h2>Backends</h2>
+          </div>
+          <span class="table-count" id="backend-count">0 nodes</span>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>名称</th>
-                <th>ID</th>
-                <th>区域</th>
-                <th>标签</th>
-                <th>启用</th>
-                <th>操作</th>
+                <th>节点</th>
+                <th>节点 ID</th>
+                <th>区域 / 标签</th>
+                <th>状态</th>
+                <th class="action-column">操作</th>
               </tr>
             </thead>
             <tbody id="backends"></tbody>
           </table>
         </div>
       </section>
-      <section>
-        <h2>最近任务</h2>
+
+      <section class="data-panel panel">
+        <div class="panel-heading inline-heading">
+          <div>
+            <p class="eyebrow">ACTIVITY STREAM</p>
+            <h2>最近任务</h2>
+          </div>
+          <span class="table-count">最近 25 条</span>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Task ID</th>
-                <th>Backend</th>
+                <th>任务</th>
+                <th>节点</th>
                 <th>类型</th>
                 <th>摘要</th>
                 <th>状态</th>
@@ -102,7 +278,25 @@
           </table>
         </div>
       </section>
+
+      <section class="mcp-strip">
+        <div>
+          <p class="eyebrow">REMOTE MCP</p>
+          <h2>给你的 AI 客户端接入工具能力</h2>
+          <p>在 MCP 客户端中使用此端点，并通过 Cloudflare Access 保护访问。</p>
+        </div>
+        <div class="mcp-endpoint">
+          <code id="mcp-url"></code
+          ><button id="copy-mcp-url" class="icon-button" type="button">复制</button>
+        </div>
+      </section>
     </main>
+    <footer>
+      <span>VPS Agent Control · Cloudflare Worker + D1 + BullMQ</span
+      ><a href="https://github.com/Ykmmj/vps-agent-platform" target="_blank" rel="noreferrer"
+        >GitHub ↗</a
+      >
+    </footer>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
