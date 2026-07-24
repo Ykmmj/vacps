@@ -50,7 +50,7 @@ await run('pnpm', [
   databaseName,
   '--remote',
 ]);
-await run('pnpm', ['--filter', '@vps-agent/control-worker', 'deploy']);
+await run('pnpm', ['--filter', '@vps-agent/control-worker', 'run', 'deploy']);
 
 console.log('\nControl plane deployed successfully.');
 console.log(`D1 database ID: ${databaseId}`);
