@@ -101,13 +101,15 @@ function findDatabaseId(output) {
 async function updateDatabaseBinding(databaseId) {
   const configurationPath = resolve(rootDirectory, 'apps/control-worker/wrangler.jsonc');
   const configuration = await readFile(configurationPath, 'utf8');
+  const databaseIdMatch = configuration.match(/"database_id"\s*:\s*"([^"]+)"/);
+  if (!databaseIdMatch) {
+    throw new Error(`Could not update database_id in ${configurationPath}.`);
+  }
+  if (databaseIdMatch[1] === databaseId) return;
   const nextConfiguration = configuration.replace(
     /("database_id"\s*:\s*")[^"]+("\s*[,}])/,
     `$1${databaseId}$2`,
   );
-  if (nextConfiguration === configuration) {
-    throw new Error(`Could not update database_id in ${configurationPath}.`);
-  }
   await writeFile(configurationPath, nextConfiguration);
 }
 
