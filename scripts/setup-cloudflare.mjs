@@ -11,7 +11,8 @@ const options = parseOptions(process.argv.slice(2));
 const databaseName = options.get('database-name') ?? 'vps-agent-control';
 const suppliedToken = options.get('backend-token') ?? process.env.BACKEND_SHARED_TOKEN;
 const backendToken = suppliedToken ?? randomBytes(32).toString('hex');
-const suppliedDatabaseId = options.get('database-id') ?? process.env.D1_DATABASE_ID;
+const suppliedDatabaseId =
+  options.get('database-id') ?? process.env.D1_DATABASE_ID ?? (await configuredDatabaseId());
 const cloudflareApiToken = options.get('cloudflare-api-token') ?? process.env.CLOUDFLARE_API_TOKEN;
 const cloudflareAccountId =
   options.get('cloudflare-account-id') ?? process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -138,6 +139,13 @@ async function updateDatabaseBinding(databaseId) {
     `$1${databaseId}$2`,
   );
   await writeFile(configurationPath, nextConfiguration);
+}
+
+async function configuredDatabaseId() {
+  const configurationPath = resolve(rootDirectory, 'apps/control-worker/wrangler.jsonc');
+  const configuration = await readFile(configurationPath, 'utf8');
+  const candidate = configuration.match(/"database_id"\s*:\s*"([^"]+)"/)?.[1];
+  return candidate && isUuid(candidate) ? candidate : undefined;
 }
 
 async function putSecret(name, value) {
