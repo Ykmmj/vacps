@@ -126,19 +126,26 @@ install_node_lts() {
   ln -sfn "/usr/local/lib/nodejs/$node_version/bin/node" /usr/local/bin/node
   ln -sfn "/usr/local/lib/nodejs/$node_version/bin/npm" /usr/local/bin/npm
   ln -sfn "/usr/local/lib/nodejs/$node_version/bin/npx" /usr/local/bin/npx
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/corepack" /usr/local/bin/corepack
   rm -f "$manifest" "/tmp/$node_file"
 }
 
 if ! command -v node >/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
   install_node_lts
 fi
-if ! command -v corepack >/dev/null; then
-  echo 'Corepack is required to install pnpm. Reinstall Node.js with Corepack enabled, then retry.' >&2
-  exit 1
-fi
+install_pnpm() {
+  local installed_version
+  installed_version=$(pnpm --version 2>/dev/null || true)
+  if [[ $installed_version == 10.14.0 ]]; then return; fi
+  echo 'Installing pnpm 10.14.0...'
+  npm install --global --force pnpm@10.14.0
+  installed_version=$(pnpm --version)
+  if [[ $installed_version != 10.14.0 ]]; then
+    echo "Expected pnpm 10.14.0, found $installed_version." >&2
+    exit 1
+  fi
+}
 
-corepack enable
+install_pnpm
 git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
 cd "$APP_DIRECTORY"
 pnpm install --frozen-lockfile

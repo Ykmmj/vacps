@@ -23,7 +23,7 @@ Cloudflare does not connect to Redis or execute Shell commands. A task UUID is c
 ## Prerequisites
 
 - Node.js 22.14 or later (use an active LTS release; native SQLite prebuilds are published for LTS versions)
-- pnpm 10 or later (`corepack enable` and `corepack prepare pnpm@10.14.0 --activate`)
+- pnpm 10.14.0 or later (the VPS installer installs pnpm 10.14.0 automatically when needed)
 - A Redis instance reachable from each VPS. Use TLS (`rediss://`) whenever traffic crosses a public or untrusted network; a non-TLS `redis://` endpoint must be private and firewall-restricted.
 - A Cloudflare account with Workers, D1, Access, and (recommended) Tunnel
 - A Pi adapter that implements the included NDJSON protocol
