@@ -107,7 +107,8 @@
       quickTunnelNotice: '地址会在 cloudflared 重连后变化，Agent 会自动重新注册。',
       nodeName: '节点名称（可选）',
       tags: '标签（逗号分隔）',
-      redisUrl: 'Redis TLS URL',
+      redisUrl: 'Redis URL（推荐 TLS）',
+      redisUrlHint: '优先使用 rediss://；仅在 Redis 位于私有或受限网络时使用 redis://。',
       registrationSecret: '注册密钥',
       registrationSecretHint:
         '与 Cloudflare Worker 保存的密钥相同，仅用于 Agent 发起注册。网页不会保存它。',
@@ -178,7 +179,9 @@
         'The URL may change after cloudflared reconnects; the Agent re-registers automatically.',
       nodeName: 'Node name (optional)',
       tags: 'Tags (comma-separated)',
-      redisUrl: 'Redis TLS URL',
+      redisUrl: 'Redis URL (TLS preferred)',
+      redisUrlHint:
+        'Prefer rediss://. Use redis:// only when Redis is on a private or restricted network.',
       registrationSecret: 'Registration secret',
       registrationSecretHint:
         'The same secret stored in the Cloudflare Worker. It only authorizes agent registration and is never saved by this page.',
@@ -403,7 +406,7 @@
       `  --repo ${shellQuote(repositoryUrl)} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
       `  --backend-token ${shellQuote(registrationSecret || '<REGISTRATION_SECRET>')} \\`,
-      `  --redis-url ${shellQuote(redisUrl || '<REDIS_TLS_URL>')}`,
+      `  --redis-url ${shellQuote(redisUrl || '<REDIS_URL>')}`,
     ];
     if (tunnelMode === 'managed' && provision) {
       lines[lines.length - 1] += ' \\';
@@ -933,7 +936,9 @@
                 type="password"
                 autocomplete="off"
                 placeholder="rediss://default:password@host:port"
-              /></label
+              /><span class="text-[11px] font-normal leading-4 text-zinc-400"
+                >{text.redisUrlHint}</span
+              ></label
             ><label class="field-label sm:col-span-2"
               >{text.registrationSecret}<input
                 bind:value={installRegistrationSecret}

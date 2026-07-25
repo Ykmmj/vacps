@@ -19,12 +19,12 @@ ALLOW_APT=false
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash install-agent.sh --repo <git-url> --backend-token <token> --redis-url <rediss-url> --control-plane-url <url> (--public-url <url> | --quick-tunnel) [options]
+Usage: sudo bash install-agent.sh --repo <git-url> --backend-token <token> --redis-url <redis-url> --control-plane-url <url> (--public-url <url> | --quick-tunnel) [options]
 
 Required:
   --repo <git-url>          Git repository containing this project.
   --backend-token <token>   Registration secret configured in the Cloudflare Worker.
-  --redis-url <url>         Redis Cloud TLS URL: rediss://default:password@host:port.
+  --redis-url <url>         Redis URL: prefer rediss://; redis:// is allowed only on a private/restricted network.
   --control-plane-url <url> Worker URL used for self-registration.
   --public-url <url>        Stable Agent URL. Required for managed/manual Tunnel mode.
   --quick-tunnel            Create a temporary trycloudflare.com URL automatically.
@@ -67,9 +67,12 @@ if [[ -z $REPOSITORY_URL || -z $BACKEND_TOKEN || -z $REDIS_URL || -z $CONTROL_PL
   usage >&2
   exit 2
 fi
-if [[ $REDIS_URL != rediss://* ]]; then
-  echo 'Production Redis URL must use rediss://.' >&2
+if [[ $REDIS_URL != redis://* && $REDIS_URL != rediss://* ]]; then
+  echo 'Redis URL must use redis:// or rediss://.' >&2
   exit 2
+fi
+if [[ $REDIS_URL == redis://* ]]; then
+  echo 'Warning: redis:// is plaintext. Use it only when Redis is private/restricted and never exposed to the public Internet.' >&2
 fi
 if [[ $CONTROL_PLANE_URL != https://* ]]; then
   echo 'Control-plane URL must use HTTPS.' >&2
