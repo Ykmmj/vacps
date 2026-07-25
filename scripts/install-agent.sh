@@ -211,11 +211,19 @@ normalize_repository_url() {
 
 install_nvm_node
 if [[ -e $APP_DIRECTORY ]]; then
-  if [[ ! -d $APP_DIRECTORY/.git || ! -f $ENVIRONMENT_FILE || ! -f /etc/systemd/system/vps-agent.service ]]; then
+  if [[ ! -d $APP_DIRECTORY/.git ||
+    ! -f $APP_DIRECTORY/apps/vps-agent/package.json ||
+    ! -f $APP_DIRECTORY/apps/vps-agent/systemd/vps-agent.service ||
+    ! -f $APP_DIRECTORY/packages/contracts/package.json ||
+    ! -f $ENVIRONMENT_FILE ||
+    ! -f /etc/systemd/system/vps-agent.service ]]; then
     echo "$APP_DIRECTORY exists but is not a resumable VPS Agent installation; refusing to overwrite it." >&2
     exit 1
   fi
-  EXISTING_REPOSITORY_URL=$(git -C "$APP_DIRECTORY" remote get-url origin 2>/dev/null || true)
+  # The checkout is owned by the unprivileged service user after installation.
+  # Reading its config file directly avoids Git's safe.directory rejection when
+  # this root-run installer resumes a partially completed installation.
+  EXISTING_REPOSITORY_URL=$(git config --file "$APP_DIRECTORY/.git/config" --get remote.origin.url 2>/dev/null || true)
   NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
   NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
   if [[ -z $EXISTING_REPOSITORY_URL || $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
