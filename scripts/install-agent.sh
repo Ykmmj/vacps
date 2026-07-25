@@ -220,16 +220,19 @@ if [[ -e $APP_DIRECTORY ]]; then
     echo "$APP_DIRECTORY exists but is not a resumable VPS Agent installation; refusing to overwrite it." >&2
     exit 1
   fi
-  EXISTING_REPOSITORY_URL=$(git -C "$APP_DIRECTORY" remote get-url origin 2>/dev/null || true)
+  # The checkout is owned by the unprivileged service user after installation.
+  # Reading its config file directly avoids Git's safe.directory rejection when
+  # this root-run installer resumes a partially completed installation.
+  EXISTING_REPOSITORY_URL=$(git config --file "$APP_DIRECTORY/.git/config" --get remote.origin.url 2>/dev/null || true)
   NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
   NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
   if [[ -z $EXISTING_REPOSITORY_URL || $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
-    echo "Warning: $APP_DIRECTORY uses a different Git origin, possibly because of a mirror or proxy." >&2
-    echo 'Continuing with the verified existing VPS Agent checkout without fetching or overwriting it.' >&2
+    echo "$APP_DIRECTORY belongs to a different Git repository; refusing to overwrite it." >&2
     if [[ $NORMALIZED_EXISTING_REPOSITORY_URL == github.com/* && $NORMALIZED_REQUESTED_REPOSITORY_URL == github.com/* ]]; then
       echo "Existing repository: $NORMALIZED_EXISTING_REPOSITORY_URL" >&2
       echo "Requested repository: $NORMALIZED_REQUESTED_REPOSITORY_URL" >&2
     fi
+    exit 1
   fi
   EXISTING_BACKEND_ID=$(sed -n 's/^BACKEND_ID=//p' "$ENVIRONMENT_FILE" | head -n 1)
   if [[ -z $EXISTING_BACKEND_ID || ! $EXISTING_BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
