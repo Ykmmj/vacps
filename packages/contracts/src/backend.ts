@@ -11,7 +11,6 @@ export const backendSchema = z.object({
     .string()
     .url()
     .transform((value) => value.replace(/\/$/, '')),
-  region: z.string().trim().min(1).max(80).optional(),
   tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
   enabled: z.boolean().default(true),
   createdAt: z.string().datetime(),
@@ -30,7 +29,6 @@ export const registerBackendSchema = z.object({
     .string()
     .url()
     .transform((value) => value.replace(/\/$/, '')),
-  region: z.string().trim().min(1).max(80).optional(),
   tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
   agentVersion: z.string().trim().min(1).max(48).default('unknown'),
 });
@@ -42,6 +40,8 @@ export const backendRegistrationSchema = registerBackendSchema.extend({
   updatedAt: z.string().datetime(),
   decisionAt: z.string().datetime().optional(),
   rejectionReason: z.string().max(500).optional(),
+  ip: z.string().ip().optional(),
+  location: z.string().trim().min(1).max(180).optional(),
 });
 
 export type Backend = z.infer<typeof backendSchema>;
@@ -59,4 +59,11 @@ export interface BackendHealth {
   worker: { running: boolean; concurrency: number };
   redis: { connected: boolean };
   pi: { available: boolean; version?: string };
+}
+
+export interface BackendMetrics {
+  cpu: { usagePercent: number; load1: number; cores: number };
+  memory: { totalBytes: number; usedBytes: number };
+  disk: { totalBytes: number; usedBytes: number };
+  queue: { waiting: number; active: number; failed: number };
 }

@@ -1,4 +1,9 @@
-import type { Backend, BackendHealth } from '@vps-agent/contracts';
+import type {
+  Backend,
+  BackendHealth,
+  BackendMetrics,
+  BackendStatusResponse,
+} from '@vps-agent/contracts';
 
 import { AppError } from '../lib/http.js';
 
@@ -9,12 +14,15 @@ export class BackendClient {
     return this.request(backend, '/health', { method: 'GET' }) as Promise<BackendHealth>;
   }
 
-  async status(backend: Pick<Backend, 'baseUrl'>): Promise<unknown> {
+  async status(backend: Pick<Backend, 'baseUrl'>): Promise<BackendStatusResponse> {
     const [health, metrics] = await Promise.all([
       this.request(backend, '/health', { method: 'GET' }),
       this.request(backend, '/metrics', { method: 'GET' }),
     ]);
-    return { health, metrics };
+    return {
+      health: health as BackendHealth,
+      ...(metrics ? { metrics: metrics as BackendMetrics } : {}),
+    };
   }
 
   async createTask(backend: Pick<Backend, 'baseUrl'>, task: unknown): Promise<unknown> {

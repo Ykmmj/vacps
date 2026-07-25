@@ -57,7 +57,6 @@ The equivalent parameter form is `pnpm setup:cloudflare -- --cloudflare-account-
 # Create a Tunnel hostname for the VPS first, then run this on the VPS.
 curl -fsSL https://<your-worker-domain>/install-agent.sh | sudo bash -s -- \
   --repo https://github.com/<owner>/vps-agent-platform.git \
-  --backend-id vps-la-01 \
   --backend-name 'Los Angeles VPS' \
   --control-plane-url https://<your-worker-domain> \
   --public-url https://la-agent.example.com \
@@ -66,7 +65,7 @@ curl -fsSL https://<your-worker-domain>/install-agent.sh | sudo bash -s -- \
   --tunnel-token <cloudflare-tunnel-token>
 ```
 
-The installer downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. A remotely managed Tunnel route must point the chosen hostname to `http://127.0.0.1:3100`. After startup the Agent registers itself as **pending**; approve its request in the Web UI after the Tunnel health check succeeds.
+The installer generates its node ID automatically, downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. A remotely managed Tunnel route must point the chosen hostname to `http://127.0.0.1:3100`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
 
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 

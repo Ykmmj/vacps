@@ -2,12 +2,13 @@
   import { onMount } from 'svelte';
 
   type RegistrationStatus = 'pending' | 'approved' | 'rejected';
+  type Locale = 'zh-CN' | 'en';
+  type Theme = 'light' | 'dark';
 
   interface Backend {
     id: string;
     name: string;
     baseUrl: string;
-    region?: string;
     tags: string[];
     enabled: boolean;
   }
@@ -17,7 +18,6 @@
     backendId: string;
     name: string;
     baseUrl: string;
-    region?: string;
     tags: string[];
     agentVersion: string;
     status: RegistrationStatus;
@@ -25,6 +25,25 @@
     updatedAt: string;
     decisionAt?: string;
     rejectionReason?: string;
+    ip?: string;
+    location?: string;
+  }
+
+  interface NodeStatus {
+    health: { ok: boolean; uptimeSeconds: number; redis: { connected: boolean } };
+    metrics?: {
+      cpu: { usagePercent?: number; load1?: number; cores?: number };
+      memory: { totalBytes: number; usedBytes: number };
+      queue: { waiting: number; active: number; failed: number };
+    };
+  }
+
+  interface Node {
+    registration: Registration;
+    backend?: Backend;
+    status?: NodeStatus;
+    online: boolean;
+    checkedAt: string;
   }
 
   interface Dashboard {
@@ -36,37 +55,172 @@
       schedules: number;
       pendingRegistrations: number;
     };
-    backends: Backend[];
-    pendingRegistrations: Registration[];
+    nodes: Node[];
   }
+
+  const copy = {
+    'zh-CN': {
+      nodes: '节点',
+      install: '安装 Agent',
+      refresh: '刷新',
+      light: '浅色',
+      dark: '深色',
+      language: 'English',
+      nodeCount: '个节点',
+      pending: '待审批',
+      approved: '已批准',
+      rejected: '已拒绝',
+      online: '在线',
+      offline: '离线',
+      ip: '公网 IP',
+      location: '归属地',
+      cpu: 'CPU',
+      memory: '内存',
+      checked: '刚刚检查',
+      unavailable: '暂不可用',
+      approve: '批准接入',
+      reject: '拒绝',
+      actions: '节点操作',
+      test: '健康检查',
+      remove: '移除节点',
+      noNodes: '尚无节点',
+      noNodesHint: '在 VPS 执行安装命令后，节点会自动出现在这里。',
+      all: '全部',
+      installer: '安装命令',
+      nodeName: '节点名称（可选）',
+      publicUrl: '公开 Agent URL',
+      tags: '标签（逗号分隔）',
+      redisUrl: 'Redis TLS URL',
+      registrationSecret: '注册密钥',
+      registrationSecretHint:
+        '与 Cloudflare Worker 保存的密钥相同，仅用于 Agent 发起注册。网页不会保存它。',
+      tunnelToken: 'Cloudflare Tunnel Token（可选）',
+      allowApt: '允许 Agent 安装 apt 软件包',
+      allowAptHint: '包维护脚本可以 root 权限运行，仅在明确需要时启用。',
+      copy: '复制命令',
+      download: '下载脚本',
+      copied: '安装命令已复制',
+      syncOk: '已同步',
+      syncFailed: '同步失败：',
+      approveOk: '已批准并启用',
+      approveFailed: '审批未完成：',
+      rejectOk: '已拒绝',
+      rejectFailed: '拒绝操作失败：',
+      testOk: '健康检查通过',
+      testFailed: '节点不可达：',
+      removeOk: '已从控制平面移除',
+      removeFailed: '移除失败：',
+      confirmRemove: '确定移除该节点？此操作不会卸载 VPS 上的 Agent。',
+      rejectPrompt: '可选：填写拒绝原因。Agent 下次注册会再次进入待审批状态。',
+      autoId: '节点 ID 会由安装器自动随机生成。',
+      setupTunnel: '公开地址需在 Cloudflare Tunnel 中路由至 http://127.0.0.1:3100。',
+      runOnVps: '在 VPS 执行',
+      noTask: '任务通过 MCP 或计划工作流提交。',
+      mcpCopied: 'MCP 地址已复制',
+      backToNodes: '返回节点',
+    },
+    en: {
+      nodes: 'Nodes',
+      install: 'Install agent',
+      refresh: 'Refresh',
+      light: 'Light',
+      dark: 'Dark',
+      language: '中文',
+      nodeCount: 'nodes',
+      pending: 'Pending',
+      approved: 'Approved',
+      rejected: 'Rejected',
+      online: 'Online',
+      offline: 'Offline',
+      ip: 'Public IP',
+      location: 'Location',
+      cpu: 'CPU',
+      memory: 'Memory',
+      checked: 'Just checked',
+      unavailable: 'Unavailable',
+      approve: 'Approve',
+      reject: 'Reject',
+      actions: 'Node actions',
+      test: 'Health check',
+      remove: 'Remove node',
+      noNodes: 'No nodes yet',
+      noNodesHint: 'Run the install command on a VPS and its card will appear here.',
+      all: 'All',
+      installer: 'Install command',
+      nodeName: 'Node name (optional)',
+      publicUrl: 'Public agent URL',
+      tags: 'Tags (comma-separated)',
+      redisUrl: 'Redis TLS URL',
+      registrationSecret: 'Registration secret',
+      registrationSecretHint:
+        'The same secret stored in the Cloudflare Worker. It only authorizes agent registration and is never saved by this page.',
+      tunnelToken: 'Cloudflare Tunnel token (optional)',
+      allowApt: 'Allow agent to install apt packages',
+      allowAptHint: 'Package maintainer scripts may run as root. Enable only when needed.',
+      copy: 'Copy command',
+      download: 'Download script',
+      copied: 'Install command copied',
+      syncOk: 'Synchronized',
+      syncFailed: 'Sync failed: ',
+      approveOk: 'Approved and enabled',
+      approveFailed: 'Approval failed: ',
+      rejectOk: 'Rejected',
+      rejectFailed: 'Reject failed: ',
+      testOk: 'Health check passed',
+      testFailed: 'Node unreachable: ',
+      removeOk: 'Removed from the control plane',
+      removeFailed: 'Removal failed: ',
+      confirmRemove: 'Remove this node? This will not uninstall the agent on the VPS.',
+      rejectPrompt:
+        'Optional: add a rejection reason. The next registration request will return to pending.',
+      autoId: 'The installer generates a random node ID automatically.',
+      setupTunnel: 'Route this public URL to http://127.0.0.1:3100 with Cloudflare Tunnel.',
+      runOnVps: 'Run on the VPS',
+      noTask: 'Tasks are submitted through MCP or schedules.',
+      mcpCopied: 'MCP endpoint copied',
+      backToNodes: 'Back to nodes',
+    },
+  } as const;
 
   const origin = window.location.origin;
   const repositoryUrl = 'https://github.com/Ykmmj/vps-agent-platform.git';
 
   let dashboard: Dashboard | undefined;
-  let registrations: Registration[] = [];
   let loading = true;
-  let notice = '正在同步控制平面…';
+  let notice = '';
   let noticeTone: 'default' | 'error' | 'success' = 'default';
   let activeView: 'fleet' | 'install' = 'fleet';
-  let registrationFilter: 'pending' | 'all' = 'pending';
+  let filter: RegistrationStatus | 'all' = 'all';
   let actingId: string | undefined;
+  let locale: Locale = 'zh-CN';
+  let theme: Theme = 'light';
 
-  let installBackendId = 'vps-la-01';
-  let installBackendName = 'Los Angeles VPS';
+  let installBackendName = '';
   let installPublicUrl = 'https://agent.example.com';
-  let installRegion = 'us-west';
   let installTags = 'production,full';
   let installRedisUrl = '';
-  let installBackendToken = '';
+  let installRegistrationSecret = '';
   let installTunnelToken = '';
   let installAllowApt = false;
 
-  $: pendingRegistrations = registrations.filter(
-    (registration) => registration.status === 'pending',
+  $: text = copy[locale];
+  $: visibleNodes = (dashboard?.nodes ?? []).filter(
+    (node) => filter === 'all' || node.registration.status === filter,
   );
-  $: visibleRegistrations = registrationFilter === 'pending' ? pendingRegistrations : registrations;
   $: installCommand = buildInstallCommand();
+
+  onMount(() => {
+    const savedLocale = localStorage.getItem('vps-agent-locale');
+    if (savedLocale === 'zh-CN' || savedLocale === 'en') locale = savedLocale;
+    const savedTheme = localStorage.getItem('vps-agent-theme');
+    theme =
+      savedTheme === 'dark' ||
+      (savedTheme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)
+        ? 'dark'
+        : 'light';
+    applyTheme();
+    void refresh();
+  });
 
   async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
@@ -93,99 +247,110 @@
   async function refresh() {
     loading = true;
     try {
-      const [nextDashboard, nextRegistrations] = await Promise.all([
-        api<Dashboard>('/api/dashboard'),
-        api<Registration[]>('/api/registrations'),
-      ]);
-      dashboard = nextDashboard;
-      registrations = nextRegistrations;
-      setNotice('控制平面已同步', 'success');
+      dashboard = await api<Dashboard>('/api/dashboard');
+      setNotice(text.syncOk, 'success');
     } catch (error) {
-      setNotice(`同步失败：${messageOf(error)}`, 'error');
+      setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
     } finally {
       loading = false;
     }
   }
 
-  async function approve(registration: Registration) {
-    actingId = registration.id;
+  async function approve(node: Node) {
+    actingId = node.registration.id;
     try {
-      await api(`/api/registrations/${registration.id}/approve`, { method: 'POST' });
-      setNotice(`${registration.name} 已获批准并启用`, 'success');
+      await api(`/api/registrations/${node.registration.id}/approve`, { method: 'POST' });
+      setNotice(`${node.registration.name} ${text.approveOk}`, 'success');
       await refresh();
     } catch (error) {
-      setNotice(`审批未完成：${messageOf(error)}`, 'error');
+      setNotice(`${text.approveFailed}${messageOf(error)}`, 'error');
     } finally {
       actingId = undefined;
     }
   }
 
-  async function reject(registration: Registration) {
-    const reason = window.prompt('可选：填写拒绝原因，Agent 下次注册会重新进入待审批状态。');
+  async function reject(node: Node) {
+    const reason = window.prompt(text.rejectPrompt);
     if (reason === null) return;
-    actingId = registration.id;
+    actingId = node.registration.id;
     try {
-      await api(`/api/registrations/${registration.id}/reject`, {
+      await api(`/api/registrations/${node.registration.id}/reject`, {
         method: 'POST',
         body: JSON.stringify({ reason: reason.trim() || undefined }),
       });
-      setNotice(`${registration.name} 已被拒绝`, 'default');
+      setNotice(`${node.registration.name} ${text.rejectOk}`);
       await refresh();
     } catch (error) {
-      setNotice(`拒绝操作失败：${messageOf(error)}`, 'error');
+      setNotice(`${text.rejectFailed}${messageOf(error)}`, 'error');
     } finally {
       actingId = undefined;
     }
   }
 
-  async function testBackend(backend: Backend) {
-    actingId = backend.id;
+  async function testBackend(node: Node) {
+    if (!node.backend) return;
+    actingId = node.backend.id;
     try {
-      await api(`/api/backends/${backend.id}/test`, { method: 'POST' });
-      setNotice(`${backend.name} 健康检查通过`, 'success');
+      await api(`/api/backends/${node.backend.id}/test`, { method: 'POST' });
+      setNotice(`${node.registration.name} ${text.testOk}`, 'success');
+      await refresh();
     } catch (error) {
-      setNotice(`节点不可达：${messageOf(error)}`, 'error');
+      setNotice(`${text.testFailed}${messageOf(error)}`, 'error');
     } finally {
       actingId = undefined;
     }
   }
 
-  async function deleteBackend(backend: Backend) {
-    if (!window.confirm(`确定移除 ${backend.name}？此操作不会卸载 VPS 上的 Agent。`)) return;
-    actingId = backend.id;
+  async function deleteBackend(node: Node) {
+    if (!node.backend || !window.confirm(text.confirmRemove)) return;
+    actingId = node.backend.id;
     try {
-      await api(`/api/backends/${backend.id}`, { method: 'DELETE' });
-      setNotice(`${backend.name} 已从控制平面移除`, 'default');
+      await api(`/api/backends/${node.backend.id}`, { method: 'DELETE' });
+      setNotice(`${node.registration.name} ${text.removeOk}`);
       await refresh();
     } catch (error) {
-      setNotice(`移除失败：${messageOf(error)}`, 'error');
+      setNotice(`${text.removeFailed}${messageOf(error)}`, 'error');
     } finally {
       actingId = undefined;
     }
+  }
+
+  function toggleTheme() {
+    theme = theme === 'light' ? 'dark' : 'light';
+    localStorage.setItem('vps-agent-theme', theme);
+    applyTheme();
+  }
+
+  function applyTheme() {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+  }
+
+  function toggleLocale() {
+    locale = locale === 'zh-CN' ? 'en' : 'zh-CN';
+    localStorage.setItem('vps-agent-locale', locale);
+    void refresh();
   }
 
   function buildInstallCommand() {
     const lines = [
       `curl -fsSL ${origin}/install-agent.sh | sudo bash -s -- \\`,
       `  --repo ${shellQuote(repositoryUrl)} \\`,
-      `  --backend-id ${shellQuote(installBackendId || 'vps-la-01')} \\`,
-      `  --backend-name ${shellQuote(installBackendName || installBackendId || 'VPS Agent')} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
       `  --public-url ${shellQuote(installPublicUrl || 'https://agent.example.com')} \\`,
-      `  --backend-token ${shellQuote(installBackendToken || '<BACKEND_SHARED_TOKEN>')} \\`,
+      `  --backend-token ${shellQuote(installRegistrationSecret || '<REGISTRATION_SECRET>')} \\`,
       `  --redis-url ${shellQuote(installRedisUrl || '<REDIS_TLS_URL>')}`,
     ];
-    if (installRegion) {
+    if (installBackendName.trim()) {
       lines[lines.length - 1] += ' \\';
-      lines.push(`  --region ${shellQuote(installRegion)}`);
+      lines.push(`  --backend-name ${shellQuote(installBackendName.trim())}`);
     }
-    if (installTags) {
+    if (installTags.trim()) {
       lines[lines.length - 1] += ' \\';
-      lines.push(`  --tags ${shellQuote(installTags)}`);
+      lines.push(`  --tags ${shellQuote(installTags.trim())}`);
     }
-    if (installTunnelToken) {
+    if (installTunnelToken.trim()) {
       lines[lines.length - 1] += ' \\';
-      lines.push(`  --tunnel-token ${shellQuote(installTunnelToken)}`);
+      lines.push(`  --tunnel-token ${shellQuote(installTunnelToken.trim())}`);
     }
     if (installAllowApt) {
       lines[lines.length - 1] += ' \\';
@@ -194,21 +359,50 @@
     return lines.join('\n');
   }
 
-  async function copy(text: string, successMessage: string) {
+  async function copyToClipboard(value: string, success: string) {
     try {
-      await navigator.clipboard.writeText(text);
-      setNotice(successMessage, 'success');
+      await navigator.clipboard.writeText(value);
+      setNotice(success, 'success');
     } catch {
-      setNotice('无法访问剪贴板，请手动复制。', 'error');
+      setNotice('Clipboard access is unavailable.', 'error');
     }
   }
 
   function shellQuote(value: string) {
-    return `'${value.replaceAll("'", "'\\''")}'`;
+    return `'${value.replaceAll("'", "'\\\\''")}'`;
+  }
+
+  function bytes(value: number | undefined) {
+    if (!value) return '—';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+    return `${(value / 1024 ** exponent).toFixed(exponent > 2 ? 1 : 0)} ${units[exponent]}`;
+  }
+
+  function memoryPercent(node: Node) {
+    const memory = node.status?.metrics?.memory;
+    return memory && memory.totalBytes > 0
+      ? Math.round((memory.usedBytes / memory.totalBytes) * 100)
+      : undefined;
+  }
+
+  function cpuValue(node: Node) {
+    const cpu = node.status?.metrics?.cpu;
+    if (!cpu) return '—';
+    if (typeof cpu.usagePercent === 'number') return `${cpu.usagePercent}%`;
+    return typeof cpu.load1 === 'number' ? `load ${cpu.load1}` : '—';
+  }
+
+  function statusLabel(status: RegistrationStatus) {
+    return status === 'pending'
+      ? text.pending
+      : status === 'approved'
+        ? text.approved
+        : text.rejected;
   }
 
   function displayDate(value: string) {
-    return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(
+    return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(
       new Date(value),
     );
   }
@@ -216,351 +410,424 @@
   function messageOf(error: unknown) {
     return error instanceof Error ? error.message : String(error);
   }
-
-  function registrationIconClasses(status: RegistrationStatus) {
-    return status === 'pending'
-      ? 'bg-amber-50 text-amber-600'
-      : status === 'approved'
-        ? 'bg-emerald-50 text-emerald-600'
-        : 'bg-rose-50 text-rose-600';
-  }
-
-  function registrationBadgeClasses(status: RegistrationStatus) {
-    return status === 'pending'
-      ? 'bg-amber-100 text-amber-700'
-      : status === 'approved'
-        ? 'bg-emerald-100 text-emerald-700'
-        : 'bg-rose-100 text-rose-700';
-  }
-
-  onMount(() => void refresh());
 </script>
 
 <svelte:head>
   <title>VPS Agent Control</title>
+  <meta name="theme-color" content={theme === 'dark' ? '#09090b' : '#f5f5f7'} />
 </svelte:head>
 
-<div class="min-h-screen bg-[#f5f5f7] text-[#1d1d1f] apple-grid">
-  <header class="sticky top-0 z-20 border-b border-black/[.055] bg-white/80 backdrop-blur-xl">
-    <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-5 lg:px-8">
-      <button class="flex items-center gap-3 text-left" onclick={() => (activeView = 'fleet')}>
+<div
+  class="min-h-screen bg-[#f5f5f7] text-[#1d1d1f] transition-colors dark:bg-[#09090b] dark:text-zinc-100"
+>
+  <header
+    class="sticky top-0 z-30 border-b border-black/[.055] bg-white/75 backdrop-blur-2xl dark:border-white/[.07] dark:bg-zinc-950/75"
+  >
+    <div
+      class="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8"
+    >
+      <button class="flex items-center gap-2.5 text-left" onclick={() => (activeView = 'fleet')}>
         <span
-          class="grid h-8 w-8 place-items-center rounded-[11px] bg-[#1d1d1f] text-sm font-bold text-white"
-          >V</span
+          class="grid h-9 w-9 place-items-center rounded-xl bg-[#0071e3] text-white shadow-lg shadow-blue-500/20"
         >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="h-5 w-5"
+            aria-hidden="true"
+            ><circle cx="6" cy="6" r="2" /><circle cx="18" cy="7" r="2" /><circle
+              cx="12"
+              cy="18"
+              r="2"
+            /><path d="m7.7 7.1 2.8 8.1M16.2 8.4l-2.7 7.2M8 6.3l8 .5" /></svg
+          >
+        </span>
         <span
           ><strong class="block text-sm tracking-[-.02em]">VPS Agent</strong><span
-            class="block text-[10px] font-medium tracking-[.12em] text-zinc-400">CONTROL PLANE</span
+            class="block text-[10px] font-semibold tracking-[.13em] text-zinc-400">CONTROL</span
           ></span
         >
       </button>
-      <div
-        class="hidden items-center gap-2 rounded-full border border-black/[.055] bg-zinc-100 p-1 sm:flex"
+
+      <nav
+        class="hidden items-center rounded-full bg-zinc-100 p-1 dark:bg-zinc-800 sm:flex"
+        aria-label="Primary navigation"
       >
         <button
           class:!bg-white={activeView === 'fleet'}
           class:shadow-sm={activeView === 'fleet'}
-          class="rounded-full px-4 py-1.5 text-xs font-semibold text-zinc-600 transition"
-          onclick={() => (activeView = 'fleet')}>节点审批</button
+          class="rounded-full px-4 py-1.5 text-xs font-semibold text-zinc-600 transition dark:text-zinc-300 dark:!bg-zinc-700"
+          onclick={() => (activeView = 'fleet')}>{text.nodes}</button
         >
         <button
           class:!bg-white={activeView === 'install'}
           class:shadow-sm={activeView === 'install'}
-          class="rounded-full px-4 py-1.5 text-xs font-semibold text-zinc-600 transition"
-          onclick={() => (activeView = 'install')}>安装 Agent</button
+          class="rounded-full px-4 py-1.5 text-xs font-semibold text-zinc-600 transition dark:text-zinc-300 dark:!bg-zinc-700"
+          onclick={() => (activeView = 'install')}>{text.install}</button
         >
-      </div>
-      <div class="flex items-center gap-2 text-xs font-medium">
-        <span
-          class="h-2 w-2 rounded-full"
-          class:bg-emerald-500={noticeTone !== 'error'}
-          class:bg-rose-500={noticeTone === 'error'}
-        ></span>
-        <span class="hidden text-zinc-500 md:inline">{notice}</span>
+      </nav>
+
+      <div class="flex items-center gap-1.5">
         <button
-          class="rounded-full bg-zinc-100 px-3 py-1.5 text-zinc-600 transition hover:bg-zinc-200"
+          class="icon-button"
+          title={text.language}
+          aria-label={text.language}
+          onclick={toggleLocale}
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            class="h-4 w-4"
+            aria-hidden="true"
+            ><circle cx="12" cy="12" r="9" /><path
+              d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"
+            /></svg
+          ></button
+        >
+        <button
+          class="icon-button"
+          title={theme === 'dark' ? text.light : text.dark}
+          aria-label={theme === 'dark' ? text.light : text.dark}
+          onclick={toggleTheme}
+          >{#if theme === 'dark'}<svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              class="h-4 w-4"
+              aria-hidden="true"
+              ><circle cx="12" cy="12" r="3.5" /><path
+                d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+              /></svg
+            >{:else}<svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              class="h-4 w-4"
+              aria-hidden="true"
+              ><path d="M20.6 15.6A8.5 8.5 0 0 1 8.4 3.4 8.5 8.5 0 1 0 20.6 15.6Z" /></svg
+            >{/if}</button
+        >
+        <button
+          class="icon-button"
+          title={text.refresh}
+          aria-label={text.refresh}
           onclick={refresh}
-          disabled={loading}>刷新</button
+          disabled={loading}
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            class:animate-spin={loading}
+            class="h-4 w-4"
+            aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.3M20 4v7h-7" /></svg
+          ></button
         >
       </div>
     </div>
   </header>
 
-  <main class="mx-auto max-w-7xl px-5 py-8 lg:px-8 lg:py-11">
+  <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
     {#if activeView === 'fleet'}
-      <section class="mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <p class="mb-2 text-xs font-bold tracking-[.15em] text-[#0071e3]">FLEET OPERATIONS</p>
-          <h1 class="text-4xl font-semibold tracking-[-.055em] text-[#1d1d1f] sm:text-5xl">
-            审批每一次节点接入。
-          </h1>
-          <p class="mt-3 max-w-2xl text-sm leading-6 text-zinc-500">
-            VPS 安装完成后会自行发起注册；只有在这里审批且健康检查通过，节点才会进入 AI 调度网络。
-          </p>
-        </div>
-        <button
-          class="inline-flex items-center justify-center rounded-full bg-[#0071e3] px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:bg-[#0077ed]"
-          onclick={() => (activeView = 'install')}
-          >安装新的 Agent <span class="ml-2 text-lg leading-none">+</span></button
-        >
-      </section>
-
-      <section class="mb-7 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <article class="surface-shadow rounded-[24px] bg-white p-5">
-          <p class="text-xs font-medium text-zinc-500">待审批请求</p>
-          <p class="mt-3 text-4xl font-semibold tracking-[-.06em]">
-            {dashboard?.totals.pendingRegistrations ?? '—'}
-          </p>
-          <p class="mt-2 text-xs text-amber-600">需要你的确认</p>
-        </article>
-        <article class="surface-shadow rounded-[24px] bg-white p-5">
-          <p class="text-xs font-medium text-zinc-500">已启用节点</p>
-          <p class="mt-3 text-4xl font-semibold tracking-[-.06em]">
-            {dashboard?.totals.enabledBackends ?? '—'}
-          </p>
-          <p class="mt-2 text-xs text-emerald-600">可接收 MCP 任务</p>
-        </article>
-        <article class="surface-shadow rounded-[24px] bg-white p-5">
-          <p class="text-xs font-medium text-zinc-500">运行中的工作流</p>
-          <p class="mt-3 text-4xl font-semibold tracking-[-.06em]">
-            {dashboard?.totals.active ?? '—'}
-          </p>
-          <p class="mt-2 text-xs text-zinc-400">由 MCP 或计划触发</p>
-        </article>
-        <article class="surface-shadow rounded-[24px] bg-[#1d1d1f] p-5 text-white">
-          <p class="text-xs font-medium text-zinc-400">安全提示</p>
-          <p class="mt-3 text-base font-semibold tracking-[-.02em]">先保护，再审批。</p>
-          <a
-            class="mt-2 inline-block text-xs text-blue-300 hover:text-blue-200"
-            href="https://dash.cloudflare.com/"
-            target="_blank"
-            rel="noreferrer">为此域名配置 Cloudflare Access ↗</a
+      <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <h1 class="text-2xl font-semibold tracking-[-.045em]">{text.nodes}</h1>
+          <span
+            class="rounded-full bg-zinc-200 px-2.5 py-1 text-xs font-semibold text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+            >{dashboard?.nodes.length ?? 0} {text.nodeCount}</span
           >
-        </article>
-      </section>
-
-      <section class="surface-shadow overflow-hidden rounded-[28px] bg-white">
-        <div
-          class="flex flex-col gap-4 border-b border-zinc-100 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-7"
-        >
-          <div>
-            <h2 class="text-xl font-semibold tracking-[-.04em]">注册审批队列</h2>
-            <p class="mt-1 text-xs text-zinc-500">审批时将验证 Tunnel 地址与 Agent 身份。</p>
-          </div>
-          <div class="flex rounded-full bg-zinc-100 p-1 text-xs font-semibold">
-            <button
-              class:!bg-white={registrationFilter === 'pending'}
-              class:shadow-sm={registrationFilter === 'pending'}
-              class="rounded-full px-3 py-1.5 text-zinc-600"
-              onclick={() => (registrationFilter = 'pending')}
-              >待处理 {pendingRegistrations.length}</button
-            ><button
-              class:!bg-white={registrationFilter === 'all'}
-              class:shadow-sm={registrationFilter === 'all'}
-              class="rounded-full px-3 py-1.5 text-zinc-600"
-              onclick={() => (registrationFilter = 'all')}>全部</button
-            >
-          </div>
         </div>
-        <div class="divide-y divide-zinc-100">
-          {#if loading && !dashboard}
-            <div class="p-10 text-center text-sm text-zinc-400">正在读取注册请求…</div>
-          {:else if visibleRegistrations.length === 0}
-            <div class="p-10 text-center">
-              <div
-                class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-zinc-100 text-xl"
+        <div class="flex items-center gap-2">
+          <div class="hidden rounded-full bg-zinc-100 p-1 dark:bg-zinc-800 sm:flex">
+            {#each ['all', 'pending', 'approved', 'rejected'] as option}
+              <button
+                class:!bg-white={filter === option}
+                class:shadow-sm={filter === option}
+                class="rounded-full px-3 py-1.5 text-xs font-semibold text-zinc-500 transition dark:text-zinc-400 dark:!bg-zinc-700"
+                onclick={() => (filter = option as RegistrationStatus | 'all')}
+                >{option === 'all' ? text.all : statusLabel(option as RegistrationStatus)}</button
               >
-                ✓
-              </div>
-              <p class="mt-3 text-sm font-semibold">
-                {registrationFilter === 'pending' ? '没有待审批的节点' : '尚无注册记录'}
-              </p>
-              <p class="mt-1 text-xs text-zinc-500">
-                在右上角生成安装命令，VPS 启动后会自动出现在这里。
-              </p>
-            </div>
-          {:else}
-            {#each visibleRegistrations as registration}
-              <article
-                class="flex flex-col gap-5 p-5 sm:p-7 lg:flex-row lg:items-center lg:justify-between"
-              >
-                <div class="flex min-w-0 gap-4">
-                  <div
-                    class={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ${registrationIconClasses(registration.status)}`}
-                  >
-                    {registration.status === 'pending'
-                      ? '↗'
-                      : registration.status === 'approved'
-                        ? '✓'
-                        : '×'}
-                  </div>
-                  <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <h3 class="font-semibold tracking-[-.02em]">{registration.name}</h3>
-                      <span
-                        class={`rounded-full px-2 py-0.5 text-[10px] font-bold ${registrationBadgeClasses(registration.status)}`}
-                        >{registration.status === 'pending'
-                          ? '待审批'
-                          : registration.status === 'approved'
-                            ? '已批准'
-                            : '已拒绝'}</span
-                      >
-                    </div>
-                    <p class="mt-1 truncate font-mono text-xs text-zinc-500">
-                      {registration.baseUrl}
-                    </p>
-                    <div class="mt-2 flex flex-wrap gap-1.5">
-                      <span
-                        class="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500"
-                        >{registration.backendId}</span
-                      >{#if registration.region}<span
-                          class="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500"
-                          >{registration.region}</span
-                        >{/if}{#each registration.tags as tag}<span
-                          class="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600"
-                          >{tag}</span
-                        >{/each}
-                    </div>
-                    <p class="mt-2 text-[11px] text-zinc-400">
-                      请求于 {displayDate(registration.requestedAt)} · Agent {registration.agentVersion}
-                    </p>
-                    {#if registration.rejectionReason}<p class="mt-2 text-xs text-rose-600">
-                        拒绝原因：{registration.rejectionReason}
-                      </p>{/if}
-                  </div>
-                </div>
-                {#if registration.status === 'pending'}
-                  <div class="flex shrink-0 gap-2">
-                    <button
-                      class="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50"
-                      onclick={() => reject(registration)}
-                      disabled={actingId === registration.id}>拒绝</button
-                    ><button
-                      class="rounded-full bg-[#0071e3] px-4 py-2 text-xs font-semibold text-white shadow-md shadow-blue-500/20 hover:bg-[#0077ed] disabled:opacity-50"
-                      onclick={() => approve(registration)}
-                      disabled={actingId === registration.id}
-                      >{actingId === registration.id ? '验证中…' : '批准并启用'}</button
+            {/each}
+          </div>
+          <button class="primary-button" onclick={() => (activeView = 'install')}
+            ><svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              class="h-4 w-4"
+              aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg
+            ><span class="hidden sm:inline">{text.install}</span></button
+          >
+        </div>
+      </div>
+
+      {#if loading && !dashboard}
+        <div class="grid min-h-80 place-items-center text-sm text-zinc-400">Loading nodes…</div>
+      {:else if visibleNodes.length === 0}
+        <section class="surface-card grid min-h-80 place-items-center p-8 text-center">
+          <div>
+            <span
+              class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-50 text-[#0071e3] dark:bg-blue-500/10"
+              ><svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                class="h-6 w-6"
+                aria-hidden="true"><path d="M5 19V5m0 7h14m-5-5 5 5-5 5" /></svg
+              ></span
+            >
+            <p class="mt-4 font-semibold">{text.noNodes}</p>
+            <p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{text.noNodesHint}</p>
+          </div>
+        </section>
+      {:else}
+        <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {#each visibleNodes as node (node.registration.id)}
+            <article class="surface-card group flex min-h-92 flex-col p-5 sm:p-6">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span
+                      class:status-online={node.online}
+                      class:status-offline={!node.online}
+                      class="status-dot"
+                    ></span>
+                    <h2 class="truncate text-base font-semibold tracking-[-.025em]">
+                      {node.registration.name}
+                    </h2>
+                    <span class={`status-badge ${node.registration.status}`}
+                      >{statusLabel(node.registration.status)}</span
                     >
                   </div>
-                {/if}
-              </article>
-            {/each}
-          {/if}
-        </div>
-      </section>
+                  <p class="mt-1 truncate font-mono text-[11px] text-zinc-400">
+                    {node.registration.backendId}
+                  </p>
+                </div>
+                <span
+                  class={`rounded-full px-2 py-1 text-[10px] font-bold ${node.online ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800'}`}
+                  >{node.online ? text.online : text.offline}</span
+                >
+              </div>
 
-      <section class="surface-shadow mt-6 overflow-hidden rounded-[28px] bg-white">
-        <div class="flex items-center justify-between border-b border-zinc-100 px-5 py-5 sm:px-7">
-          <div>
-            <h2 class="text-xl font-semibold tracking-[-.04em]">已启用节点</h2>
-            <p class="mt-1 text-xs text-zinc-500">
-              任务只通过 MCP 或计划工作流提交，WebUI 不直接创建任务。
-            </p>
-          </div>
-          <span class="rounded-full bg-zinc-100 px-3 py-1 text-xs font-semibold text-zinc-500"
-            >{dashboard?.backends.length ?? 0} nodes</span
-          >
-        </div>
-        <div class="overflow-x-auto">
-          <table class="w-full min-w-175 text-left">
-            <thead class="bg-zinc-50 text-[10px] font-bold tracking-[.1em] text-zinc-400"
-              ><tr
-                ><th class="px-5 py-3 sm:px-7">节点</th><th class="px-5 py-3">端点</th><th
-                  class="px-5 py-3">区域 / 标签</th
-                ><th class="px-5 py-3 text-right sm:px-7">操作</th></tr
-              ></thead
-            ><tbody class="divide-y divide-zinc-100"
-              >{#if dashboard?.backends.length}{#each dashboard.backends as backend}<tr
-                    ><td class="px-5 py-4 sm:px-7"
-                      ><p class="text-sm font-semibold">{backend.name}</p>
-                      <p class="mt-1 font-mono text-[11px] text-zinc-400">{backend.id}</p></td
-                    ><td class="max-w-64 truncate px-5 py-4 font-mono text-xs text-zinc-500"
-                      >{backend.baseUrl}</td
-                    ><td class="px-5 py-4"
-                      ><div class="flex flex-wrap gap-1.5">
-                        {#if backend.region}<span
-                            class="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500"
-                            >{backend.region}</span
-                          >{/if}{#each backend.tags as tag}<span
-                            class="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600"
-                            >{tag}</span
-                          >{/each}
-                      </div></td
-                    ><td class="px-5 py-4 text-right sm:px-7"
-                      ><button
-                        class="mr-2 rounded-full px-3 py-1.5 text-xs font-semibold text-zinc-600 hover:bg-zinc-100"
-                        onclick={() => testBackend(backend)}
-                        disabled={actingId === backend.id}>测试</button
-                      ><button
-                        class="rounded-full px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50"
-                        onclick={() => deleteBackend(backend)}
-                        disabled={actingId === backend.id}>移除</button
-                      ></td
-                    ></tr
-                  >{/each}{:else}<tr
-                  ><td class="px-5 py-9 text-center text-sm text-zinc-400" colspan="4"
-                    >批准第一个注册请求后，节点会出现在这里。</td
-                  ></tr
-                >{/if}</tbody
-            >
-          </table>
-        </div>
-      </section>
-    {:else}
-      <section class="mb-8">
-        <p class="mb-2 text-xs font-bold tracking-[.15em] text-[#0071e3]">AGENT INSTALLER</p>
-        <h1 class="text-4xl font-semibold tracking-[-.055em] sm:text-5xl">生成一条安装命令。</h1>
-        <p class="mt-3 max-w-2xl text-sm leading-6 text-zinc-500">
-          安装器会把节点注册到当前控制平面；安装成功后回到审批队列确认接入。这里不会提交或保存你的
-          Token。
-        </p>
-      </section>
-      <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(420px,.9fr)]">
-        <section class="surface-shadow rounded-[28px] bg-white p-5 sm:p-7">
-          <div class="mb-6 flex items-start gap-3">
-            <span
-              class="grid h-9 w-9 shrink-0 place-items-center rounded-2xl bg-blue-50 text-sm font-bold text-[#0071e3]"
-              >1</span
-            >
-            <div>
-              <h2 class="text-lg font-semibold tracking-[-.03em]">准备节点信息</h2>
-              <p class="mt-1 text-xs leading-5 text-zinc-500">
-                请先在 Cloudflare Tunnel 中创建公开主机名，并路由到 <code
-                  class="rounded bg-zinc-100 px-1 py-0.5">http://127.0.0.1:3100</code
-                >。
+              <div class="mt-5 grid grid-cols-2 gap-2.5">
+                <div class="metric">
+                  <span class="metric-label"
+                    ><svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      class="h-3.5 w-3.5"
+                      aria-hidden="true"
+                      ><path d="M12 21s7-5.2 7-12A7 7 0 0 0 5 9c0 6.8 7 12 7 12Z" /><circle
+                        cx="12"
+                        cy="9"
+                        r="2"
+                      /></svg
+                    >{text.ip}</span
+                  ><strong class="truncate font-mono text-xs">{node.registration.ip ?? '—'}</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label"
+                    ><svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      class="h-3.5 w-3.5"
+                      aria-hidden="true"
+                      ><circle cx="12" cy="12" r="8" /><path
+                        d="M4 12h16M12 4c2 2.2 3 5 3 8s-1 5.8-3 8c-2-2.2-3-5-3-8s1-5.8 3-8Z"
+                      /></svg
+                    >{text.location}</span
+                  ><strong class="truncate text-xs">{node.registration.location ?? '—'}</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label"
+                    ><svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      class="h-3.5 w-3.5"
+                      aria-hidden="true"
+                      ><rect x="7" y="7" width="10" height="10" rx="1" /><path
+                        d="M9 2v5m6-5v5M9 17v5m6-5v5M2 9h5m10 0h5M2 15h5m10 0h5"
+                      /></svg
+                    >{text.cpu}</span
+                  ><strong class="text-xs">{cpuValue(node)}</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label"
+                    ><svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      class="h-3.5 w-3.5"
+                      aria-hidden="true"
+                      ><rect x="5" y="4" width="14" height="16" rx="2" /><path
+                        d="M9 8h6m-6 4h6m-6 4h3"
+                      /></svg
+                    >{text.memory}</span
+                  ><strong class="text-xs"
+                    >{#if memoryPercent(node) !== undefined}{memoryPercent(node)}%
+                      <span class="font-normal text-zinc-400"
+                        >{bytes(node.status?.metrics?.memory.usedBytes)}</span
+                      >{:else}—{/if}</strong
+                  >
+                </div>
+              </div>
+
+              <div class="mt-3 flex flex-wrap gap-1.5">
+                {#each node.registration.tags as tag}<span
+                    class="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:bg-blue-500/10 dark:text-blue-300"
+                    >{tag}</span
+                  >{/each}
+              </div>
+              <p class="mt-3 truncate text-[11px] text-zinc-400">
+                {node.status
+                  ? `${text.checked} · ${displayDate(node.checkedAt)}`
+                  : text.unavailable}
               </p>
-            </div>
-          </div>
+
+              <div
+                class="mt-auto flex items-center justify-between gap-2 border-t border-zinc-100 pt-4 dark:border-white/[.07]"
+              >
+                <span class="truncate text-[11px] text-zinc-400">{node.registration.baseUrl}</span>
+                <div class="flex shrink-0 items-center gap-1.5">
+                  {#if node.registration.status === 'pending'}
+                    <button
+                      class="icon-action success"
+                      title={text.approve}
+                      aria-label={text.approve}
+                      onclick={() => approve(node)}
+                      disabled={actingId === node.registration.id}
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2.2"
+                        class="h-4 w-4"
+                        aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg
+                      ></button
+                    >
+                    <button
+                      class="icon-action danger"
+                      title={text.reject}
+                      aria-label={text.reject}
+                      onclick={() => reject(node)}
+                      disabled={actingId === node.registration.id}
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        class="h-4 w-4"
+                        aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg
+                      ></button
+                    >
+                  {:else if node.backend}
+                    <button
+                      class="icon-action"
+                      title={text.test}
+                      aria-label={text.test}
+                      onclick={() => testBackend(node)}
+                      disabled={actingId === node.backend.id}
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.9"
+                        class="h-4 w-4"
+                        aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.3M20 4v7h-7" /></svg
+                      ></button
+                    >
+                    <details class="relative">
+                      <summary
+                        class="icon-action list-none"
+                        title={text.actions}
+                        aria-label={text.actions}
+                        ><svg
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          class="h-4 w-4"
+                          aria-hidden="true"
+                          ><circle cx="5" cy="12" r="1.5" /><circle
+                            cx="12"
+                            cy="12"
+                            r="1.5"
+                          /><circle cx="19" cy="12" r="1.5" /></svg
+                        ></summary
+                      >
+                      <div class="action-menu">
+                        <button
+                          class="text-rose-600 dark:text-rose-300"
+                          onclick={() => deleteBackend(node)}>{text.remove}</button
+                        >
+                      </div>
+                    </details>
+                  {/if}
+                </div>
+              </div>
+            </article>
+          {/each}
+        </section>
+      {/if}
+    {:else}
+      <section class="mb-5 flex items-center justify-between gap-3">
+        <div>
+          <h1 class="text-2xl font-semibold tracking-[-.045em]">{text.installer}</h1>
+          <p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{text.autoId}</p>
+        </div>
+        <button
+          class="icon-button"
+          title={text.backToNodes}
+          aria-label={text.backToNodes}
+          onclick={() => (activeView = 'fleet')}
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            class="h-4 w-4"
+            aria-hidden="true"><path d="m14 5-7 7 7 7M7 12h12" /></svg
+          ></button
+        >
+      </section>
+      <div class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(390px,.9fr)]">
+        <section class="surface-card p-5 sm:p-7">
+          <p class="mb-5 text-sm text-zinc-500 dark:text-zinc-400">{text.setupTunnel}</p>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="field-label"
-              >Backend ID<input
-                bind:value={installBackendId}
+              >{text.nodeName}<input
+                bind:value={installBackendName}
                 class="field-input"
-                pattern="[a-z0-9-]+"
+                autocomplete="off"
+                placeholder="web-01"
               /></label
             ><label class="field-label"
-              >显示名称<input bind:value={installBackendName} class="field-input" /></label
-            ><label class="field-label sm:col-span-2"
-              >公开 Agent URL<input
-                bind:value={installPublicUrl}
-                class="field-input"
-                type="url"
-                placeholder="https://agent.example.com"
-              /></label
-            ><label class="field-label"
-              >区域<input
-                bind:value={installRegion}
-                class="field-input"
-                placeholder="us-west"
-              /></label
-            ><label class="field-label"
-              >标签（逗号分隔）<input
+              >{text.tags}<input
                 bind:value={installTags}
                 class="field-input"
                 placeholder="production,full"
               /></label
             ><label class="field-label sm:col-span-2"
-              >Redis TLS URL<input
+              >{text.publicUrl}<input
+                bind:value={installPublicUrl}
+                class="field-input"
+                type="url"
+                placeholder="https://agent.example.com"
+              /></label
+            ><label class="field-label sm:col-span-2"
+              >{text.redisUrl}<input
                 bind:value={installRedisUrl}
                 class="field-input"
                 type="password"
@@ -568,64 +835,57 @@
                 placeholder="rediss://default:password@host:port"
               /></label
             ><label class="field-label sm:col-span-2"
-              >Backend Shared Token<input
-                bind:value={installBackendToken}
+              >{text.registrationSecret}<input
+                bind:value={installRegistrationSecret}
                 class="field-input"
                 type="password"
                 autocomplete="off"
-                placeholder="Cloudflare 部署输出的 BACKEND_SHARED_TOKEN"
-              /></label
+                placeholder="<REGISTRATION_SECRET>"
+              /><span class="text-[11px] font-normal leading-4 text-zinc-400"
+                >{text.registrationSecretHint}</span
+              ></label
             ><label class="field-label sm:col-span-2"
-              >Cloudflare Tunnel Token <span class="font-normal text-zinc-400">可选</span><input
+              >{text.tunnelToken}<input
                 bind:value={installTunnelToken}
                 class="field-input"
                 type="password"
                 autocomplete="off"
-                placeholder="从 Tunnel 页面复制安装 Token"
+                placeholder="eyJh..."
               /></label
             >
           </div>
           <label
-            class="mt-5 flex cursor-pointer items-start gap-3 rounded-2xl bg-rose-50 px-4 py-3 text-xs text-rose-700"
+            class="mt-5 flex cursor-pointer items-start gap-3 rounded-2xl bg-rose-50 px-4 py-3 text-xs text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
             ><input
               bind:checked={installAllowApt}
               class="mt-0.5 h-4 w-4 accent-rose-600"
               type="checkbox"
-            /><span
-              ><strong>允许 Agent 安装 apt 软件包</strong><br />这会允许包维护脚本以 root
-              权限运行，仅在明确需要时启用。</span
-            ></label
+            /><span><strong>{text.allowApt}</strong><br />{text.allowAptHint}</span></label
           >
         </section>
-        <aside class="surface-shadow overflow-hidden rounded-[28px] bg-[#1d1d1f] text-white">
+        <aside
+          class="overflow-hidden rounded-[28px] bg-[#161617] text-white shadow-[0_18px_44px_rgba(0,0,0,.18)]"
+        >
           <div class="flex items-center justify-between border-b border-white/10 px-5 py-4">
             <div>
-              <p class="text-[10px] font-bold tracking-[.14em] text-blue-300">02 / RUN ON VPS</p>
-              <p class="mt-1 text-sm font-semibold">安装并等待审批</p>
+              <p class="text-[10px] font-bold tracking-[.14em] text-blue-300">RUN ON VPS</p>
+              <p class="mt-1 text-sm font-semibold">{text.installer}</p>
             </div>
             <button
-              class="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/15"
-              onclick={() => copy(installCommand, '安装命令已复制')}>复制命令</button
+              class="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/15"
+              onclick={() => copyToClipboard(installCommand, text.copied)}>{text.copy}</button
             >
           </div>
           <pre
-            class="max-h-110 overflow-auto p-5 font-mono text-xs leading-6 text-zinc-200">{installCommand}</pre>
-          <div class="border-t border-white/10 p-5">
-            <a
-              class="inline-flex items-center rounded-full bg-white px-4 py-2 text-xs font-bold text-[#1d1d1f] hover:bg-zinc-100"
+            class="max-h-125 overflow-auto p-5 font-mono text-xs leading-6 text-zinc-200">{installCommand}</pre>
+          <div
+            class="flex items-center justify-between border-t border-white/10 px-5 py-4 text-xs text-zinc-400"
+          >
+            <span>{text.noTask}</span><a
+              class="rounded-full bg-white px-3 py-1.5 font-semibold text-zinc-900 hover:bg-zinc-100"
               href="/install-agent.sh"
-              download>下载 install-agent.sh <span class="ml-2">↓</span></a
+              download>{text.download}</a
             >
-            <ol class="mt-5 space-y-3 text-xs leading-5 text-zinc-400">
-              <li><span class="mr-2 text-blue-300">01</span>在目标 VPS 粘贴并执行上方命令。</li>
-              <li>
-                <span class="mr-2 text-blue-300">02</span>Agent 启动后会自动向
-                <code class="text-zinc-200">{origin}/api/registrations</code> 发起注册。
-              </li>
-              <li>
-                <span class="mr-2 text-blue-300">03</span>返回“节点审批”，验证 URL 后批准接入。
-              </li>
-            </ol>
           </div>
         </aside>
       </div>
@@ -633,17 +893,18 @@
   </main>
 
   <footer
-    class="mx-auto flex max-w-7xl flex-col gap-2 px-5 pb-8 text-xs text-zinc-400 sm:flex-row sm:items-center sm:justify-between lg:px-8"
+    class="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 pb-7 text-xs text-zinc-400 sm:px-6 lg:px-8"
   >
-    <span>VPS Agent Control · Cloudflare Worker + D1 + BullMQ</span>
+    <span>VPS Agent · Cloudflare Worker + D1 + BullMQ</span>
     <div class="flex gap-4">
-      <button class="hover:text-zinc-600" onclick={() => copy(`${origin}/mcp`, 'MCP 地址已复制')}
-        >复制 MCP 地址</button
+      <button
+        class="hover:text-zinc-700 dark:hover:text-zinc-200"
+        onclick={() => copyToClipboard(`${origin}/mcp`, text.mcpCopied)}>MCP</button
       ><a
-        class="hover:text-zinc-600"
+        class="hover:text-zinc-700 dark:hover:text-zinc-200"
         href="https://github.com/Ykmmj/vps-agent-platform"
         target="_blank"
-        rel="noreferrer">GitHub ↗</a
+        rel="noreferrer">GitHub</a
       >
     </div>
   </footer>

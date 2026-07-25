@@ -8,7 +8,7 @@ From a development machine with `pnpm install` complete, run:
 pnpm setup:cloudflare
 ```
 
-It logs in to Cloudflare, creates D1, updates the local D1 binding, stores `BACKEND_SHARED_TOKEN`, applies migrations, and deploys the Worker. Save the generated token: every v1 Agent needs the same value.
+It logs in to Cloudflare, creates D1, updates the local D1 binding, stores `BACKEND_SHARED_TOKEN`, applies migrations, and deploys the Worker. Save the generated value as the **registration secret**: every v1 Agent needs the same value to authenticate its registration request.
 
 If the browser reports that the `localhost:8976` OAuth callback is unavailable,
 use a Cloudflare API Token instead. Create a custom Account token scoped to the
@@ -29,7 +29,7 @@ As an alternative, pass `--cloudflare-account-id <id>` and
 form on a shared computer because the token may be kept in shell history and
 exposed in process arguments.
 
-Create a remotely managed Tunnel in the Cloudflare dashboard, copy its install token, and add a published route for each VPS hostname to `http://127.0.0.1:3100`. Then configure Cloudflare Access for the control-plane domain (`/` and `/api/*`). The Agent uses the existing `BACKEND_SHARED_TOKEN` only to authenticate its self-registration request; the approval UI should never be exposed without Access protection.
+Create a remotely managed Tunnel in the Cloudflare dashboard, copy its install token, and add a published route for each VPS hostname to `http://127.0.0.1:3100`. Then configure Cloudflare Access for the control-plane domain (`/` and `/api/*`). The registration secret (`BACKEND_SHARED_TOKEN` in the Worker configuration) only authenticates Agent-to-control-plane and control-plane-to-Agent requests; the approval UI should never be exposed without Access protection.
 
 ## VPS Agent
 
@@ -38,7 +38,6 @@ Run the installer on the VPS:
 ```bash
 curl -fsSL https://<your-worker-domain>/install-agent.sh | sudo bash -s -- \
   --repo https://github.com/<owner>/vps-agent-platform.git \
-  --backend-id vps-la-01 \
   --backend-name 'Los Angeles VPS' \
   --control-plane-url https://<your-worker-domain> \
   --public-url https://agent.example.com \
@@ -47,9 +46,9 @@ curl -fsSL https://<your-worker-domain>/install-agent.sh | sudo bash -s -- \
   --tunnel-token <tunnel-token>
 ```
 
-Each Agent consumes only `agent-<BACKEND_ID>`, so all production nodes may share the same TLS Redis database. The installer keeps the HTTP API bound to loopback; do not open port 3100 in the host firewall.
+The installer generates a random `BACKEND_ID`; each Agent consumes only `agent-<BACKEND_ID>`, so all production nodes may share the same TLS Redis database. The installer keeps the HTTP API bound to loopback; do not open port 3100 in the host firewall.
 
-The Agent automatically posts a pending registration to the control plane after it starts, and retries every five minutes. In the Web UI, open **节点审批**, review the hostname/region/tags, and choose **批准并启用**. Approval performs an authenticated `/health` check; it will fail safely until the Tunnel route is reachable. The Web UI deliberately has no task-creation form: submit operational tasks through Remote MCP or schedules.
+The Agent automatically posts a pending registration to the control plane after it starts, and retries every five minutes. Cloudflare records the request IP and its geographic metadata, then shows the node as a card with live CPU, memory, connectivity, and approval state. Approval runs authenticated health and metrics checks; it will fail safely until the Tunnel route is reachable. The Web UI deliberately has no task-creation form: submit operational tasks through Remote MCP or schedules.
 
 `--allow-apt` is optional and grants `agent` passwordless `sudo apt-get`. Package maintainer scripts run as root, so treat this exactly like root access.
 

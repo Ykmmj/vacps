@@ -9,7 +9,6 @@ REPOSITORY_REF=main
 BACKEND_ID=''
 BACKEND_TOKEN=''
 BACKEND_NAME=''
-BACKEND_REGION=''
 BACKEND_TAGS=''
 REDIS_URL=''
 TUNNEL_TOKEN=''
@@ -19,19 +18,17 @@ ALLOW_APT=false
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash install-agent.sh --repo <git-url> --backend-id <id> --backend-token <token> --redis-url <rediss-url> --control-plane-url <url> --public-url <url> [options]
+Usage: sudo bash install-agent.sh --repo <git-url> --backend-token <token> --redis-url <rediss-url> --control-plane-url <url> --public-url <url> [options]
 
 Required:
   --repo <git-url>          Git repository containing this project.
-  --backend-id <slug>       Unique ID, such as vps-la-01.
-  --backend-token <token>   Same token configured in the Cloudflare Worker.
+  --backend-token <token>   Registration secret configured in the Cloudflare Worker.
   --redis-url <url>         Redis Cloud TLS URL: rediss://default:password@host:port.
   --control-plane-url <url> Worker URL used for self-registration.
   --public-url <url>        Public Agent URL routed to this VPS by Cloudflare Tunnel.
 
 Optional:
-  --backend-name <name>     Display name for the approval queue; defaults to Backend ID.
-  --region <region>         Region label, such as us-west.
+  --backend-name <name>     Display name for the node card; defaults to this VPS hostname.
   --tags <csv>              Comma-separated tags, such as production,full.
   --tunnel-token <token>    Remotely managed Cloudflare Tunnel token.
   --ref <git-ref>           Git branch/tag, default: main.
@@ -42,10 +39,8 @@ EOF
 while (($#)); do
   case "$1" in
     --repo) REPOSITORY_URL=${2:?missing value for --repo}; shift 2 ;;
-    --backend-id) BACKEND_ID=${2:?missing value for --backend-id}; shift 2 ;;
     --backend-token) BACKEND_TOKEN=${2:?missing value for --backend-token}; shift 2 ;;
     --backend-name) BACKEND_NAME=${2:?missing value for --backend-name}; shift 2 ;;
-    --region) BACKEND_REGION=${2:?missing value for --region}; shift 2 ;;
     --tags) BACKEND_TAGS=${2:?missing value for --tags}; shift 2 ;;
     --redis-url) REDIS_URL=${2:?missing value for --redis-url}; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN=${2:?missing value for --tunnel-token}; shift 2 ;;
@@ -62,13 +57,9 @@ if ((EUID != 0)); then
   echo 'Run this installer with sudo.' >&2
   exit 1
 fi
-if [[ -z $REPOSITORY_URL || -z $BACKEND_ID || -z $BACKEND_TOKEN || -z $REDIS_URL || -z $CONTROL_PLANE_URL || -z $PUBLIC_BASE_URL ]]; then
+if [[ -z $REPOSITORY_URL || -z $BACKEND_TOKEN || -z $REDIS_URL || -z $CONTROL_PLANE_URL || -z $PUBLIC_BASE_URL ]]; then
   echo 'Missing a required option.' >&2
   usage >&2
-  exit 2
-fi
-if [[ ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
-  echo 'Backend ID must match [a-z0-9-]{1,64}.' >&2
   exit 2
 fi
 if [[ $REDIS_URL != rediss://* ]]; then
@@ -79,9 +70,8 @@ if [[ $CONTROL_PLANE_URL != https://* || $PUBLIC_BASE_URL != https://* ]]; then
   echo 'Control-plane URL and public Agent URL must use HTTPS.' >&2
   exit 2
 fi
-if [[ -z $BACKEND_NAME ]]; then
-  BACKEND_NAME=$BACKEND_ID
-fi
+BACKEND_ID="vps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
+if [[ -z $BACKEND_NAME ]]; then BACKEND_NAME=$(hostname -s); fi
 if [[ -e $APP_DIRECTORY ]]; then
   echo "$APP_DIRECTORY already exists; refusing to overwrite an existing installation." >&2
   exit 1
@@ -143,7 +133,6 @@ install -m 640 -o root -g "$SERVICE_USER" /dev/null "$ENVIRONMENT_FILE"
 cat >"$ENVIRONMENT_FILE" <<EOF
 BACKEND_ID=$BACKEND_ID
 BACKEND_NAME=$BACKEND_NAME
-BACKEND_REGION=$BACKEND_REGION
 BACKEND_TAGS=$BACKEND_TAGS
 BACKEND_SHARED_TOKEN=$BACKEND_TOKEN
 CONTROL_PLANE_URL=$CONTROL_PLANE_URL

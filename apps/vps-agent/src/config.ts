@@ -3,7 +3,6 @@ import { z } from 'zod';
 const configSchema = z.object({
   BACKEND_ID: z.string().regex(/^[a-z0-9-]{1,64}$/),
   BACKEND_NAME: z.string().trim().min(1).max(120).optional(),
-  BACKEND_REGION: z.string().trim().min(1).max(80).optional(),
   BACKEND_TAGS: z.string().default(''),
   BACKEND_SHARED_TOKEN: z.string().min(32),
   CONTROL_PLANE_URL: z

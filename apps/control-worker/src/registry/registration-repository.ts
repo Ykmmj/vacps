@@ -11,7 +11,6 @@ interface RegistrationRow {
   backend_id: string;
   name: string;
   base_url: string;
-  region: string | null;
   tags_json: string;
   agent_version: string;
   status: RegistrationStatus;
@@ -19,6 +18,13 @@ interface RegistrationRow {
   requested_at: string;
   updated_at: string;
   decision_at: string | null;
+  ip: string | null;
+  location: string | null;
+}
+
+interface RegistrationNetworkDetails {
+  ip?: string;
+  location?: string;
 }
 
 export class RegistrationRepository {
@@ -46,7 +52,10 @@ export class RegistrationRepository {
     return toRegistration(row);
   }
 
-  async request(input: RegisterBackendInput): Promise<BackendRegistration> {
+  async request(
+    input: RegisterBackendInput,
+    network: RegistrationNetworkDetails = {},
+  ): Promise<BackendRegistration> {
     const now = new Date().toISOString();
     const existing = await this.db
       .prepare('SELECT * FROM backend_registrations WHERE backend_id = ?')
@@ -58,19 +67,20 @@ export class RegistrationRepository {
       await this.db
         .prepare(
           `INSERT INTO backend_registrations
-           (id, backend_id, name, base_url, region, tags_json, agent_version, status, requested_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+           (id, backend_id, name, base_url, tags_json, agent_version, status, requested_at, updated_at, ip, location)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
         )
         .bind(
           id,
           input.backendId,
           input.name,
           input.baseUrl,
-          input.region ?? null,
           JSON.stringify(input.tags),
           input.agentVersion,
           now,
           now,
+          network.ip ?? null,
+          network.location ?? null,
         )
         .run();
       return this.get(id);
@@ -78,8 +88,10 @@ export class RegistrationRepository {
 
     if (existing.status === 'approved') {
       await this.db
-        .prepare('UPDATE backend_registrations SET updated_at = ? WHERE id = ?')
-        .bind(now, existing.id)
+        .prepare(
+          'UPDATE backend_registrations SET updated_at = ?, ip = ?, location = ? WHERE id = ?',
+        )
+        .bind(now, network.ip ?? null, network.location ?? null, existing.id)
         .run();
       return this.get(existing.id);
     }
@@ -87,18 +99,19 @@ export class RegistrationRepository {
     await this.db
       .prepare(
         `UPDATE backend_registrations
-         SET name = ?, base_url = ?, region = ?, tags_json = ?, agent_version = ?, status = 'pending',
-             rejection_reason = NULL, requested_at = ?, updated_at = ?, decision_at = NULL
+         SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, status = 'pending',
+             rejection_reason = NULL, requested_at = ?, updated_at = ?, decision_at = NULL, ip = ?, location = ?
          WHERE id = ?`,
       )
       .bind(
         input.name,
         input.baseUrl,
-        input.region ?? null,
         JSON.stringify(input.tags),
         input.agentVersion,
         now,
         now,
+        network.ip ?? null,
+        network.location ?? null,
         existing.id,
       )
       .run();
@@ -136,7 +149,6 @@ function toRegistration(row: RegistrationRow): BackendRegistration {
     backendId: row.backend_id,
     name: row.name,
     baseUrl: row.base_url,
-    ...(row.region ? { region: row.region } : {}),
     tags: JSON.parse(row.tags_json) as string[],
     agentVersion: row.agent_version,
     status: row.status,
@@ -144,5 +156,7 @@ function toRegistration(row: RegistrationRow): BackendRegistration {
     updatedAt: row.updated_at,
     ...(row.decision_at ? { decisionAt: row.decision_at } : {}),
     ...(row.rejection_reason ? { rejectionReason: row.rejection_reason } : {}),
+    ...(row.ip ? { ip: row.ip } : {}),
+    ...(row.location ? { location: row.location } : {}),
   };
 }

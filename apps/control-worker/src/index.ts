@@ -6,6 +6,7 @@ import {
   updateBackendSchema,
   updateScheduleSchema,
 } from '@vps-agent/contracts';
+import type { Backend, BackendRegistration, BackendStatusResponse } from '@vps-agent/contracts';
 import { z } from 'zod';
 
 import type { Env } from './env.js';
@@ -55,12 +56,18 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     const action = segments[3];
 
     if (resource === 'dashboard' && request.method === 'GET') {
-      const [backends, tasks, schedules, pendingRegistrations] = await Promise.all([
+      const [backends, tasks, schedules, registrations] = await Promise.all([
         services.backends.list(),
         services.tasks.list(100),
         services.schedules.list(),
-        services.registrations.list('pending'),
+        services.registrations.list(),
       ]);
+      const backendById = new Map(backends.map((backend) => [backend.id, backend]));
+      const nodes = await Promise.all(
+        registrations.map((registration) =>
+          inspectNode(registration, backendById.get(registration.backendId), services),
+        ),
+      );
       const active = tasks.filter((task) => task.status === 'running').length;
       const queued = tasks.filter((task) => task.status === 'queued').length;
       const failed = tasks
@@ -73,10 +80,12 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           queued,
           active,
           schedules: schedules.length,
-          pendingRegistrations: pendingRegistrations.length,
+          pendingRegistrations: registrations.filter(
+            (registration) => registration.status === 'pending',
+          ).length,
         },
         backends,
-        pendingRegistrations,
+        nodes,
         failed,
       });
     }
@@ -87,6 +96,7 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
         return json(
           await services.registrations.request(
             registerBackendSchema.parse(await readJson(request)),
+            registrationNetwork(request),
           ),
           {
             status: 202,
@@ -102,7 +112,8 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
             'A rejected registration must request approval again.',
             409,
           );
-        const health = await services.client.health(registration);
+        const status = await services.client.status(registration);
+        const { health } = status;
         if (health.backendId !== registration.backendId)
           throw new AppError(
             'backend_identity_mismatch',
@@ -117,12 +128,11 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
             id: registration.backendId,
             name: registration.name,
             baseUrl: registration.baseUrl,
-            ...(registration.region ? { region: registration.region } : {}),
             tags: registration.tags,
             enabled: true,
           });
         }
-        await services.backends.recordStatus(backend.id, health);
+        await services.backends.recordStatus(backend.id, status);
         return json({ registration: await services.registrations.approve(id), backend, health });
       }
       if (id && action === 'reject' && request.method === 'POST') {
@@ -146,9 +156,9 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       }
       if (id && action === 'test' && request.method === 'POST') {
         const backend = await services.backends.get(id);
-        const health = await services.client.health(backend);
-        await services.backends.recordStatus(id, health);
-        return json(health);
+        const status = await services.client.status(backend);
+        await services.backends.recordStatus(id, status);
+        return json(status);
       }
       if (id && action === 'status' && request.method === 'GET') {
         const backend = await services.backends.get(id);
@@ -215,4 +225,44 @@ function requireBackendToken(request: Request, env: Env): void {
       401,
     );
   }
+}
+
+async function inspectNode(
+  registration: BackendRegistration,
+  backend: Backend | undefined,
+  services: ReturnType<typeof createServices>,
+): Promise<{
+  registration: BackendRegistration;
+  backend?: Backend;
+  status?: BackendStatusResponse;
+  online: boolean;
+  checkedAt: string;
+}> {
+  try {
+    const status = await services.client.status(registration);
+    if (backend) await services.backends.recordStatus(backend.id, status);
+    return {
+      registration,
+      ...(backend ? { backend } : {}),
+      status,
+      online: status.health.ok,
+      checkedAt: new Date().toISOString(),
+    };
+  } catch {
+    return {
+      registration,
+      ...(backend ? { backend } : {}),
+      online: false,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+}
+
+function registrationNetwork(request: Request): { ip?: string; location?: string } {
+  const ip = request.headers.get('cf-connecting-ip') ?? undefined;
+  const cf = request.cf as unknown as Record<string, unknown> | undefined;
+  const city = typeof cf?.city === 'string' ? cf.city : undefined;
+  const country = typeof cf?.country === 'string' ? cf.country : undefined;
+  const location = [city, country].filter(Boolean).join(', ') || undefined;
+  return { ...(ip ? { ip } : {}), ...(location ? { location } : {}) };
 }

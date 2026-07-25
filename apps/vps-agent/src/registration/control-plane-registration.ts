@@ -12,7 +12,6 @@ export async function registerWithControlPlane(config: AgentConfig): Promise<str
       backendId: config.BACKEND_ID,
       name: config.BACKEND_NAME ?? config.BACKEND_ID,
       baseUrl: config.PUBLIC_BASE_URL,
-      ...(config.BACKEND_REGION ? { region: config.BACKEND_REGION } : {}),
       tags: config.BACKEND_TAGS.split(',')
         .map((tag) => tag.trim())
         .filter(Boolean),
