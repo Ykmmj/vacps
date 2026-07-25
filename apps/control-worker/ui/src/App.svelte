@@ -518,14 +518,10 @@
               ><circle cx="12" cy="12" r="3.5" /><path
                 d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
               /></svg
-            >{:else}<svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              class="h-4 w-4"
-              aria-hidden="true"
-              ><path d="M20.6 15.6A8.5 8.5 0 0 1 8.4 3.4 8.5 8.5 0 1 0 20.6 15.6Z" /></svg
+            >{:else}<svg viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4" aria-hidden="true"
+              ><path
+                d="M20.7 15.9A8.6 8.6 0 0 1 8.1 3.4a.7.7 0 0 0-.8.9 8.6 8.6 0 1 0 12.5 12.5.7.7 0 0 0 .9-.9Z"
+              /></svg
             >{/if}</button
         >
         <button
@@ -540,8 +536,8 @@
             stroke="currentColor"
             stroke-width="1.8"
             class:animate-spin={loading}
-            class="h-4 w-4"
-            aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.3M20 4v7h-7" /></svg
+            class="spin-center h-4 w-4"
+            aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.35-5.65" /><path d="M20 4v5h-5" /></svg
           ></button
         >
       </div>

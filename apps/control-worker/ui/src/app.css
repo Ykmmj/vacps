@@ -95,6 +95,10 @@
   background: #f4f4f5;
   color: #27272a;
 }
+.spin-center {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+}
 .dark .icon-button,
 .dark .icon-action {
   color: #a1a1aa;
