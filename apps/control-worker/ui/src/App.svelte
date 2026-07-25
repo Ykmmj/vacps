@@ -101,11 +101,11 @@
       quickTunnel: 'Quick Tunnel',
       quickTunnelDescription: '自动获取临时 trycloudflare.com 地址；适合演示和测试。',
       provisioningTunnel: '正在创建 Tunnel…',
+      createManagedTunnel: '创建稳定 Tunnel',
       managedTunnelReady: '稳定地址已准备好',
       managedTunnelWait:
         '这会创建专属 Tunnel、DNS 记录和稳定域名；成功后安装命令会自动显示在右侧。',
       installCommandPending: '请先创建稳定 Tunnel，安装命令将在成功后生成。',
-      generateCommand: '生成并复制安装命令',
       managedTunnelNeedsSetup: '需要先为控制平面配置 Tunnel/DNS API Token。',
       quickTunnelNotice: '地址会在 cloudflared 重连后变化，Agent 会自动重新注册。',
       nodeName: '节点名称（可选）',
@@ -174,12 +174,12 @@
       quickTunnelDescription:
         'Gets a temporary trycloudflare.com URL automatically; best for demos and tests.',
       provisioningTunnel: 'Creating Tunnel…',
+      createManagedTunnel: 'Create stable Tunnel',
       managedTunnelReady: 'Stable endpoint is ready',
       managedTunnelWait:
         'This creates a dedicated Tunnel, DNS record, and stable hostname. The install command appears here after it succeeds.',
       installCommandPending:
         'Create the stable Tunnel first; the install command appears after it succeeds.',
-      generateCommand: 'Generate and copy command',
       managedTunnelNeedsSetup: 'Configure the Tunnel/DNS API token for this control plane first.',
       quickTunnelNotice:
         'The URL may change after cloudflared reconnects; the Agent re-registers automatically.',
@@ -400,9 +400,7 @@
   }
 
   async function copyInstallCommand() {
-    const provision =
-      installTunnelMode === 'managed' ? await ensureManagedProvision() : managedProvision;
-    if (installTunnelMode === 'managed' && !provision) return;
+    if (installTunnelMode === 'managed' && !managedProvision) return;
     await copyToClipboard(
       buildInstallCommand(
         installBackendName,
@@ -411,7 +409,7 @@
         installRegistrationSecret,
         installAllowApt,
         installTunnelMode,
-        provision,
+        managedProvision,
       ),
       text.copied,
     );
@@ -990,6 +988,12 @@
                 <p class="mt-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
                   {text.managedTunnelWait}
                 </p>
+                <button
+                  class="mt-4 rounded-full bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={provisioningTunnel}
+                  onclick={() => void ensureManagedProvision()}
+                  >{provisioningTunnel ? text.provisioningTunnel : text.createManagedTunnel}</button
+                >
               {/if}
             </div>
           {:else}
@@ -1018,16 +1022,10 @@
             </div>
             <button
               class="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/15"
-              disabled={provisioningTunnel}
-              title={installTunnelMode === 'managed' && !managedProvision
-                ? text.generateCommand
-                : text.copy}
+              disabled={provisioningTunnel || (installTunnelMode === 'managed' && !managedProvision)}
+              title={text.copy}
               onclick={copyInstallCommand}
-              >{provisioningTunnel
-                ? text.provisioningTunnel
-                : installTunnelMode === 'managed' && !managedProvision
-                  ? text.generateCommand
-                  : text.copy}</button
+              >{text.copy}</button
             >
           </div>
           <pre
