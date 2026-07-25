@@ -4,6 +4,8 @@ set -Eeuo pipefail
 APP_DIRECTORY=/opt/vps-agent
 ENVIRONMENT_FILE=/etc/vps-agent/vps-agent.env
 SERVICE_USER=agent
+export NVM_DIR=/usr/local/lib/vps-agent/nvm
+NODE_MAJOR_VERSION=24
 REPOSITORY_URL=''
 REPOSITORY_REF=main
 BACKEND_ID=''
@@ -99,55 +101,31 @@ if [[ -e $APP_DIRECTORY ]]; then
 fi
 
 apt-get update
-apt-get install -y ca-certificates curl git build-essential python3 sudo xz-utils
+apt-get install -y ca-certificates curl git build-essential python3 sudo
 
-install_node_lts() {
-  local machine_architecture node_architecture manifest node_file node_version archive_url
-  machine_architecture=$(uname -m)
-  case "$machine_architecture" in
-    x86_64) node_architecture=x64 ;;
-    aarch64|arm64) node_architecture=arm64 ;;
-    *) echo "Unsupported Node.js architecture: $machine_architecture" >&2; exit 1 ;;
-  esac
-  manifest=$(mktemp)
-  curl --fail --location --output "$manifest" \
-    https://nodejs.org/download/release/latest-v22.x/SHASUMS256.txt
-  node_file=$(awk "/node-v.*-linux-$node_architecture\\.tar\\.xz$/ { print \$2; exit }" "$manifest")
-  if [[ -z $node_file ]]; then
-    echo 'Could not determine the latest Node.js 22 LTS archive.' >&2
+install_nvm_node() {
+  install -d -m 755 "$(dirname "$NVM_DIR")"
+  if [[ ! -s $NVM_DIR/nvm.sh ]]; then
+    echo 'Installing NVM 0.40.6...'
+    NVM_DIR="$NVM_DIR" PROFILE=/dev/null bash -c \
+      'curl --fail --silent --show-error --location https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh | bash'
+  fi
+  # shellcheck disable=SC1090
+  . "$NVM_DIR/nvm.sh"
+  nvm install "$NODE_MAJOR_VERSION"
+  nvm alias default "$NODE_MAJOR_VERSION"
+  nvm use "$NODE_MAJOR_VERSION"
+  if ! command -v corepack >/dev/null; then
+    echo 'The NVM-installed Node.js runtime does not provide Corepack.' >&2
     exit 1
   fi
-  node_version=${node_file%-linux-*}
-  archive_url="https://nodejs.org/download/release/latest-v22.x/$node_file"
-  curl --fail --location --output "/tmp/$node_file" "$archive_url"
-  (cd /tmp && grep " $node_file$" "$manifest" | sha256sum -c -)
-  install -d /usr/local/lib/nodejs
-  tar -xJf "/tmp/$node_file" -C /usr/local/lib/nodejs
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/node" /usr/local/bin/node
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/npm" /usr/local/bin/npm
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/npx" /usr/local/bin/npx
-  rm -f "$manifest" "/tmp/$node_file"
+  corepack enable pnpm
 }
 
-if ! command -v node >/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
-  install_node_lts
-fi
-install_pnpm() {
-  local installed_version
-  installed_version=$(pnpm --version 2>/dev/null || true)
-  if [[ $installed_version == 10.14.0 ]]; then return; fi
-  echo 'Installing pnpm 10.14.0...'
-  npm install --global --force pnpm@10.14.0
-  installed_version=$(pnpm --version)
-  if [[ $installed_version != 10.14.0 ]]; then
-    echo "Expected pnpm 10.14.0, found $installed_version." >&2
-    exit 1
-  fi
-}
-
-install_pnpm
+install_nvm_node
 git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
 cd "$APP_DIRECTORY"
+pnpm --version
 pnpm install --frozen-lockfile
 pnpm --filter @vps-agent/contracts build
 pnpm --filter @vps-agent/vps-agent build

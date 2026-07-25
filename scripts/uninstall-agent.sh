@@ -62,6 +62,7 @@ rm -f "/etc/systemd/system/$SERVICE_NAME.service"
 rm -rf "/etc/systemd/system/$SERVICE_NAME.service.d"
 rm -f "/etc/systemd/system/$QUICK_TUNNEL_SERVICE.service"
 rm -f /usr/local/lib/vps-agent/quick-tunnel.sh
+rm -rf /usr/local/lib/vps-agent/nvm
 rmdir /usr/local/lib/vps-agent 2>/dev/null || true
 rm -f /etc/sudoers.d/vps-agent-apt
 rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
