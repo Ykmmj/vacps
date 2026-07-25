@@ -54,7 +54,7 @@ The equivalent parameter form is `pnpm setup:cloudflare -- --cloudflare-account-
 
 Open the deployed Web UI and choose one of its connection modes before copying the VPS command:
 
-- **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. It uses a one-time Worker OAuth-client configuration; the browser authorizes Cloudflare without exposing a personal API Token to the VPS or installer command.
+- **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. A one-time local bootstrap uses an API Token to create a scoped OAuth client, then discards the Token; it never reaches the Worker, browser, VPS, or installer command. The bootstrap saves only the selected Cloudflare account context, and the Web UI loads Zones automatically after browser authorization.
 - **Quick Tunnel** creates a temporary `trycloudflare.com` URL on the VPS and re-registers the Agent whenever that URL changes. Use it only for demos or testing.
 
 The installer installs Node.js 24 and pnpm 10.14.0 through an Agent-scoped NVM directory, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.

@@ -20,6 +20,9 @@ CONTROL_PLANE_URL=''
 PUBLIC_BASE_URL=''
 QUICK_TUNNEL=false
 ALLOW_APT=false
+RESUME_INSTALL=false
+HEALTH_CHECK_TIMEOUT_SECONDS=90
+HEALTH_CHECK_DELAY_SECONDS=2
 
 usage() {
   cat <<'EOF'
@@ -162,17 +165,11 @@ if [[ $QUICK_TUNNEL == false && $PUBLIC_BASE_URL != https://* ]]; then
   echo 'Managed/manual Tunnel mode requires a public Agent URL using HTTPS.' >&2
   exit 2
 fi
-if [[ -z $BACKEND_ID ]]; then
-  BACKEND_ID="vps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
-elif [[ ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
+if [[ -n $BACKEND_ID && ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
   echo 'Backend ID must match [a-z0-9-]{1,64}.' >&2
   exit 2
 fi
 if [[ -z $BACKEND_NAME ]]; then BACKEND_NAME=$(hostname -s); fi
-if [[ -e $APP_DIRECTORY ]]; then
-  echo "$APP_DIRECTORY already exists; refusing to overwrite an existing installation." >&2
-  exit 1
-fi
 
 apt-get update
 apt-get install -y ca-certificates curl git build-essential python3 sudo
@@ -196,16 +193,69 @@ install_nvm_node() {
   corepack enable pnpm
 }
 
+normalize_repository_url() {
+  local value=${1%/}
+  local lowercase
+  value=${value%.git}
+  lowercase=${value,,}
+  case "$lowercase" in
+    https://github.com/*) printf 'github.com/%s\n' "${lowercase#https://github.com/}" ;;
+    http://github.com/*) printf 'github.com/%s\n' "${lowercase#http://github.com/}" ;;
+    ssh://git@github.com/*) printf 'github.com/%s\n' "${lowercase#ssh://git@github.com/}" ;;
+    git@github.com:*) printf 'github.com/%s\n' "${lowercase#git@github.com:}" ;;
+    git://github.com/*) printf 'github.com/%s\n' "${lowercase#git://github.com/}" ;;
+    github.com/*) printf '%s\n' "$lowercase" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
 install_nvm_node
-git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
+if [[ -e $APP_DIRECTORY ]]; then
+  if [[ ! -d $APP_DIRECTORY/.git || ! -f $ENVIRONMENT_FILE || ! -f /etc/systemd/system/vps-agent.service ]]; then
+    echo "$APP_DIRECTORY exists but is not a resumable VPS Agent installation; refusing to overwrite it." >&2
+    exit 1
+  fi
+  EXISTING_REPOSITORY_URL=$(git -C "$APP_DIRECTORY" remote get-url origin 2>/dev/null || true)
+  NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
+  NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
+  if [[ -z $EXISTING_REPOSITORY_URL || $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
+    echo "$APP_DIRECTORY belongs to a different Git repository; refusing to overwrite it." >&2
+    if [[ $NORMALIZED_EXISTING_REPOSITORY_URL == github.com/* && $NORMALIZED_REQUESTED_REPOSITORY_URL == github.com/* ]]; then
+      echo "Existing repository: $NORMALIZED_EXISTING_REPOSITORY_URL" >&2
+      echo "Requested repository: $NORMALIZED_REQUESTED_REPOSITORY_URL" >&2
+    fi
+    exit 1
+  fi
+  EXISTING_BACKEND_ID=$(sed -n 's/^BACKEND_ID=//p' "$ENVIRONMENT_FILE" | head -n 1)
+  if [[ -z $EXISTING_BACKEND_ID || ! $EXISTING_BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
+    echo "Could not recover a valid Backend ID from $ENVIRONMENT_FILE." >&2
+    exit 1
+  fi
+  if [[ -n $BACKEND_ID && $BACKEND_ID != "$EXISTING_BACKEND_ID" ]]; then
+    echo "Backend ID $BACKEND_ID does not match the existing installation ($EXISTING_BACKEND_ID)." >&2
+    exit 1
+  fi
+  BACKEND_ID=$EXISTING_BACKEND_ID
+  RESUME_INSTALL=true
+  echo "Resuming the existing VPS Agent installation for $BACKEND_ID."
+else
+  if [[ -z $BACKEND_ID ]]; then
+    BACKEND_ID="vps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
+  fi
+  git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
+fi
+
 cd "$APP_DIRECTORY"
-pnpm --version
-pnpm install --frozen-lockfile
-pnpm --filter @vps-agent/contracts build
-pnpm --filter @vps-agent/vps-agent build
+if [[ $RESUME_INSTALL == false ]]; then
+  pnpm --version
+  pnpm install --frozen-lockfile
+  pnpm --filter @vps-agent/contracts build
+  pnpm --filter @vps-agent/vps-agent build
+fi
 
 useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
-install -d -o "$SERVICE_USER" -g "$SERVICE_USER" /var/lib/vps-agent/logs
+install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
+install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
 install -d /etc/vps-agent /etc/systemd/system/vps-agent.service.d
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
 
@@ -253,11 +303,34 @@ EOF
 fi
 
 systemctl daemon-reload
-systemctl enable --now vps-agent
-curl --fail --silent --show-error \
-  -H "Authorization: Bearer $BACKEND_TOKEN" \
-  http://127.0.0.1:3100/health
-echo
+systemctl enable vps-agent
+systemctl restart vps-agent
+
+wait_for_agent_health() {
+  local deadline=$((SECONDS + HEALTH_CHECK_TIMEOUT_SECONDS))
+  local response=''
+  while ((SECONDS < deadline)); do
+    if response=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
+      -H "Authorization: Bearer $BACKEND_TOKEN" \
+      http://127.0.0.1:3100/health 2>&1); then
+      printf '%s\n' "$response"
+      return 0
+    fi
+    if ((SECONDS < deadline)); then
+      sleep "$HEALTH_CHECK_DELAY_SECONDS"
+    fi
+  done
+
+  echo "VPS Agent did not become healthy after $HEALTH_CHECK_TIMEOUT_SECONDS seconds." >&2
+  if [[ -n $response ]]; then
+    echo "Last health-check error: $response" >&2
+  fi
+  systemctl status vps-agent --no-pager --full >&2 || true
+  journalctl -u vps-agent -n 50 --no-pager >&2 || true
+  return 1
+}
+
+wait_for_agent_health
 
 install_cloudflared() {
   MACHINE_ARCHITECTURE=$(dpkg --print-architecture)

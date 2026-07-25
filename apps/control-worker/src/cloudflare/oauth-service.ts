@@ -18,13 +18,18 @@ interface OAuthTokenResponse {
 }
 
 export interface CloudflareConnectionInput {
-  accountId: string;
   zoneId: string;
   baseDomain: string;
 }
 
 export interface CloudflareTunnelCredentials extends CloudflareConnectionInput {
+  accountId: string;
   accessToken: string;
+}
+
+export interface CloudflareZone {
+  id: string;
+  name: string;
 }
 
 export class CloudflareOAuthService {
@@ -44,27 +49,38 @@ export class CloudflareOAuthService {
     const configured = this.isConfigured();
     if (!configured) return { configured, connected: false };
     const connection = await this.repository.connection();
-    if (!connection) return { configured, connected: false };
+    if (!connection)
+      return {
+        configured,
+        connected: false,
+        ...(this.env.CLOUDFLARE_ACCOUNT_ID ? { accountId: this.env.CLOUDFLARE_ACCOUNT_ID } : {}),
+      };
     return {
       configured,
       connected: true,
       accountId: connection.accountId,
-      zoneId: connection.zoneId,
-      baseDomain: connection.baseDomain,
+      ...(connection.zoneId ? { zoneId: connection.zoneId } : {}),
+      ...(connection.baseDomain ? { baseDomain: connection.baseDomain } : {}),
       connectedAt: connection.connectedAt,
     };
   }
 
-  async begin(input: CloudflareConnectionInput): Promise<{ authorizationUrl: string }> {
+  async begin(): Promise<{ authorizationUrl: string }> {
     const configuration = this.configuration();
-    const baseDomain = normalizeBaseDomain(input.baseDomain);
+    const accountId = this.env.CLOUDFLARE_ACCOUNT_ID;
+    if (!accountId)
+      throw new AppError(
+        'cloudflare_account_not_configured',
+        'Run the Managed Tunnel bootstrap again to save the Cloudflare account for this control plane.',
+        409,
+      );
     await this.repository.removeExpiredStates();
     const state = randomBase64Url(32);
     await this.repository.createState({
       state,
-      accountId: input.accountId,
-      zoneId: input.zoneId,
-      baseDomain,
+      accountId,
+      zoneId: '',
+      baseDomain: '',
       expiresAt: new Date(Date.now() + STATE_TTL_MILLISECONDS).toISOString(),
     });
     const authorizationUrl = new URL(AUTHORIZATION_ENDPOINT);
@@ -72,6 +88,7 @@ export class CloudflareOAuthService {
     authorizationUrl.searchParams.set('client_id', configuration.clientId);
     authorizationUrl.searchParams.set('redirect_uri', configuration.redirectUrl);
     authorizationUrl.searchParams.set('state', state);
+    authorizationUrl.searchParams.set('scope', configuration.scopes);
     return { authorizationUrl: authorizationUrl.toString() };
   }
 
@@ -111,8 +128,10 @@ export class CloudflareOAuthService {
         ...(tokens.scope ? { scopes: tokens.scope } : {}),
       });
       return redirect(returnUrl, 'connected');
-    } catch {
-      return redirect(returnUrl, 'failed');
+    } catch (error) {
+      const result = error instanceof AppError ? error.code : 'token_exchange_failed';
+      console.error('Cloudflare OAuth callback failed', { result });
+      return redirect(returnUrl, result);
     }
   }
 
@@ -120,16 +139,68 @@ export class CloudflareOAuthService {
     await this.repository.deleteConnection();
   }
 
-  async credentials(): Promise<CloudflareTunnelCredentials> {
-    const configuration = this.configuration();
-    const connection = await this.repository.connection();
-    if (!connection)
+  async zones(): Promise<CloudflareZone[]> {
+    const { connection, accessToken } = await this.authorizedConnection();
+    const url = new URL('https://api.cloudflare.com/client/v4/zones');
+    url.searchParams.set('account.id', connection.accountId);
+    url.searchParams.set('per_page', '50');
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    const payload = (await response.json().catch(() => undefined)) as
+      { success?: boolean; result?: unknown; errors?: Array<{ message?: string }> } | undefined;
+    if (!response.ok || !payload?.success || !Array.isArray(payload.result)) {
       throw new AppError(
-        'cloudflare_not_connected',
-        'Connect Cloudflare before creating a managed Tunnel.',
+        'cloudflare_zones_unavailable',
+        payload?.errors?.[0]?.message ?? 'Cloudflare could not list DNS zones for this account.',
+        502,
+      );
+    }
+    return payload.result
+      .filter((zone): zone is { id: string; name: string; status?: string } =>
+        Boolean(
+          zone &&
+          typeof zone === 'object' &&
+          typeof zone.id === 'string' &&
+          typeof zone.name === 'string',
+        ),
+      )
+      .filter((zone) => zone.status === undefined || zone.status === 'active')
+      .map((zone) => ({ id: zone.id, name: normalizeBaseDomain(zone.name) }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  async selectZone(zoneId: string): Promise<Awaited<ReturnType<CloudflareOAuthService['status']>>> {
+    const { connection } = await this.authorizedConnection();
+    const zone = (await this.zones()).find((candidate) => candidate.id === zoneId);
+    if (!zone)
+      throw new AppError(
+        'cloudflare_zone_not_found',
+        'Select a DNS zone available to this account.',
+        404,
+      );
+    await this.repository.saveConnection({
+      accountId: connection.accountId,
+      zoneId: zone.id,
+      baseDomain: zone.name,
+      accessTokenCiphertext: connection.accessTokenCiphertext,
+      ...(connection.refreshTokenCiphertext
+        ? { refreshTokenCiphertext: connection.refreshTokenCiphertext }
+        : {}),
+      ...(connection.expiresAt ? { expiresAt: connection.expiresAt } : {}),
+      ...(connection.scopes ? { scopes: connection.scopes } : {}),
+    });
+    return this.status();
+  }
+
+  async credentials(): Promise<CloudflareTunnelCredentials> {
+    const { connection, accessToken } = await this.authorizedConnection();
+    if (!connection.zoneId || !connection.baseDomain)
+      throw new AppError(
+        'cloudflare_zone_not_selected',
+        'Select a DNS zone before creating a managed Tunnel.',
         409,
       );
-    const accessToken = await this.accessToken(connection, configuration.clientSecret);
     return {
       accountId: connection.accountId,
       zoneId: connection.zoneId,
@@ -142,15 +213,22 @@ export class CloudflareOAuthService {
     return Boolean(
       this.env.CLOUDFLARE_OAUTH_CLIENT_ID &&
       this.env.CLOUDFLARE_OAUTH_CLIENT_SECRET &&
-      this.env.CLOUDFLARE_OAUTH_REDIRECT_URL,
+      this.env.CLOUDFLARE_OAUTH_REDIRECT_URL &&
+      this.env.CLOUDFLARE_OAUTH_SCOPES,
     );
   }
 
-  private configuration(): { clientId: string; clientSecret: string; redirectUrl: string } {
+  private configuration(): {
+    clientId: string;
+    clientSecret: string;
+    redirectUrl: string;
+    scopes: string;
+  } {
     const clientId = this.env.CLOUDFLARE_OAUTH_CLIENT_ID;
     const clientSecret = this.env.CLOUDFLARE_OAUTH_CLIENT_SECRET;
     const redirectUrl = this.env.CLOUDFLARE_OAUTH_REDIRECT_URL;
-    if (!clientId || !clientSecret || !redirectUrl)
+    const scopes = this.env.CLOUDFLARE_OAUTH_SCOPES;
+    if (!clientId || !clientSecret || !redirectUrl || !scopes)
       throw new AppError(
         'cloudflare_oauth_not_configured',
         'Cloudflare OAuth is not configured for this control plane.',
@@ -161,7 +239,7 @@ export class CloudflareOAuthService {
       const localhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
       if (parsed.protocol !== 'https:' && !localhost)
         throw new Error('A public callback requires HTTPS.');
-      return { clientId, clientSecret, redirectUrl: parsed.toString() };
+      return { clientId, clientSecret, redirectUrl: parsed.toString(), scopes };
     } catch {
       throw new AppError(
         'cloudflare_oauth_misconfigured',
@@ -215,6 +293,22 @@ export class CloudflareOAuthService {
     return tokens.access_token;
   }
 
+  private async authorizedConnection(): Promise<{
+    connection: CloudflareOAuthConnection;
+    accessToken: string;
+  }> {
+    const configuration = this.configuration();
+    const connection = await this.repository.connection();
+    if (!connection)
+      throw new AppError(
+        'cloudflare_not_connected',
+        'Connect Cloudflare before creating a managed Tunnel.',
+        409,
+      );
+    const accessToken = await this.accessToken(connection, configuration.clientSecret);
+    return { connection: (await this.repository.connection()) ?? connection, accessToken };
+  }
+
   private async tokenRequest(
     grant:
       | { grant_type: 'authorization_code'; code: string }
@@ -233,9 +327,17 @@ export class CloudflareOAuthService {
       body,
     });
     const payload = (await response.json().catch(() => undefined)) as
-      OAuthTokenResponse | undefined;
-    if (!response.ok || !payload)
-      throw new AppError('cloudflare_oauth_failed', 'Cloudflare OAuth token exchange failed.', 502);
+      (OAuthTokenResponse & { error?: string; error_description?: string }) | undefined;
+    if (!response.ok || !payload) {
+      const oauthError = payload?.error;
+      throw new AppError(
+        oauthError === 'invalid_client' || oauthError === 'invalid_grant'
+          ? `cloudflare_oauth_${oauthError}`
+          : 'cloudflare_oauth_failed',
+        payload?.error_description ?? payload?.error ?? 'Cloudflare OAuth token exchange failed.',
+        502,
+      );
+    }
     return payload;
   }
 

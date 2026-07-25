@@ -33,34 +33,34 @@ Configure Cloudflare Access for the control-plane domain (`/` and `/api/*`). The
 
 ### Managed Tunnel (stable, recommended)
 
-The Web UI creates a random node ID, a remotely-managed Cloudflare Tunnel, its ingress route, and the proxied DNS CNAME. It uses Cloudflare OAuth rather than a personal Tunnel/DNS API Token.
+The Web UI creates a random node ID, a remotely-managed Cloudflare Tunnel, its ingress route, and the proxied DNS CNAME. A one-time local bootstrap automatically creates a scoped private Cloudflare OAuth client; it does not store the bootstrap API Token.
 
-After the first deployment, create one **private OAuth client** in Cloudflare Dashboard: **Manage Account → OAuth clients**. Select an Authorization Code client with Refresh Token support and `client_secret_post`, then register this exact callback URL:
+Create a Cloudflare API Token with these permissions:
 
-```text
-https://<your-control-plane>/api/cloudflare/oauth/callback
-```
+- Account: **OAuth Client / Write**, **Workers Scripts / Edit**, and **D1 / Edit**
 
-Grant only the OAuth scopes corresponding to **Cloudflare Tunnel / Edit** and **DNS / Edit**. Save the client ID and client secret, then store them as Worker Secrets by running the bootstrap once more:
+Run this once from the project checkout. It asks for the account ID and API Token, creates a private OAuth client restricted to **Cloudflare Tunnel / Edit** and **DNS / Edit**, stores only that client ID/secret as Worker Secrets, then discards the API Token:
 
 ```bash
-read -rp 'Cloudflare OAuth Client ID: ' CLOUDFLARE_OAUTH_CLIENT_ID
-export CLOUDFLARE_OAUTH_CLIENT_ID
-read -rsp 'Cloudflare OAuth Client Secret: ' CLOUDFLARE_OAUTH_CLIENT_SECRET; echo
-export CLOUDFLARE_OAUTH_CLIENT_SECRET
-export CLOUDFLARE_OAUTH_REDIRECT_URL='https://<your-control-plane>/api/cloudflare/oauth/callback'
-
-pnpm setup:cloudflare
-
-unset CLOUDFLARE_OAUTH_CLIENT_ID CLOUDFLARE_OAUTH_CLIENT_SECRET CLOUDFLARE_OAUTH_REDIRECT_URL
+pnpm configure:managed-tunnels
 ```
 
 When a valid D1 ID already exists in `apps/control-worker/wrangler.jsonc`, the bootstrap reuses it; it does not create a second database.
-When it is invoked only to add the OAuth client configuration, it also leaves the existing `BACKEND_SHARED_TOKEN` unchanged.
+When it is invoked only to add Managed Tunnel OAuth configuration, it also leaves the existing `BACKEND_SHARED_TOKEN` unchanged.
 
-In the Web UI, choose **托管 Tunnel**, enter the Account ID, Zone ID, and base domain, then choose **连接 Cloudflare**. A logged-in Cloudflare browser session goes directly to its consent screen; no personal API Token reaches the browser, VPS, or command history. Once connected, choose **创建稳定 Tunnel**. The completed VPS command appears on the right; **复制命令** has no side effect. Do not manually edit its generated node ID, hostname, or Tunnel Token.
+If you initialized Managed Tunnel OAuth with a version released before account context was saved automatically, run `pnpm repair:managed-tunnel-account` once. It only stores the Account ID as a Worker Secret and preserves the existing OAuth Client and authorization.
 
-Use the Zone apex as the base domain unless you have an Advanced Certificate for deeper hostnames. OAuth access and refresh tokens are encrypted in D1 with a key derived from the Worker-only OAuth client secret. Revoking the OAuth grant in Cloudflare or rotating that client secret requires connecting Cloudflare again before creating or removing Managed Tunnels.
+If an older control-plane deployment created the OAuth Client before account binding was introduced, preserve that Client and add only the missing account context once:
+
+```bash
+pnpm bind:managed-tunnel-account
+```
+
+This writes only `CLOUDFLARE_ACCOUNT_ID` as a Worker Secret; it does not create an OAuth Client, rotate `BACKEND_SHARED_TOKEN`, or deploy a new Worker version.
+
+In the Web UI, choose **托管 Tunnel** and select **连接 Cloudflare**. The bootstrap already saves the account context; after the browser returns, the UI reads its available Zones. A single Zone is selected automatically; otherwise select the domain name from the dropdown (the Zone ID is never entered manually). The completed VPS command appears on the right after you choose **创建稳定 Tunnel**; **复制命令** has no side effect. Do not manually edit its generated node ID, hostname, or Tunnel Token.
+
+Use the Zone apex as the base domain unless you have an Advanced Certificate for deeper hostnames. If you rotate the OAuth client secret or revoke its Cloudflare authorization, rerun the bootstrap or connect Cloudflare again before creating or removing Managed Tunnels.
 
 ### Quick Tunnel (temporary)
 
@@ -73,6 +73,8 @@ An approved node keeps its approval when its Quick Tunnel URL changes: the same 
 Generate the installer command from the Web UI. It selects either the generated stable endpoint or the temporary Quick Tunnel automatically, so a user never has to enter a speculative `--public-url`.
 
 The installer generates a random `BACKEND_ID` (or receives one generated by the Managed Tunnel flow); each Agent consumes only `agent-<BACKEND_ID>`, so all production nodes may share the same Redis database. It installs Node.js 24 and pnpm 10.14.0 through NVM in `/usr/local/lib/vps-agent/nvm`; systemd receives the resulting Node binary's absolute path, so it never depends on a login shell. Prefer a TLS `rediss://` URL; if a Redis provider only offers `redis://`, use it only when the endpoint is private or tightly firewall-restricted. The installer keeps the HTTP API bound to loopback; do not open port 3100 in the host firewall.
+
+If an installation is interrupted after the repository, environment file, and systemd unit have been created, run the same generated command again. The installer verifies the existing Git origin, preserves the node ID, repairs the Agent-owned data directories, waits for the authenticated health endpoint, and then continues with Tunnel installation. It refuses to resume when `/opt/vps-agent` is unrelated or the requested node ID does not match.
 
 The Agent automatically posts a pending registration to the control plane after it starts, and retries every five minutes. Cloudflare records the request IP and its geographic metadata, then shows the node as a card with live CPU, memory, connectivity, and approval state. Approval runs authenticated health and metrics checks; it will fail safely until the Tunnel route is reachable. The Web UI deliberately has no task-creation form: submit operational tasks through Remote MCP or schedules.
 

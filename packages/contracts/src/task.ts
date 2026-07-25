@@ -49,19 +49,19 @@ export const createTaskSchema = z.discriminatedUnion('type', [
 
 export const taskDispatchSchema = createTaskSchema.and(
   z.object({
-    taskId: z.string().uuid(),
+    taskId: z.uuid(),
     source: taskSourceSchema,
-    scheduleId: z.string().uuid().optional(),
+    scheduleId: z.uuid().optional(),
   }),
 );
 
 export const taskSchema = taskDispatchSchema.and(
   z.object({
     status: taskStatusSchema,
-    createdAt: z.string().datetime(),
-    updatedAt: z.string().datetime(),
-    startedAt: z.string().datetime().optional(),
-    finishedAt: z.string().datetime().optional(),
+    createdAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+    startedAt: z.iso.datetime().optional(),
+    finishedAt: z.iso.datetime().optional(),
   }),
 );
 

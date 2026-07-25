@@ -3,7 +3,13 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/node_modules/**', '**/.wrangler/**', 'apps/control-worker/web/**'],
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/.wrangler/**',
+      'apps/control-worker/ui/src/paraglide/**',
+      'apps/control-worker/web/**',
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

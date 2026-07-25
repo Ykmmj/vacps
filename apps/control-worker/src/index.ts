@@ -180,19 +180,19 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
         return services.cloudflareOAuth.callback(request);
       if (action === 'status' && request.method === 'GET')
         return json(await services.cloudflareOAuth.status());
-      if (action === 'connect' && request.method === 'POST') {
+      if (action === 'connect' && request.method === 'POST')
+        return json(await services.cloudflareOAuth.begin());
+      if (action === 'zones' && request.method === 'GET')
+        return json(await services.cloudflareOAuth.zones());
+      if (action === 'zone' && request.method === 'POST') {
         const input = z
           .object({
-            accountId: z
-              .string()
-              .regex(/^[0-9a-f]{32}$/i, 'Account ID must be 32 hexadecimal characters.'),
             zoneId: z
               .string()
               .regex(/^[0-9a-f]{32}$/i, 'Zone ID must be 32 hexadecimal characters.'),
-            baseDomain: z.string().trim().min(3).max(253),
           })
           .parse(await readJson(request));
-        return json(await services.cloudflareOAuth.begin(input));
+        return json(await services.cloudflareOAuth.selectZone(input.zoneId));
       }
       if (action === 'connection' && request.method === 'DELETE') {
         await services.cloudflareOAuth.disconnect();

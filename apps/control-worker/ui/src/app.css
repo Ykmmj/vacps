@@ -192,6 +192,36 @@
 .field-input {
   @apply w-full rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm font-normal text-zinc-800 outline-none transition placeholder:text-zinc-300 focus:border-blue-500 focus:shadow-[0_0_0_4px_rgba(0,113,227,.1)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600;
 }
+.error-notice {
+  border: 1px solid #fecdd3;
+  background: #fff1f2;
+  color: #be123c;
+}
+.default-notice {
+  border: 1px solid #e4e4e7;
+  background: #f4f4f5;
+  color: #52525b;
+}
+.success-notice {
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.dark .error-notice {
+  border-color: rgba(244, 63, 94, 0.3);
+  background: rgba(244, 63, 94, 0.12);
+  color: #fda4af;
+}
+.dark .default-notice {
+  border-color: #3f3f46;
+  background: #27272a;
+  color: #d4d4d8;
+}
+.dark .success-notice {
+  border-color: rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.12);
+  color: #93c5fd;
+}
 .status-dot {
   height: 0.45rem;
   width: 0.45rem;

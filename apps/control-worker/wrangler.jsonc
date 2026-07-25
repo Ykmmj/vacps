@@ -8,12 +8,13 @@
     "directory": "./web",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/mcp"],
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "vps-agent-control",
-      "database_id": "replace-with-your-d1-database-id",
+      "database_id": "810577ab-90fe-4008-a2f6-f36f915ab041",
       "migrations_dir": "migrations",
     },
   ],
