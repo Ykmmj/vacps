@@ -3,7 +3,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const packageDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const outputPath = resolve(packageDirectory, 'web/install-agent.sh');
+const scriptNames = ['install-agent.sh', 'uninstall-agent.sh'];
 
-await mkdir(dirname(outputPath), { recursive: true });
-await copyFile(resolve(packageDirectory, '../../scripts/install-agent.sh'), outputPath);
+await mkdir(resolve(packageDirectory, 'web'), { recursive: true });
+await Promise.all(
+  scriptNames.map((scriptName) =>
+    copyFile(
+      resolve(packageDirectory, `../../scripts/${scriptName}`),
+      resolve(packageDirectory, `web/${scriptName}`),
+    ),
+  ),
+);

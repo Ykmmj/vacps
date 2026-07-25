@@ -116,6 +116,8 @@
       allowAptHint: '包维护脚本可以 root 权限运行，仅在明确需要时启用。',
       copy: '复制命令',
       download: '下载脚本',
+      uninstall: '卸载 Agent',
+      downloadUninstaller: '下载卸载脚本',
       copied: '安装命令已复制',
       syncOk: '已同步',
       syncFailed: '同步失败：',
@@ -189,6 +191,8 @@
       allowAptHint: 'Package maintainer scripts may run as root. Enable only when needed.',
       copy: 'Copy command',
       download: 'Download script',
+      uninstall: 'Uninstall agent',
+      downloadUninstaller: 'Download uninstaller',
       copied: 'Install command copied',
       syncOk: 'Synchronized',
       syncFailed: 'Sync failed: ',
@@ -1003,10 +1007,17 @@
           <div
             class="flex items-center justify-between border-t border-white/10 px-5 py-4 text-xs text-zinc-400"
           >
-            <span>{text.noTask}</span><a
-              class="rounded-full bg-white px-3 py-1.5 font-semibold text-zinc-900 hover:bg-zinc-100"
-              href="/install-agent.sh"
-              download>{text.download}</a
+            <span>{text.noTask}</span><span class="flex items-center gap-2"
+              ><a
+                class="rounded-full bg-white px-3 py-1.5 font-semibold text-zinc-900 hover:bg-zinc-100"
+                href="/install-agent.sh"
+                download>{text.download}</a
+              ><a
+                class="rounded-full border border-white/20 px-3 py-1.5 font-semibold text-white hover:bg-white/10"
+                href="/uninstall-agent.sh"
+                download
+                title={text.uninstall}>{text.downloadUninstaller}</a
+              ></span
             >
           </div>
         </aside>

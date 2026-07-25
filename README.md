@@ -60,6 +60,8 @@ Open the deployed Web UI and choose one of its connection modes before copying t
 
 The installer downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
 
+To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run the downloaded `uninstall-agent.sh` as root. The uninstaller preserves `/var/lib/vps-agent` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
+
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 
 ## Local development

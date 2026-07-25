@@ -66,6 +66,22 @@ The Agent automatically posts a pending registration to the control plane after 
 
 `--allow-apt` is optional and grants `agent` passwordless `sudo apt-get`. Package maintainer scripts run as root, so treat this exactly like root access.
 
+## Uninstall a VPS Agent
+
+For a Managed Tunnel, first choose **移除节点 / Remove node** on its card in the Web UI. This lets the control plane clean up the registered backend and managed Cloudflare resources. Then run the uninstaller on the VPS:
+
+```bash
+curl -fsSL https://<your-control-plane>/uninstall-agent.sh | sudo bash
+```
+
+It stops and removes the Agent, its local configuration, Quick Tunnel helper, and optional apt sudoers rule. It intentionally preserves `/var/lib/vps-agent` (SQLite task records and logs), the `agent` user, Node.js, and cloudflared. To delete the preserved Agent data and system user, pass both explicit flags:
+
+```bash
+curl -fsSL https://<your-control-plane>/uninstall-agent.sh | sudo bash -s -- --purge-data --remove-user
+```
+
+If this host uses no other cloudflared service, add `--remove-managed-tunnel` to stop and remove the local cloudflared system service. This never deletes the remote Tunnel or DNS record; remove the node card in the Web UI for that cleanup.
+
 ## Smoke test
 
 From the Worker or another trusted machine, call:
