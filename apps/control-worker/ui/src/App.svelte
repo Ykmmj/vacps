@@ -287,13 +287,13 @@
     noticeKey += 1;
     notice = message;
     noticeTone = tone;
-    noticeTimer =
-      tone === 'error'
-        ? undefined
-        : setTimeout(() => {
-            notice = '';
-            noticeTimer = undefined;
-          }, 3_500);
+    noticeTimer = setTimeout(
+      () => {
+        notice = '';
+        noticeTimer = undefined;
+      },
+      tone === 'error' ? 6_500 : 3_500,
+    );
   }
 
   function clearNotice() {
