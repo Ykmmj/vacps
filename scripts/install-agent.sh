@@ -211,7 +211,12 @@ normalize_repository_url() {
 
 install_nvm_node
 if [[ -e $APP_DIRECTORY ]]; then
-  if [[ ! -d $APP_DIRECTORY/.git || ! -f $ENVIRONMENT_FILE || ! -f /etc/systemd/system/vps-agent.service ]]; then
+  if [[ ! -d $APP_DIRECTORY/.git ||
+    ! -f $APP_DIRECTORY/apps/vps-agent/package.json ||
+    ! -f $APP_DIRECTORY/apps/vps-agent/systemd/vps-agent.service ||
+    ! -f $APP_DIRECTORY/packages/contracts/package.json ||
+    ! -f $ENVIRONMENT_FILE ||
+    ! -f /etc/systemd/system/vps-agent.service ]]; then
     echo "$APP_DIRECTORY exists but is not a resumable VPS Agent installation; refusing to overwrite it." >&2
     exit 1
   fi
@@ -219,12 +224,12 @@ if [[ -e $APP_DIRECTORY ]]; then
   NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
   NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
   if [[ -z $EXISTING_REPOSITORY_URL || $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
-    echo "$APP_DIRECTORY belongs to a different Git repository; refusing to overwrite it." >&2
+    echo "Warning: $APP_DIRECTORY uses a different Git origin, possibly because of a mirror or proxy." >&2
+    echo 'Continuing with the verified existing VPS Agent checkout without fetching or overwriting it.' >&2
     if [[ $NORMALIZED_EXISTING_REPOSITORY_URL == github.com/* && $NORMALIZED_REQUESTED_REPOSITORY_URL == github.com/* ]]; then
       echo "Existing repository: $NORMALIZED_EXISTING_REPOSITORY_URL" >&2
       echo "Requested repository: $NORMALIZED_REQUESTED_REPOSITORY_URL" >&2
     fi
-    exit 1
   fi
   EXISTING_BACKEND_ID=$(sed -n 's/^BACKEND_ID=//p' "$ENVIRONMENT_FILE" | head -n 1)
   if [[ -z $EXISTING_BACKEND_ID || ! $EXISTING_BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
