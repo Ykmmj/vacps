@@ -104,7 +104,7 @@ apt-get update
 apt-get install -y ca-certificates curl git build-essential python3 sudo
 
 install_nvm_node() {
-  install -d -m 755 "$(dirname "$NVM_DIR")"
+  install -d -m 755 "$NVM_DIR"
   if [[ ! -s $NVM_DIR/nvm.sh ]]; then
     echo 'Installing NVM 0.40.6...'
     NVM_DIR="$NVM_DIR" PROFILE=/dev/null bash -c \
