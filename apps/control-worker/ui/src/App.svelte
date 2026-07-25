@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fly } from 'svelte/transition';
   import { m } from './paraglide/messages.js';
   import { getLocale, setLocale } from './paraglide/runtime.js';
 
@@ -29,6 +30,7 @@
     decisionAt?: string;
     rejectionReason?: string;
     ip?: string;
+    ips?: string[];
     location?: string;
   }
 
@@ -102,6 +104,7 @@
   let loading = true;
   let notice = '';
   let noticeTone: 'default' | 'error' | 'success' = 'default';
+  let noticeKey = 0;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let activeView: 'fleet' | 'install' = 'fleet';
   let filter: RegistrationStatus | 'all' = 'all';
@@ -216,6 +219,7 @@
       control: m.control(),
       footer: m.footer(),
       clipboardUnavailable: m.clipboardUnavailable(),
+      dismiss: m.dismiss(),
     };
   }
 
@@ -280,6 +284,7 @@
 
   function setNotice(message: string, tone: 'default' | 'error' | 'success' = 'default') {
     if (noticeTimer) clearTimeout(noticeTimer);
+    noticeKey += 1;
     notice = message;
     noticeTone = tone;
     noticeTimer =
@@ -591,6 +596,11 @@
     return typeof cpu.load1 === 'number' ? `load ${cpu.load1}` : '—';
   }
 
+  function registrationIps(registration: Registration): string[] {
+    const ips = registration.ips?.filter((ip) => typeof ip === 'string' && ip.length > 0) ?? [];
+    return ips.length > 0 ? ips : registration.ip ? [registration.ip] : [];
+  }
+
   function statusLabel(status: RegistrationStatus) {
     return status === 'pending'
       ? text.pending
@@ -708,42 +718,56 @@
             >{/if}</button
         >
         <button
-          class="icon-button"
+          class="refresh-button"
           title={text.refresh}
           aria-label={text.refresh}
+          aria-busy={loading}
           onclick={refresh}
           disabled={loading}
-          ><svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            class:animate-spin={loading}
-            class="spin-center h-4 w-4"
-            aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.35-5.65" /><path d="M20 4v5h-5" /></svg
-          ></button
+          >{#if loading}
+            <svg class="refresh-spinner" viewBox="0 0 24 24" fill="none" aria-hidden="true"
+              ><circle
+                cx="12"
+                cy="12"
+                r="7.5"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-dasharray="32 16"
+              /></svg
+            >{:else}<svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.9"
+              aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.35-5.65" /><path d="M20 4v5h-5" /></svg
+            >{/if}<span class="sr-only">{loading ? text.loadingNodes : text.refresh}</span></button
         >
       </div>
     </div>
   </header>
 
-  <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+  <div class="toast-viewport" aria-live={noticeTone === 'error' ? 'assertive' : 'polite'}>
     {#if notice}
-      <div
-        class:default-notice={noticeTone === 'default'}
-        class:error-notice={noticeTone === 'error'}
-        class:success-notice={noticeTone === 'success'}
-        class="mb-5 flex items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm font-medium"
-        role={noticeTone === 'error' ? 'alert' : 'status'}
-      >
-        <span>{notice}</span>
-        <button
-          class="grid h-7 w-7 shrink-0 place-items-center rounded-full text-lg leading-none opacity-65 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
-          aria-label="Dismiss"
-          onclick={clearNotice}>×</button
+      {#key noticeKey}
+        <div
+          in:fly={{ y: -18, duration: 180 }}
+          out:fly={{ y: -10, duration: 140 }}
+          class:default-notice={noticeTone === 'default'}
+          class:error-notice={noticeTone === 'error'}
+          class:success-notice={noticeTone === 'success'}
+          class="toast-notice"
+          role={noticeTone === 'error' ? 'alert' : 'status'}
+          aria-atomic="true"
         >
-      </div>
+          <span>{notice}</span>
+          <button class="toast-dismiss" aria-label={text.dismiss} onclick={clearNotice}>×</button>
+        </div>
+      {/key}
     {/if}
+  </div>
+
+  <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
     {#if activeView === 'fleet'}
       <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-3">
@@ -830,7 +854,7 @@
               </div>
 
               <div class="mt-5 grid grid-cols-2 gap-2.5">
-                <div class="metric">
+                <div class="metric col-span-2">
                   <span class="metric-label"
                     ><svg
                       viewBox="0 0 24 24"
@@ -845,9 +869,19 @@
                         r="2"
                       /></svg
                     >{text.ip}</span
-                  ><strong class="truncate font-mono text-xs">{node.registration.ip ?? '—'}</strong>
+                  >
+                  <div class="flex flex-wrap gap-1">
+                    {#each registrationIps(node.registration) as ip}
+                      <code
+                        class="rounded-md bg-white/70 px-1.5 py-0.5 font-mono text-[10px] leading-4 text-zinc-600 dark:bg-black/15 dark:text-zinc-300"
+                        title={ip}>{ip}</code
+                      >
+                    {:else}
+                      <strong class="font-mono text-xs">—</strong>
+                    {/each}
+                  </div>
                 </div>
-                <div class="metric">
+                <div class="metric col-span-2">
                   <span class="metric-label"
                     ><svg
                       viewBox="0 0 24 24"

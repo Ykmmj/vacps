@@ -88,5 +88,6 @@
   "loadingNodes": "Loading nodes…",
   "control": "CONTROL",
   "footer": "VPS Agent · Cloudflare Worker + D1 + BullMQ",
-  "clipboardUnavailable": "Clipboard access is unavailable."
+  "clipboardUnavailable": "Clipboard access is unavailable.",
+  "dismiss": "Dismiss notification"
 }

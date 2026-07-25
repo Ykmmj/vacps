@@ -19,11 +19,13 @@ interface RegistrationRow {
   updated_at: string;
   decision_at: string | null;
   ip: string | null;
+  ips_json: string | null;
   location: string | null;
 }
 
 interface RegistrationNetworkDetails {
   ip?: string;
+  ips?: string[];
   location?: string;
 }
 
@@ -57,6 +59,7 @@ export class RegistrationRepository {
     network: RegistrationNetworkDetails = {},
   ): Promise<BackendRegistration> {
     const now = new Date().toISOString();
+    const ips = mergeIps(input.publicIps, network.ips ?? [], network.ip ? [network.ip] : []);
     const existing = await this.db
       .prepare('SELECT * FROM backend_registrations WHERE backend_id = ?')
       .bind(input.backendId)
@@ -67,8 +70,8 @@ export class RegistrationRepository {
       await this.db
         .prepare(
           `INSERT INTO backend_registrations
-           (id, backend_id, name, base_url, tags_json, agent_version, status, requested_at, updated_at, ip, location)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+           (id, backend_id, name, base_url, tags_json, agent_version, status, requested_at, updated_at, ip, ips_json, location)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
         )
         .bind(
           id,
@@ -80,6 +83,7 @@ export class RegistrationRepository {
           now,
           now,
           network.ip ?? null,
+          JSON.stringify(ips),
           network.location ?? null,
         )
         .run();
@@ -90,7 +94,7 @@ export class RegistrationRepository {
       await this.db
         .prepare(
           `UPDATE backend_registrations
-           SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, updated_at = ?, ip = ?, location = ?
+           SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, updated_at = ?, ip = ?, ips_json = ?, location = ?
            WHERE id = ?`,
         )
         .bind(
@@ -100,6 +104,7 @@ export class RegistrationRepository {
           input.agentVersion,
           now,
           network.ip ?? null,
+          JSON.stringify(ips),
           network.location ?? null,
           existing.id,
         )
@@ -111,7 +116,7 @@ export class RegistrationRepository {
       .prepare(
         `UPDATE backend_registrations
          SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, status = 'pending',
-             rejection_reason = NULL, requested_at = ?, updated_at = ?, decision_at = NULL, ip = ?, location = ?
+             rejection_reason = NULL, requested_at = ?, updated_at = ?, decision_at = NULL, ip = ?, ips_json = ?, location = ?
          WHERE id = ?`,
       )
       .bind(
@@ -122,6 +127,7 @@ export class RegistrationRepository {
         now,
         now,
         network.ip ?? null,
+        JSON.stringify(ips),
         network.location ?? null,
         existing.id,
       )
@@ -168,6 +174,23 @@ function toRegistration(row: RegistrationRow): BackendRegistration {
     ...(row.decision_at ? { decisionAt: row.decision_at } : {}),
     ...(row.rejection_reason ? { rejectionReason: row.rejection_reason } : {}),
     ...(row.ip ? { ip: row.ip } : {}),
+    ips: parseIps(row.ips_json, row.ip),
     ...(row.location ? { location: row.location } : {}),
   };
+}
+
+function mergeIps(...lists: Array<readonly string[]>): string[] {
+  return [...new Set(lists.flat())].slice(0, 33);
+}
+
+function parseIps(value: string | null, fallback?: string | null): string[] {
+  try {
+    const ips = JSON.parse(value ?? '[]');
+    if (Array.isArray(ips) && ips.every((ip) => typeof ip === 'string')) {
+      return mergeIps(ips, fallback ? [fallback] : []);
+    }
+  } catch {
+    // Older or manually repaired database rows fall back to the observed request IP.
+  }
+  return fallback ? [fallback] : [];
 }
