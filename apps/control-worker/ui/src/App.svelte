@@ -207,7 +207,15 @@
   $: visibleNodes = (dashboard?.nodes ?? []).filter(
     (node) => filter === 'all' || node.registration.status === filter,
   );
-  $: installCommand = buildInstallCommand();
+  $: installCommand = buildInstallCommand(
+    installBackendName,
+    installPublicUrl,
+    installTags,
+    installRedisUrl,
+    installRegistrationSecret,
+    installTunnelToken,
+    installAllowApt,
+  );
 
   onMount(() => {
     const savedLocale = localStorage.getItem('vps-agent-locale');
@@ -331,28 +339,36 @@
     void refresh();
   }
 
-  function buildInstallCommand() {
+  function buildInstallCommand(
+    backendName: string,
+    publicUrl: string,
+    tags: string,
+    redisUrl: string,
+    registrationSecret: string,
+    tunnelToken: string,
+    allowApt: boolean,
+  ) {
     const lines = [
       `curl -fsSL ${origin}/install-agent.sh | sudo bash -s -- \\`,
       `  --repo ${shellQuote(repositoryUrl)} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
-      `  --public-url ${shellQuote(installPublicUrl || 'https://agent.example.com')} \\`,
-      `  --backend-token ${shellQuote(installRegistrationSecret || '<REGISTRATION_SECRET>')} \\`,
-      `  --redis-url ${shellQuote(installRedisUrl || '<REDIS_TLS_URL>')}`,
+      `  --public-url ${shellQuote(publicUrl || 'https://agent.example.com')} \\`,
+      `  --backend-token ${shellQuote(registrationSecret || '<REGISTRATION_SECRET>')} \\`,
+      `  --redis-url ${shellQuote(redisUrl || '<REDIS_TLS_URL>')}`,
     ];
-    if (installBackendName.trim()) {
+    if (backendName.trim()) {
       lines[lines.length - 1] += ' \\';
-      lines.push(`  --backend-name ${shellQuote(installBackendName.trim())}`);
+      lines.push(`  --backend-name ${shellQuote(backendName.trim())}`);
     }
-    if (installTags.trim()) {
+    if (tags.trim()) {
       lines[lines.length - 1] += ' \\';
-      lines.push(`  --tags ${shellQuote(installTags.trim())}`);
+      lines.push(`  --tags ${shellQuote(tags.trim())}`);
     }
-    if (installTunnelToken.trim()) {
+    if (tunnelToken.trim()) {
       lines[lines.length - 1] += ' \\';
-      lines.push(`  --tunnel-token ${shellQuote(installTunnelToken.trim())}`);
+      lines.push(`  --tunnel-token ${shellQuote(tunnelToken.trim())}`);
     }
-    if (installAllowApt) {
+    if (allowApt) {
       lines[lines.length - 1] += ' \\';
       lines.push('  --allow-apt');
     }
