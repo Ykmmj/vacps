@@ -1,4 +1,5 @@
 import type { AgentConfig } from '../config.js';
+import { publicInterfaceAddresses } from '../network/public-interface-addresses.js';
 
 export async function registerWithControlPlane(config: AgentConfig): Promise<string | undefined> {
   if (!config.CONTROL_PLANE_URL || !config.PUBLIC_BASE_URL) return undefined;
@@ -15,6 +16,7 @@ export async function registerWithControlPlane(config: AgentConfig): Promise<str
       tags: config.BACKEND_TAGS.split(',')
         .map((tag) => tag.trim())
         .filter(Boolean),
+      publicIps: publicInterfaceAddresses(),
       agentVersion: '0.1.0',
     }),
   });

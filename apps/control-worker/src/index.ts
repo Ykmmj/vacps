@@ -316,11 +316,14 @@ async function inspectNode(
   }
 }
 
-function registrationNetwork(request: Request): { ip?: string; location?: string } {
+function registrationNetwork(request: Request): { ip?: string; ips?: string[]; location?: string } {
   const ip = request.headers.get('cf-connecting-ip') ?? undefined;
   const cf = request.cf as unknown as Record<string, unknown> | undefined;
   const city = typeof cf?.city === 'string' ? cf.city : undefined;
   const country = typeof cf?.country === 'string' ? cf.country : undefined;
   const location = [city, country].filter(Boolean).join(', ') || undefined;
-  return { ...(ip ? { ip } : {}), ...(location ? { location } : {}) };
+  return {
+    ...(ip ? { ip, ips: [ip] } : {}),
+    ...(location ? { location } : {}),
+  };
 }
