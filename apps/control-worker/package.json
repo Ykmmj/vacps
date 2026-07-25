@@ -6,18 +6,20 @@
   "scripts": {
     "build": "pnpm run build:ui && pnpm run copy:installer && wrangler deploy --dry-run",
     "build:ui": "vite build",
-    "check:ui": "svelte-check --tsconfig tsconfig.ui.json",
+    "check:ui": "pnpm run generate:i18n && svelte-check --tsconfig tsconfig.ui.json",
     "copy:installer": "node scripts/copy-installer.mjs",
     "dev": "pnpm run build:ui && pnpm run copy:installer && wrangler dev",
     "deploy": "pnpm run migrate:remote && pnpm run build:ui && pnpm run copy:installer && wrangler deploy",
+    "generate:i18n": "node scripts/generate-i18n.mjs",
     "migrate:remote": "wrangler d1 migrations apply vps-agent-control --remote",
     "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc --noEmit -p tsconfig.json && pnpm run check:ui"
+    "typecheck": "pnpm run check:ui && tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@inlang/paraglide-js": "^2.22.0",
     "@modelcontextprotocol/sdk": "^1.15.1",
     "@vps-agent/contracts": "workspace:*",
-    "zod": "^3.24.4"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260722.1",

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const optionalUrl = z
-  .preprocess((value) => (value === '' ? undefined : value), z.string().url().optional())
+  .preprocess((value) => (value === '' ? undefined : value), z.url().optional())
   .transform((value) => value?.replace(/\/$/, ''));
 
 const configSchema = z.object({
@@ -14,7 +14,7 @@ const configSchema = z.object({
   REGISTRATION_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(300),
   LISTEN_HOST: z.string().default('127.0.0.1'),
   LISTEN_PORT: z.coerce.number().int().min(1).max(65_535).default(3100),
-  REDIS_URL: z.string().url(),
+  REDIS_URL: z.url(),
   DATABASE_PATH: z.string().min(1).default('/var/lib/vps-agent/agent.db'),
   LOG_DIR: z.string().min(1).default('/var/lib/vps-agent/logs'),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(1),

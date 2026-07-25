@@ -11,23 +11,26 @@
   },
   "scripts": {
     "build": "pnpm -r build",
+    "bind:managed-tunnel-account": "bash scripts/bind-managed-tunnel-account.sh",
     "check": "pnpm format:check && pnpm typecheck && pnpm test",
+    "configure:managed-tunnels": "bash scripts/configure-managed-tunnels.sh",
+    "repair:managed-tunnel-account": "bash scripts/configure-managed-tunnel-account.sh",
     "dev:control": "pnpm --filter @vps-agent/control-worker dev",
     "dev:agent": "pnpm --filter @vps-agent/vps-agent dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "setup:cloudflare": "node scripts/setup-cloudflare.mjs",
+    "setup:cloudflare": "node scripts/run-cloudflare-setup.mjs",
     "test": "pnpm -r test",
     "typecheck": "pnpm --filter @vps-agent/contracts build && pnpm -r typecheck"
   },
   "devDependencies": {
     "@eslint/js": "^9.29.0",
-    "@types/node": "^22.15.32",
-    "eslint": "^9.29.0",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.7.0",
     "prettier": "^3.5.3",
     "prettier-plugin-svelte": "^4.1.1",
-    "typescript": "^5.8.3",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.34.0"
   }
 }

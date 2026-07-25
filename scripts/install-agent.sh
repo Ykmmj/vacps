@@ -2,8 +2,12 @@
 set -Eeuo pipefail
 
 APP_DIRECTORY=/opt/vps-agent
+DATA_DIRECTORY=/var/lib/vps-agent
+ENVIRONMENT_DIRECTORY=/etc/vps-agent
 ENVIRONMENT_FILE=/etc/vps-agent/vps-agent.env
 SERVICE_USER=agent
+export NVM_DIR=/usr/local/lib/vps-agent/nvm
+NODE_MAJOR_VERSION=24
 REPOSITORY_URL=''
 REPOSITORY_REF=main
 BACKEND_ID=''
@@ -16,15 +20,18 @@ CONTROL_PLANE_URL=''
 PUBLIC_BASE_URL=''
 QUICK_TUNNEL=false
 ALLOW_APT=false
+RESUME_INSTALL=false
+HEALTH_CHECK_TIMEOUT_SECONDS=90
+HEALTH_CHECK_DELAY_SECONDS=2
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash install-agent.sh --repo <git-url> --backend-token <token> --redis-url <rediss-url> --control-plane-url <url> (--public-url <url> | --quick-tunnel) [options]
+Usage: sudo bash agent.sh install --repo <git-url> --backend-token <token> --redis-url <redis-url> --control-plane-url <url> (--public-url <url> | --quick-tunnel) [options]
 
 Required:
   --repo <git-url>          Git repository containing this project.
   --backend-token <token>   Registration secret configured in the Cloudflare Worker.
-  --redis-url <url>         Redis Cloud TLS URL: rediss://default:password@host:port.
+  --redis-url <url>         Redis URL: prefer rediss://; redis:// is allowed only on a private/restricted network.
   --control-plane-url <url> Worker URL used for self-registration.
   --public-url <url>        Stable Agent URL. Required for managed/manual Tunnel mode.
   --quick-tunnel            Create a temporary trycloudflare.com URL automatically.
@@ -38,6 +45,78 @@ Optional:
   --allow-apt               Permit sudo apt-get for the agent. This is root-equivalent.
 EOF
 }
+
+uninstall_usage() {
+  cat <<'EOF'
+Usage: sudo bash agent.sh uninstall [options]
+
+Stops and removes the VPS Agent service, its configuration, Quick Tunnel helper,
+Agent-scoped NVM runtime, and the optional apt sudoers rule. Task records and
+logs are preserved by default.
+
+Options:
+  --purge-data              Delete /var/lib/vps-agent, including SQLite task records and logs.
+  --remove-user             Delete the agent system user. Requires --purge-data.
+  --remove-managed-tunnel   Stop and remove this host's cloudflared system service. Does not delete the remote Tunnel or DNS record.
+  --help, -h                Show this help message.
+EOF
+}
+
+uninstall_agent() {
+  local purge_data=false remove_user=false remove_managed_tunnel=false
+  while (($#)); do
+    case "$1" in
+      --purge-data) purge_data=true; shift ;;
+      --remove-user) remove_user=true; shift ;;
+      --remove-managed-tunnel) remove_managed_tunnel=true; shift ;;
+      --help|-h) uninstall_usage; return 0 ;;
+      *) echo "Unknown uninstall option: $1" >&2; uninstall_usage >&2; return 2 ;;
+    esac
+  done
+  if ((EUID != 0)); then
+    echo 'Run this uninstaller with sudo.' >&2
+    return 1
+  fi
+  if [[ $remove_user == true && $purge_data != true ]]; then
+    echo '--remove-user requires --purge-data so no agent-owned data is left behind.' >&2
+    return 2
+  fi
+
+  systemctl disable --now vps-agent 2>/dev/null || true
+  systemctl disable --now vps-agent-quick-tunnel 2>/dev/null || true
+  if [[ $remove_managed_tunnel == true ]]; then
+    systemctl disable --now cloudflared 2>/dev/null || true
+    if command -v cloudflared >/dev/null; then cloudflared service uninstall 2>/dev/null || true; fi
+  fi
+
+  rm -f /etc/systemd/system/vps-agent.service
+  rm -rf /etc/systemd/system/vps-agent.service.d
+  rm -f /etc/systemd/system/vps-agent-quick-tunnel.service
+  rm -f /usr/local/lib/vps-agent/quick-tunnel.sh
+  rm -rf "$NVM_DIR"
+  rmdir /usr/local/lib/vps-agent 2>/dev/null || true
+  rm -f /etc/sudoers.d/vps-agent-apt
+  rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
+  if [[ $purge_data == true ]]; then
+    rm -rf "$DATA_DIRECTORY"
+  else
+    echo "Preserved $DATA_DIRECTORY (SQLite task records and logs). Re-run with --purge-data to delete it."
+  fi
+  if [[ $remove_user == true ]] && id "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER"; fi
+  systemctl daemon-reload
+  systemctl reset-failed vps-agent vps-agent-quick-tunnel 2>/dev/null || true
+  echo 'VPS Agent service files have been removed.'
+  if [[ $remove_managed_tunnel != true ]]; then
+    echo 'cloudflared was left installed and unchanged. Use --remove-managed-tunnel only when this host has no other cloudflared service.'
+  fi
+}
+
+if [[ ${1:-} == uninstall ]]; then
+  shift
+  uninstall_agent "$@"
+  exit $?
+fi
+if [[ ${1:-} == install ]]; then shift; fi
 
 while (($#)); do
   case "$1" in
@@ -67,9 +146,12 @@ if [[ -z $REPOSITORY_URL || -z $BACKEND_TOKEN || -z $REDIS_URL || -z $CONTROL_PL
   usage >&2
   exit 2
 fi
-if [[ $REDIS_URL != rediss://* ]]; then
-  echo 'Production Redis URL must use rediss://.' >&2
+if [[ $REDIS_URL != redis://* && $REDIS_URL != rediss://* ]]; then
+  echo 'Redis URL must use redis:// or rediss://.' >&2
   exit 2
+fi
+if [[ $REDIS_URL == redis://* ]]; then
+  echo 'Warning: redis:// is plaintext. Use it only when Redis is private/restricted and never exposed to the public Internet.' >&2
 fi
 if [[ $CONTROL_PLANE_URL != https://* ]]; then
   echo 'Control-plane URL must use HTTPS.' >&2
@@ -83,67 +165,97 @@ if [[ $QUICK_TUNNEL == false && $PUBLIC_BASE_URL != https://* ]]; then
   echo 'Managed/manual Tunnel mode requires a public Agent URL using HTTPS.' >&2
   exit 2
 fi
-if [[ -z $BACKEND_ID ]]; then
-  BACKEND_ID="vps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
-elif [[ ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
+if [[ -n $BACKEND_ID && ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
   echo 'Backend ID must match [a-z0-9-]{1,64}.' >&2
   exit 2
 fi
 if [[ -z $BACKEND_NAME ]]; then BACKEND_NAME=$(hostname -s); fi
-if [[ -e $APP_DIRECTORY ]]; then
-  echo "$APP_DIRECTORY already exists; refusing to overwrite an existing installation." >&2
-  exit 1
-fi
 
 apt-get update
-apt-get install -y ca-certificates curl git build-essential python3 sudo xz-utils
+apt-get install -y ca-certificates curl git build-essential python3 sudo
 
-install_node_lts() {
-  local machine_architecture node_architecture manifest node_file node_version archive_url
-  machine_architecture=$(uname -m)
-  case "$machine_architecture" in
-    x86_64) node_architecture=x64 ;;
-    aarch64|arm64) node_architecture=arm64 ;;
-    *) echo "Unsupported Node.js architecture: $machine_architecture" >&2; exit 1 ;;
-  esac
-  manifest=$(mktemp)
-  curl --fail --location --output "$manifest" \
-    https://nodejs.org/download/release/latest-v22.x/SHASUMS256.txt
-  node_file=$(awk "/node-v.*-linux-$node_architecture\\.tar\\.xz$/ { print \$2; exit }" "$manifest")
-  if [[ -z $node_file ]]; then
-    echo 'Could not determine the latest Node.js 22 LTS archive.' >&2
+install_nvm_node() {
+  install -d -m 755 "$NVM_DIR"
+  if [[ ! -s $NVM_DIR/nvm.sh ]]; then
+    echo 'Installing NVM 0.40.6...'
+    NVM_DIR="$NVM_DIR" PROFILE=/dev/null bash -c \
+      'curl --fail --silent --show-error --location https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh | bash'
+  fi
+  # shellcheck disable=SC1090
+  . "$NVM_DIR/nvm.sh"
+  nvm install "$NODE_MAJOR_VERSION"
+  nvm alias default "$NODE_MAJOR_VERSION"
+  nvm use "$NODE_MAJOR_VERSION"
+  if ! command -v corepack >/dev/null; then
+    echo 'The NVM-installed Node.js runtime does not provide Corepack.' >&2
     exit 1
   fi
-  node_version=${node_file%-linux-*}
-  archive_url="https://nodejs.org/download/release/latest-v22.x/$node_file"
-  curl --fail --location --output "/tmp/$node_file" "$archive_url"
-  (cd /tmp && grep " $node_file$" "$manifest" | sha256sum -c -)
-  install -d /usr/local/lib/nodejs
-  tar -xJf "/tmp/$node_file" -C /usr/local/lib/nodejs
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/node" /usr/local/bin/node
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/npm" /usr/local/bin/npm
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/npx" /usr/local/bin/npx
-  ln -sfn "/usr/local/lib/nodejs/$node_version/bin/corepack" /usr/local/bin/corepack
-  rm -f "$manifest" "/tmp/$node_file"
+  corepack enable pnpm
 }
 
-if ! command -v node >/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
-  install_node_lts
-fi
-if ! command -v corepack >/dev/null; then
-  echo 'Corepack is required to install pnpm. Reinstall Node.js with Corepack enabled, then retry.' >&2
-  exit 1
+normalize_repository_url() {
+  local value=${1%/}
+  local lowercase
+  value=${value%.git}
+  lowercase=${value,,}
+  case "$lowercase" in
+    https://github.com/*) printf 'github.com/%s\n' "${lowercase#https://github.com/}" ;;
+    http://github.com/*) printf 'github.com/%s\n' "${lowercase#http://github.com/}" ;;
+    ssh://git@github.com/*) printf 'github.com/%s\n' "${lowercase#ssh://git@github.com/}" ;;
+    git@github.com:*) printf 'github.com/%s\n' "${lowercase#git@github.com:}" ;;
+    git://github.com/*) printf 'github.com/%s\n' "${lowercase#git://github.com/}" ;;
+    github.com/*) printf '%s\n' "$lowercase" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+install_nvm_node
+if [[ -e $APP_DIRECTORY ]]; then
+  if [[ ! -d $APP_DIRECTORY/.git || ! -f $ENVIRONMENT_FILE || ! -f /etc/systemd/system/vps-agent.service ]]; then
+    echo "$APP_DIRECTORY exists but is not a resumable VPS Agent installation; refusing to overwrite it." >&2
+    exit 1
+  fi
+  EXISTING_REPOSITORY_URL=$(git -C "$APP_DIRECTORY" remote get-url origin 2>/dev/null || true)
+  NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
+  NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
+  if [[ -z $EXISTING_REPOSITORY_URL || $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
+    echo "$APP_DIRECTORY belongs to a different Git repository; refusing to overwrite it." >&2
+    if [[ $NORMALIZED_EXISTING_REPOSITORY_URL == github.com/* && $NORMALIZED_REQUESTED_REPOSITORY_URL == github.com/* ]]; then
+      echo "Existing repository: $NORMALIZED_EXISTING_REPOSITORY_URL" >&2
+      echo "Requested repository: $NORMALIZED_REQUESTED_REPOSITORY_URL" >&2
+    fi
+    exit 1
+  fi
+  EXISTING_BACKEND_ID=$(sed -n 's/^BACKEND_ID=//p' "$ENVIRONMENT_FILE" | head -n 1)
+  if [[ -z $EXISTING_BACKEND_ID || ! $EXISTING_BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
+    echo "Could not recover a valid Backend ID from $ENVIRONMENT_FILE." >&2
+    exit 1
+  fi
+  if [[ -n $BACKEND_ID && $BACKEND_ID != "$EXISTING_BACKEND_ID" ]]; then
+    echo "Backend ID $BACKEND_ID does not match the existing installation ($EXISTING_BACKEND_ID)." >&2
+    exit 1
+  fi
+  BACKEND_ID=$EXISTING_BACKEND_ID
+  RESUME_INSTALL=true
+  echo "Resuming the existing VPS Agent installation for $BACKEND_ID."
+else
+  if [[ -z $BACKEND_ID ]]; then
+    BACKEND_ID="vps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
+  fi
+  git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
 fi
 
-corepack enable
-git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
 cd "$APP_DIRECTORY"
-pnpm install --frozen-lockfile
-pnpm --filter @vps-agent/contracts build
-pnpm --filter @vps-agent/vps-agent build
+if [[ $RESUME_INSTALL == false ]]; then
+  pnpm --version
+  pnpm install --frozen-lockfile
+  pnpm --filter @vps-agent/contracts build
+  pnpm --filter @vps-agent/vps-agent build
+fi
 
 useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
-install -d -o "$SERVICE_USER" -g "$SERVICE_USER" /var/lib/vps-agent/logs
+install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
+install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
 install -d /etc/vps-agent /etc/systemd/system/vps-agent.service.d
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
 
@@ -191,11 +303,34 @@ EOF
 fi
 
 systemctl daemon-reload
-systemctl enable --now vps-agent
-curl --fail --silent --show-error \
-  -H "Authorization: Bearer $BACKEND_TOKEN" \
-  http://127.0.0.1:3100/health
-echo
+systemctl enable vps-agent
+systemctl restart vps-agent
+
+wait_for_agent_health() {
+  local deadline=$((SECONDS + HEALTH_CHECK_TIMEOUT_SECONDS))
+  local response=''
+  while ((SECONDS < deadline)); do
+    if response=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
+      -H "Authorization: Bearer $BACKEND_TOKEN" \
+      http://127.0.0.1:3100/health 2>&1); then
+      printf '%s\n' "$response"
+      return 0
+    fi
+    if ((SECONDS < deadline)); then
+      sleep "$HEALTH_CHECK_DELAY_SECONDS"
+    fi
+  done
+
+  echo "VPS Agent did not become healthy after $HEALTH_CHECK_TIMEOUT_SECONDS seconds." >&2
+  if [[ -n $response ]]; then
+    echo "Last health-check error: $response" >&2
+  fi
+  systemctl status vps-agent --no-pager --full >&2 || true
+  journalctl -u vps-agent -n 50 --no-pager >&2 || true
+  return 1
+}
+
+wait_for_agent_health
 
 install_cloudflared() {
   MACHINE_ARCHITECTURE=$(dpkg --print-architecture)

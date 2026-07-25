@@ -23,13 +23,17 @@ export function createMcpServer(env: Env): McpServer {
     content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
   });
 
-  server.tool('backends.list', 'List enabled and disabled VPS agent backends.', {}, async () =>
-    response(await backends.list()),
+  server.registerTool(
+    'backends.list',
+    { description: 'List enabled and disabled VPS agent backends.' },
+    async () => response(await backends.list()),
   );
-  server.tool(
+  server.registerTool(
     'backends.get_status',
-    'Get health and queue status for one VPS agent.',
-    { backendId: z.string() },
+    {
+      description: 'Get health and queue status for one VPS agent.',
+      inputSchema: { backendId: z.string() },
+    },
     async ({ backendId }) => {
       const backend = await backends.get(backendId);
       const status = await client.status(backend);
@@ -37,79 +41,91 @@ export function createMcpServer(env: Env): McpServer {
       return response(status);
     },
   );
-  server.tool(
+  server.registerTool(
     'tasks.create',
-    'Queue a Shell command or natural-language Pi agent task. This returns immediately.',
     {
-      backendId: z.string(),
-      type: z.enum(['shell', 'agent']),
-      command: z.string().optional(),
-      prompt: z.string().optional(),
-      cwd: z.string(),
-      profile: z.literal('full').default('full'),
-      timeoutSeconds: z.number().int().min(1).max(86_400),
+      description:
+        'Queue a Shell command or natural-language Pi agent task. This returns immediately.',
+      inputSchema: {
+        backendId: z.string(),
+        type: z.enum(['shell', 'agent']),
+        command: z.string().optional(),
+        prompt: z.string().optional(),
+        cwd: z.string(),
+        profile: z.literal('full').default('full'),
+        timeoutSeconds: z.number().int().min(1).max(86_400),
+      },
     },
     async (input) => response(await tasks.create(parseTaskInput(input), 'mcp')),
   );
-  server.tool(
+  server.registerTool(
     'tasks.get',
-    'Get a task and its latest state from the target VPS.',
-    { taskId: z.string().uuid() },
+    {
+      description: 'Get a task and its latest state from the target VPS.',
+      inputSchema: { taskId: z.uuid() },
+    },
     async ({ taskId }) => response(await tasks.detail(taskId)),
   );
-  server.tool(
+  server.registerTool(
     'tasks.list',
-    'List recent task summaries.',
-    { limit: z.number().int().min(1).max(200).default(50) },
+    {
+      description: 'List recent task summaries.',
+      inputSchema: { limit: z.number().int().min(1).max(200).default(50) },
+    },
     async ({ limit }) => response(await tasks.list(limit)),
   );
-  server.tool(
+  server.registerTool(
     'tasks.cancel',
-    'Cancel a queued or running task.',
-    { taskId: z.string().uuid() },
+    { description: 'Cancel a queued or running task.', inputSchema: { taskId: z.uuid() } },
     async ({ taskId }) => response(await tasks.cancel(taskId)),
   );
-  server.tool(
+  server.registerTool(
     'tasks.retry',
-    'Retry a task after an explicit user request.',
-    { taskId: z.string().uuid() },
+    {
+      description: 'Retry a task after an explicit user request.',
+      inputSchema: { taskId: z.uuid() },
+    },
     async ({ taskId }) => response(await tasks.retry(taskId)),
   );
-  server.tool(
+  server.registerTool(
     'schedules.create',
-    'Create a cron schedule backed by BullMQ on the selected VPS.',
-    scheduleToolSchema,
+    {
+      description: 'Create a cron schedule backed by BullMQ on the selected VPS.',
+      inputSchema: scheduleToolSchema,
+    },
     async (input) => response(await schedules.create(parseScheduleInput(input))),
   );
-  server.tool(
+  server.registerTool(
     'schedules.get',
-    'Get a schedule definition.',
-    { scheduleId: z.string().uuid() },
+    { description: 'Get a schedule definition.', inputSchema: { scheduleId: z.uuid() } },
     async ({ scheduleId }) => response(await schedules.get(scheduleId)),
   );
-  server.tool('schedules.list', 'List cron schedules.', {}, async () =>
+  server.registerTool('schedules.list', { description: 'List cron schedules.' }, async () =>
     response(await schedules.list()),
   );
-  server.tool(
+  server.registerTool(
     'schedules.update',
-    'Update a cron schedule.',
-    { scheduleId: z.string().uuid(), ...scheduleToolSchema },
+    {
+      description: 'Update a cron schedule.',
+      inputSchema: { scheduleId: z.uuid(), ...scheduleToolSchema },
+    },
     async ({ scheduleId, ...input }) =>
       response(await schedules.update(scheduleId, parseScheduleInput(input))),
   );
-  server.tool(
+  server.registerTool(
     'schedules.delete',
-    'Delete a cron schedule.',
-    { scheduleId: z.string().uuid() },
+    { description: 'Delete a cron schedule.', inputSchema: { scheduleId: z.uuid() } },
     async ({ scheduleId }) => {
       await schedules.delete(scheduleId);
       return response({ deleted: true, scheduleId });
     },
   );
-  server.tool(
+  server.registerTool(
     'schedules.run_now',
-    'Immediately queue a schedule task once.',
-    { scheduleId: z.string().uuid() },
+    {
+      description: 'Immediately queue a schedule task once.',
+      inputSchema: { scheduleId: z.uuid() },
+    },
     async ({ scheduleId }) => response(await schedules.runNow(scheduleId)),
   );
   return server;

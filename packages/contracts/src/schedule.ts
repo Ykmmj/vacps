@@ -4,17 +4,17 @@ import { backendIdSchema } from './backend.js';
 import { createTaskSchema } from './task.js';
 
 export const scheduleSchema = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   backendId: backendIdSchema,
   name: z.string().trim().min(1).max(120),
   cron: z.string().trim().min(1).max(120),
   timezone: z.string().trim().min(1).max(120).default('UTC'),
   enabled: z.boolean().default(true),
   taskTemplate: createTaskSchema,
-  lastRunAt: z.string().datetime().optional(),
-  nextRunAt: z.string().datetime().optional(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
+  lastRunAt: z.iso.datetime().optional(),
+  nextRunAt: z.iso.datetime().optional(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
 });
 
 export const createScheduleSchema = scheduleSchema.omit({

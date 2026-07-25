@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { m } from './paraglide/messages.js';
+  import { getLocale, setLocale } from './paraglide/runtime.js';
 
   type RegistrationStatus = 'pending' | 'approved' | 'rejected';
   type Locale = 'zh-CN' | 'en';
@@ -66,160 +68,45 @@
     tunnelToken: string;
   }
 
-  const copy = {
-    'zh-CN': {
-      nodes: '节点',
-      install: '安装 Agent',
-      refresh: '刷新',
-      light: '浅色',
-      dark: '深色',
-      language: 'English',
-      nodeCount: '个节点',
-      pending: '待审批',
-      approved: '已批准',
-      rejected: '已拒绝',
-      online: '在线',
-      offline: '离线',
-      ip: '公网 IP',
-      location: '归属地',
-      cpu: 'CPU',
-      memory: '内存',
-      checked: '刚刚检查',
-      unavailable: '暂不可用',
-      approve: '批准接入',
-      reject: '拒绝',
-      actions: '节点操作',
-      test: '健康检查',
-      remove: '移除节点',
-      noNodes: '尚无节点',
-      noNodesHint: '在 VPS 执行安装命令后，节点会自动出现在这里。',
-      all: '全部',
-      installer: '安装命令',
-      tunnelMode: '接入方式',
-      managedTunnel: '托管 Tunnel',
-      managedTunnelDescription: '创建稳定域名、Tunnel 与 DNS；无需填写公开 URL。',
-      quickTunnel: 'Quick Tunnel',
-      quickTunnelDescription: '自动获取临时 trycloudflare.com 地址；适合演示和测试。',
-      provisionTunnel: '创建稳定 Tunnel',
-      provisioningTunnel: '正在创建 Tunnel…',
-      managedTunnelReady: '稳定地址已准备好',
-      managedTunnelNeedsSetup: '需要先为控制平面配置 Tunnel/DNS API Token。',
-      quickTunnelNotice: '地址会在 cloudflared 重连后变化，Agent 会自动重新注册。',
-      nodeName: '节点名称（可选）',
-      tags: '标签（逗号分隔）',
-      redisUrl: 'Redis TLS URL',
-      registrationSecret: '注册密钥',
-      registrationSecretHint:
-        '与 Cloudflare Worker 保存的密钥相同，仅用于 Agent 发起注册。网页不会保存它。',
-      allowApt: '允许 Agent 安装 apt 软件包',
-      allowAptHint: '包维护脚本可以 root 权限运行，仅在明确需要时启用。',
-      copy: '复制命令',
-      download: '下载脚本',
-      copied: '安装命令已复制',
-      syncOk: '已同步',
-      syncFailed: '同步失败：',
-      approveOk: '已批准并启用',
-      approveFailed: '审批未完成：',
-      rejectOk: '已拒绝',
-      rejectFailed: '拒绝操作失败：',
-      testOk: '健康检查通过',
-      testFailed: '节点不可达：',
-      removeOk: '已从控制平面移除',
-      removeFailed: '移除失败：',
-      confirmRemove: '确定移除该节点？此操作不会卸载 VPS 上的 Agent。',
-      rejectPrompt: '可选：填写拒绝原因。Agent 下次注册会再次进入待审批状态。',
-      autoId: '节点 ID 会由安装器自动随机生成。',
-      setupTunnel: '选择接入方式后生成可直接运行的安装命令。',
-      runOnVps: '在 VPS 执行',
-      noTask: '任务通过 MCP 或计划工作流提交。',
-      mcpCopied: 'MCP 地址已复制',
-      backToNodes: '返回节点',
-    },
-    en: {
-      nodes: 'Nodes',
-      install: 'Install agent',
-      refresh: 'Refresh',
-      light: 'Light',
-      dark: 'Dark',
-      language: '中文',
-      nodeCount: 'nodes',
-      pending: 'Pending',
-      approved: 'Approved',
-      rejected: 'Rejected',
-      online: 'Online',
-      offline: 'Offline',
-      ip: 'Public IP',
-      location: 'Location',
-      cpu: 'CPU',
-      memory: 'Memory',
-      checked: 'Just checked',
-      unavailable: 'Unavailable',
-      approve: 'Approve',
-      reject: 'Reject',
-      actions: 'Node actions',
-      test: 'Health check',
-      remove: 'Remove node',
-      noNodes: 'No nodes yet',
-      noNodesHint: 'Run the install command on a VPS and its card will appear here.',
-      all: 'All',
-      installer: 'Install command',
-      tunnelMode: 'Connection mode',
-      managedTunnel: 'Managed Tunnel',
-      managedTunnelDescription:
-        'Creates a stable hostname, Tunnel, and DNS. No public URL to enter.',
-      quickTunnel: 'Quick Tunnel',
-      quickTunnelDescription:
-        'Gets a temporary trycloudflare.com URL automatically; best for demos and tests.',
-      provisionTunnel: 'Create stable Tunnel',
-      provisioningTunnel: 'Creating Tunnel…',
-      managedTunnelReady: 'Stable endpoint is ready',
-      managedTunnelNeedsSetup: 'Configure the Tunnel/DNS API token for this control plane first.',
-      quickTunnelNotice:
-        'The URL may change after cloudflared reconnects; the Agent re-registers automatically.',
-      nodeName: 'Node name (optional)',
-      tags: 'Tags (comma-separated)',
-      redisUrl: 'Redis TLS URL',
-      registrationSecret: 'Registration secret',
-      registrationSecretHint:
-        'The same secret stored in the Cloudflare Worker. It only authorizes agent registration and is never saved by this page.',
-      allowApt: 'Allow agent to install apt packages',
-      allowAptHint: 'Package maintainer scripts may run as root. Enable only when needed.',
-      copy: 'Copy command',
-      download: 'Download script',
-      copied: 'Install command copied',
-      syncOk: 'Synchronized',
-      syncFailed: 'Sync failed: ',
-      approveOk: 'Approved and enabled',
-      approveFailed: 'Approval failed: ',
-      rejectOk: 'Rejected',
-      rejectFailed: 'Reject failed: ',
-      testOk: 'Health check passed',
-      testFailed: 'Node unreachable: ',
-      removeOk: 'Removed from the control plane',
-      removeFailed: 'Removal failed: ',
-      confirmRemove: 'Remove this node? This will not uninstall the agent on the VPS.',
-      rejectPrompt:
-        'Optional: add a rejection reason. The next registration request will return to pending.',
-      autoId: 'The installer generates a random node ID automatically.',
-      setupTunnel: 'Choose a connection mode to generate a ready-to-run command.',
-      runOnVps: 'Run on the VPS',
-      noTask: 'Tasks are submitted through MCP or schedules.',
-      mcpCopied: 'MCP endpoint copied',
-      backToNodes: 'Back to nodes',
-    },
-  } as const;
+  interface CloudflareOAuthStatus {
+    configured: boolean;
+    connected: boolean;
+    accountId?: string;
+    zoneId?: string;
+    baseDomain?: string;
+    connectedAt?: string;
+  }
+
+  interface CloudflareZone {
+    id: string;
+    name: string;
+  }
+
+  interface InstallDraft {
+    backendName: string;
+    tags: string;
+    redisUrl: string;
+    registrationSecret: string;
+    allowApt: boolean;
+    tunnelMode: TunnelMode;
+  }
 
   const origin = window.location.origin;
+  const installDraftStorageKey = 'vps-agent-install-draft';
   const repositoryUrl = 'https://github.com/Ykmmj/vps-agent-platform.git';
+  const cloudflareApiTokenGuideUrl =
+    'https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/';
+  const managedTunnelSetupCommand = buildManagedTunnelSetupCommand();
 
   let dashboard: Dashboard | undefined;
   let loading = true;
   let notice = '';
   let noticeTone: 'default' | 'error' | 'success' = 'default';
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let activeView: 'fleet' | 'install' = 'fleet';
   let filter: RegistrationStatus | 'all' = 'all';
   let actingId: string | undefined;
-  let locale: Locale = 'zh-CN';
+  let locale: Locale = getLocale() as Locale;
   let theme: Theme = 'light';
 
   let installBackendName = '';
@@ -230,8 +117,109 @@
   let installTunnelMode: TunnelMode = 'managed';
   let managedProvision: ManagedProvision | undefined;
   let provisioningTunnel = false;
+  let cloudflareOAuth: CloudflareOAuthStatus | undefined;
+  let cloudflareZones: CloudflareZone[] | undefined;
+  let connectingCloudflare = false;
+  let loadingCloudflareZones = false;
+  let selectingCloudflareZone = false;
+  let cloudflareAuthorizationResult: string | undefined;
 
-  $: text = copy[locale];
+  function translatedText(_locale: Locale) {
+    return {
+      nodes: m.nodes(),
+      install: m.install(),
+      refresh: m.refresh(),
+      light: m.light(),
+      dark: m.dark(),
+      language: m.language(),
+      nodeCount: m.nodeCount(),
+      pending: m.pending(),
+      approved: m.approved(),
+      rejected: m.rejected(),
+      online: m.online(),
+      offline: m.offline(),
+      ip: m.ip(),
+      location: m.location(),
+      cpu: m.cpu(),
+      memory: m.memory(),
+      checked: m.checked(),
+      unavailable: m.unavailable(),
+      approve: m.approve(),
+      reject: m.reject(),
+      actions: m.actions(),
+      test: m.test(),
+      remove: m.remove(),
+      noNodes: m.noNodes(),
+      noNodesHint: m.noNodesHint(),
+      all: m.all(),
+      installer: m.installer(),
+      tunnelMode: m.tunnelMode(),
+      managedTunnel: m.managedTunnel(),
+      managedTunnelDescription: m.managedTunnelDescription(),
+      quickTunnel: m.quickTunnel(),
+      quickTunnelDescription: m.quickTunnelDescription(),
+      provisioningTunnel: m.provisioningTunnel(),
+      createManagedTunnel: m.createManagedTunnel(),
+      managedTunnelReady: m.managedTunnelReady(),
+      managedTunnelWait: m.managedTunnelWait(),
+      installCommandPending: m.installCommandPending(),
+      managedTunnelNeedsSetup: m.managedTunnelNeedsSetup(),
+      managedTunnelSetupTitle: m.managedTunnelSetupTitle(),
+      managedTunnelSetupDescription: m.managedTunnelSetupDescription(),
+      managedTunnelSetupStep1: m.managedTunnelSetupStep1(),
+      managedTunnelSetupStep2: m.managedTunnelSetupStep2(),
+      managedTunnelSetupStep3: m.managedTunnelSetupStep3(),
+      managedTunnelSetupSecurityHint: m.managedTunnelSetupSecurityHint(),
+      openCloudflareApiTokenGuide: m.openCloudflareApiTokenGuide(),
+      copyManagedTunnelSetupCommand: m.copyManagedTunnelSetupCommand(),
+      managedTunnelSetupCommandCopied: m.managedTunnelSetupCommandCopied(),
+      cloudflareSelectZone: m.cloudflareSelectZone(),
+      cloudflareLoadingZones: m.cloudflareLoadingZones(),
+      cloudflareSelectZoneHint: m.cloudflareSelectZoneHint(),
+      cloudflareZoneReady: m.cloudflareZoneReady(),
+      connectCloudflare: m.connectCloudflare(),
+      connectingCloudflare: m.connectingCloudflare(),
+      cloudflareConnected: m.cloudflareConnected(),
+      cloudflareConnectHint: m.cloudflareConnectHint(),
+      cloudflareConnectedHint: m.cloudflareConnectedHint(),
+      cloudflareAuthorizationComplete: m.cloudflareAuthorizationComplete(),
+      cloudflareAuthorizationFailed: m.cloudflareAuthorizationFailed(),
+      quickTunnelNotice: m.quickTunnelNotice(),
+      nodeName: m.nodeName(),
+      tags: m.tags(),
+      redisUrl: m.redisUrl(),
+      redisUrlHint: m.redisUrlHint(),
+      registrationSecret: m.registrationSecret(),
+      registrationSecretHint: m.registrationSecretHint(),
+      allowApt: m.allowApt(),
+      allowAptHint: m.allowAptHint(),
+      copy: m.copy(),
+      copied: m.copied(),
+      syncFailed: m.syncFailed(),
+      approveOk: m.approveOk(),
+      approveFailed: m.approveFailed(),
+      rejectOk: m.rejectOk(),
+      rejectFailed: m.rejectFailed(),
+      testOk: m.testOk(),
+      testFailed: m.testFailed(),
+      removeOk: m.removeOk(),
+      removeFailed: m.removeFailed(),
+      confirmRemove: m.confirmRemove(),
+      rejectPrompt: m.rejectPrompt(),
+      autoId: m.autoId(),
+      setupTunnel: m.setupTunnel(),
+      runOnVps: m.runOnVps(),
+      noTask: m.noTask(),
+      mcpCopied: m.mcpCopied(),
+      backToNodes: m.backToNodes(),
+      loadingNodes: m.loadingNodes(),
+      control: m.control(),
+      footer: m.footer(),
+      clipboardUnavailable: m.clipboardUnavailable(),
+    };
+  }
+
+  $: text = translatedText(locale);
   $: visibleNodes = (dashboard?.nodes ?? []).filter(
     (node) => filter === 'all' || node.registration.status === filter,
   );
@@ -246,8 +234,10 @@
   );
 
   onMount(() => {
-    const savedLocale = localStorage.getItem('vps-agent-locale');
-    if (savedLocale === 'zh-CN' || savedLocale === 'en') locale = savedLocale;
+    locale = getLocale() as Locale;
+    restoreInstallDraft();
+    cloudflareAuthorizationResult =
+      new URLSearchParams(window.location.search).get('cloudflare') ?? undefined;
     const savedTheme = localStorage.getItem('vps-agent-theme');
     theme =
       savedTheme === 'dark' ||
@@ -255,7 +245,20 @@
         ? 'dark'
         : 'light';
     applyTheme();
+    if (cloudflareAuthorizationResult) {
+      activeView = 'install';
+      const url = new URL(window.location.href);
+      url.searchParams.delete('cloudflare');
+      history.replaceState({}, '', url);
+      setNotice(
+        cloudflareAuthorizationResult === 'connected'
+          ? text.cloudflareAuthorizationComplete
+          : `${text.cloudflareAuthorizationFailed} (${cloudflareAuthorizationResult})`,
+        cloudflareAuthorizationResult === 'connected' ? 'success' : 'error',
+      );
+    }
     void refresh();
+    void refreshCloudflare();
   });
 
   async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -276,19 +279,86 @@
   }
 
   function setNotice(message: string, tone: 'default' | 'error' | 'success' = 'default') {
+    if (noticeTimer) clearTimeout(noticeTimer);
     notice = message;
     noticeTone = tone;
+    noticeTimer =
+      tone === 'error'
+        ? undefined
+        : setTimeout(() => {
+            notice = '';
+            noticeTimer = undefined;
+          }, 3_500);
+  }
+
+  function clearNotice() {
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = undefined;
+    notice = '';
   }
 
   async function refresh() {
     loading = true;
     try {
       dashboard = await api<Dashboard>('/api/dashboard');
-      setNotice(text.syncOk, 'success');
     } catch (error) {
       setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
     } finally {
       loading = false;
+    }
+  }
+
+  async function refreshCloudflare() {
+    try {
+      cloudflareOAuth = await api<CloudflareOAuthStatus>('/api/cloudflare/oauth/status');
+      cloudflareZones = undefined;
+      if (cloudflareOAuth.connected && !cloudflareOAuth.zoneId) await loadCloudflareZones();
+    } catch (error) {
+      setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
+    }
+  }
+
+  async function connectCloudflare() {
+    connectingCloudflare = true;
+    try {
+      const { authorizationUrl } = await api<{ authorizationUrl: string }>(
+        '/api/cloudflare/oauth/connect',
+        { method: 'POST' },
+      );
+      saveInstallDraft();
+      window.location.assign(authorizationUrl);
+    } catch (error) {
+      setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
+      connectingCloudflare = false;
+    }
+  }
+
+  async function loadCloudflareZones() {
+    loadingCloudflareZones = true;
+    try {
+      const zones = await api<CloudflareZone[]>('/api/cloudflare/oauth/zones');
+      cloudflareZones = zones;
+      const [onlyZone] = zones;
+      if (zones.length === 1 && onlyZone) await selectCloudflareZone(onlyZone.id, false);
+    } catch (error) {
+      setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
+    } finally {
+      loadingCloudflareZones = false;
+    }
+  }
+
+  async function selectCloudflareZone(zoneId: string, announce = true) {
+    selectingCloudflareZone = true;
+    try {
+      cloudflareOAuth = await api<CloudflareOAuthStatus>('/api/cloudflare/oauth/zone', {
+        method: 'POST',
+        body: JSON.stringify({ zoneId }),
+      });
+      if (announce) setNotice(text.cloudflareZoneReady, 'success');
+    } catch (error) {
+      setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
+    } finally {
+      selectingCloudflareZone = false;
     }
   }
 
@@ -362,12 +432,14 @@
   }
 
   function toggleLocale() {
-    locale = locale === 'zh-CN' ? 'en' : 'zh-CN';
-    localStorage.setItem('vps-agent-locale', locale);
+    const nextLocale: Locale = locale === 'zh-CN' ? 'en' : 'zh-CN';
+    setLocale(nextLocale, { reload: false });
+    locale = nextLocale;
     void refresh();
   }
 
-  async function provisionManagedTunnel() {
+  async function ensureManagedProvision(): Promise<ManagedProvision | undefined> {
+    if (managedProvision) return managedProvision;
     provisioningTunnel = true;
     try {
       managedProvision = await api<ManagedProvision>('/api/tunnels/provision', {
@@ -375,17 +447,35 @@
         body: JSON.stringify({ name: installBackendName.trim() || undefined }),
       });
       setNotice(`${text.managedTunnelReady}: ${managedProvision.publicUrl}`, 'success');
+      return managedProvision;
     } catch (error) {
       const message = messageOf(error);
       setNotice(
-        message.includes('Managed Tunnel is not configured')
+        message.includes('Cloudflare OAuth is not configured')
           ? text.managedTunnelNeedsSetup
           : `${text.syncFailed}${message}`,
         'error',
       );
+      return undefined;
     } finally {
       provisioningTunnel = false;
     }
+  }
+
+  async function copyInstallCommand() {
+    if (installTunnelMode === 'managed' && !managedProvision) return;
+    await copyToClipboard(
+      buildInstallCommand(
+        installBackendName,
+        installTags,
+        installRedisUrl,
+        installRegistrationSecret,
+        installAllowApt,
+        installTunnelMode,
+        managedProvision,
+      ),
+      text.copied,
+    );
   }
 
   function buildInstallCommand(
@@ -397,13 +487,13 @@
     tunnelMode: TunnelMode,
     provision: ManagedProvision | undefined,
   ) {
-    if (tunnelMode === 'managed' && !provision) return `# ${text.provisionTunnel}`;
+    if (tunnelMode === 'managed' && !provision) return `# ${text.installCommandPending}`;
     const lines = [
-      `curl -fsSL ${origin}/install-agent.sh | sudo bash -s -- \\`,
+      `curl -fsSL ${origin}/agent.sh | sudo bash -s -- install \\`,
       `  --repo ${shellQuote(repositoryUrl)} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
       `  --backend-token ${shellQuote(registrationSecret || '<REGISTRATION_SECRET>')} \\`,
-      `  --redis-url ${shellQuote(redisUrl || '<REDIS_TLS_URL>')}`,
+      `  --redis-url ${shellQuote(redisUrl || '<REDIS_URL>')}`,
     ];
     if (tunnelMode === 'managed' && provision) {
       lines[lines.length - 1] += ' \\';
@@ -430,12 +520,49 @@
     return lines.join('\n');
   }
 
+  function buildManagedTunnelSetupCommand() {
+    return ['# Run from the vps-agent-platform checkout', 'pnpm configure:managed-tunnels'].join(
+      '\n',
+    );
+  }
+
+  function saveInstallDraft() {
+    const draft: InstallDraft = {
+      backendName: installBackendName,
+      tags: installTags,
+      redisUrl: installRedisUrl,
+      registrationSecret: installRegistrationSecret,
+      allowApt: installAllowApt,
+      tunnelMode: installTunnelMode,
+    };
+    sessionStorage.setItem(installDraftStorageKey, JSON.stringify(draft));
+  }
+
+  function restoreInstallDraft() {
+    try {
+      const stored = sessionStorage.getItem(installDraftStorageKey);
+      if (!stored) return;
+      const draft = JSON.parse(stored) as Partial<InstallDraft>;
+      installBackendName = typeof draft.backendName === 'string' ? draft.backendName : '';
+      installTags = typeof draft.tags === 'string' ? draft.tags : installTags;
+      installRedisUrl = typeof draft.redisUrl === 'string' ? draft.redisUrl : '';
+      installRegistrationSecret =
+        typeof draft.registrationSecret === 'string' ? draft.registrationSecret : '';
+      installAllowApt = draft.allowApt === true;
+      installTunnelMode = draft.tunnelMode === 'quick' ? 'quick' : 'managed';
+    } catch {
+      // An invalid browser-only draft must never prevent the control plane from loading.
+    } finally {
+      sessionStorage.removeItem(installDraftStorageKey);
+    }
+  }
+
   async function copyToClipboard(value: string, success: string) {
     try {
       await navigator.clipboard.writeText(value);
       setNotice(success, 'success');
     } catch {
-      setNotice('Clipboard access is unavailable.', 'error');
+      setNotice(text.clipboardUnavailable, 'error');
     }
   }
 
@@ -517,7 +644,8 @@
         </span>
         <span
           ><strong class="block text-sm tracking-[-.02em]">VPS Agent</strong><span
-            class="block text-[10px] font-semibold tracking-[.13em] text-zinc-400">CONTROL</span
+            class="block text-[10px] font-semibold tracking-[.13em] text-zinc-400"
+            >{text.control}</span
           ></span
         >
       </button>
@@ -600,6 +728,22 @@
   </header>
 
   <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+    {#if notice}
+      <div
+        class:default-notice={noticeTone === 'default'}
+        class:error-notice={noticeTone === 'error'}
+        class:success-notice={noticeTone === 'success'}
+        class="mb-5 flex items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm font-medium"
+        role={noticeTone === 'error' ? 'alert' : 'status'}
+      >
+        <span>{notice}</span>
+        <button
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-full text-lg leading-none opacity-65 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+          aria-label="Dismiss"
+          onclick={clearNotice}>×</button
+        >
+      </div>
+    {/if}
     {#if activeView === 'fleet'}
       <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-3">
@@ -635,7 +779,9 @@
       </div>
 
       {#if loading && !dashboard}
-        <div class="grid min-h-80 place-items-center text-sm text-zinc-400">Loading nodes…</div>
+        <div class="grid min-h-80 place-items-center text-sm text-zinc-400">
+          {text.loadingNodes}
+        </div>
       {:else if visibleNodes.length === 0}
         <section class="surface-card grid min-h-80 place-items-center p-8 text-center">
           <div>
@@ -933,7 +1079,9 @@
                 type="password"
                 autocomplete="off"
                 placeholder="rediss://default:password@host:port"
-              /></label
+              /><span class="text-[11px] font-normal leading-4 text-zinc-400"
+                >{text.redisUrlHint}</span
+              ></label
             ><label class="field-label sm:col-span-2"
               >{text.registrationSecret}<input
                 bind:value={installRegistrationSecret}
@@ -948,7 +1096,83 @@
           </div>
           {#if installTunnelMode === 'managed'}
             <div class="mt-5 rounded-2xl bg-blue-50 p-4 dark:bg-blue-500/10">
-              {#if managedProvision}
+              {#if !cloudflareOAuth?.configured}
+                <div class="space-y-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
+                  <div>
+                    <p class="font-semibold text-blue-900 dark:text-blue-100">
+                      {text.managedTunnelSetupTitle}
+                    </p>
+                    <p class="mt-1">{text.managedTunnelSetupDescription}</p>
+                  </div>
+                  <ol class="list-decimal space-y-1 pl-4 marker:font-semibold">
+                    <li>{text.managedTunnelSetupStep1}</li>
+                    <li>{text.managedTunnelSetupStep2}</li>
+                    <li>{text.managedTunnelSetupStep3}</li>
+                  </ol>
+                  <pre
+                    class="max-h-52 overflow-auto rounded-xl bg-zinc-950 p-3 text-[11px] leading-5 text-zinc-100"><code
+                      >{managedTunnelSetupCommand}</code
+                    ></pre>
+                  <p class="text-[11px] leading-4 text-blue-600 dark:text-blue-300">
+                    {text.managedTunnelSetupSecurityHint}
+                  </p>
+                  <div class="flex flex-wrap gap-2">
+                    <a
+                      class="rounded-full border border-blue-300 bg-white px-3 py-1.5 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 dark:border-blue-400/30 dark:bg-transparent dark:text-blue-200 dark:hover:bg-blue-400/10"
+                      href={cloudflareApiTokenGuideUrl}
+                      rel="noreferrer"
+                      target="_blank">{text.openCloudflareApiTokenGuide}</a
+                    >
+                    <button
+                      class="rounded-full bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700"
+                      onclick={() =>
+                        void copyToClipboard(
+                          managedTunnelSetupCommand,
+                          text.managedTunnelSetupCommandCopied,
+                        )}>{text.copyManagedTunnelSetupCommand}</button
+                    >
+                  </div>
+                </div>
+              {:else if !cloudflareOAuth.connected}
+                <p class="mt-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
+                  {text.cloudflareConnectHint}
+                </p>
+                <button
+                  class="mt-4 rounded-full bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={connectingCloudflare}
+                  onclick={() => void connectCloudflare()}
+                  >{connectingCloudflare
+                    ? text.connectingCloudflare
+                    : text.connectCloudflare}</button
+                >
+              {:else if !cloudflareOAuth.zoneId || !cloudflareOAuth.baseDomain}
+                <p class="text-xs font-semibold text-blue-700 dark:text-blue-200">
+                  {text.cloudflareSelectZone}
+                </p>
+                {#if loadingCloudflareZones}
+                  <p class="mt-2 text-xs text-blue-700 dark:text-blue-200">
+                    {text.cloudflareLoadingZones}
+                  </p>
+                {:else}
+                  <select
+                    class="field-input mt-3"
+                    disabled={selectingCloudflareZone || !cloudflareZones?.length}
+                    onchange={(event) => {
+                      const zoneId = event.currentTarget.value;
+                      if (zoneId) void selectCloudflareZone(zoneId);
+                    }}
+                    value=""
+                  >
+                    <option disabled value="">{text.cloudflareSelectZone}</option>
+                    {#each cloudflareZones ?? [] as zone}
+                      <option value={zone.id}>{zone.name}</option>
+                    {/each}
+                  </select>
+                  <p class="mt-2 text-xs leading-5 text-blue-700 dark:text-blue-200">
+                    {text.cloudflareSelectZoneHint}
+                  </p>
+                {/if}
+              {:else if managedProvision}
                 <p class="text-xs font-semibold text-blue-700 dark:text-blue-200">
                   {text.managedTunnelReady}
                 </p>
@@ -956,11 +1180,21 @@
                   {managedProvision.publicUrl}
                 </p>
               {:else}
+                <p class="text-xs font-semibold text-blue-700 dark:text-blue-200">
+                  {text.cloudflareConnected}
+                </p>
+                <p class="mt-1 truncate font-mono text-xs text-blue-600 dark:text-blue-300">
+                  {cloudflareOAuth.baseDomain}
+                </p>
+                <p class="mt-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
+                  {text.cloudflareConnectedHint}
+                  {text.managedTunnelWait}
+                </p>
                 <button
-                  class="primary-button"
-                  onclick={provisionManagedTunnel}
+                  class="mt-4 rounded-full bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={provisioningTunnel}
-                  >{provisioningTunnel ? text.provisioningTunnel : text.provisionTunnel}</button
+                  onclick={() => void ensureManagedProvision()}
+                  >{provisioningTunnel ? text.provisioningTunnel : text.createManagedTunnel}</button
                 >
               {/if}
             </div>
@@ -985,12 +1219,15 @@
         >
           <div class="flex items-center justify-between border-b border-white/10 px-5 py-4">
             <div>
-              <p class="text-[10px] font-bold tracking-[.14em] text-blue-300">RUN ON VPS</p>
+              <p class="text-[10px] font-bold tracking-[.14em] text-blue-300">{text.runOnVps}</p>
               <p class="mt-1 text-sm font-semibold">{text.installer}</p>
             </div>
             <button
               class="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/15"
-              onclick={() => copyToClipboard(installCommand, text.copied)}>{text.copy}</button
+              disabled={provisioningTunnel ||
+                (installTunnelMode === 'managed' && !managedProvision)}
+              title={text.copy}
+              onclick={copyInstallCommand}>{text.copy}</button
             >
           </div>
           <pre
@@ -998,11 +1235,7 @@
           <div
             class="flex items-center justify-between border-t border-white/10 px-5 py-4 text-xs text-zinc-400"
           >
-            <span>{text.noTask}</span><a
-              class="rounded-full bg-white px-3 py-1.5 font-semibold text-zinc-900 hover:bg-zinc-100"
-              href="/install-agent.sh"
-              download>{text.download}</a
-            >
+            <span>{text.noTask}</span>
           </div>
         </aside>
       </div>
@@ -1012,7 +1245,7 @@
   <footer
     class="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 pb-7 text-xs text-zinc-400 sm:px-6 lg:px-8"
   >
-    <span>VPS Agent · Cloudflare Worker + D1 + BullMQ</span>
+    <span>{text.footer}</span>
     <div class="flex gap-4">
       <button
         class="hover:text-zinc-700 dark:hover:text-zinc-200"

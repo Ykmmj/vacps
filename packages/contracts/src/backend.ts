@@ -7,14 +7,11 @@ export const backendIdSchema = z
 export const backendSchema = z.object({
   id: backendIdSchema,
   name: z.string().trim().min(1).max(120),
-  baseUrl: z
-    .string()
-    .url()
-    .transform((value) => value.replace(/\/$/, '')),
+  baseUrl: z.url().transform((value) => value.replace(/\/$/, '')),
   tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
   enabled: z.boolean().default(true),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
 });
 
 export const createBackendSchema = backendSchema.omit({ createdAt: true, updatedAt: true });
@@ -25,22 +22,19 @@ export const registrationStatusSchema = z.enum(['pending', 'approved', 'rejected
 export const registerBackendSchema = z.object({
   backendId: backendIdSchema,
   name: z.string().trim().min(1).max(120),
-  baseUrl: z
-    .string()
-    .url()
-    .transform((value) => value.replace(/\/$/, '')),
+  baseUrl: z.url().transform((value) => value.replace(/\/$/, '')),
   tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
   agentVersion: z.string().trim().min(1).max(48).default('unknown'),
 });
 
 export const backendRegistrationSchema = registerBackendSchema.extend({
-  id: z.string().uuid(),
+  id: z.uuid(),
   status: registrationStatusSchema,
-  requestedAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-  decisionAt: z.string().datetime().optional(),
+  requestedAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  decisionAt: z.iso.datetime().optional(),
   rejectionReason: z.string().max(500).optional(),
-  ip: z.string().ip().optional(),
+  ip: z.union([z.ipv4(), z.ipv6()]).optional(),
   location: z.string().trim().min(1).max(180).optional(),
 });
 

@@ -9,10 +9,12 @@ import {
 import type { Backend, BackendRegistration, BackendStatusResponse } from '@vps-agent/contracts';
 import { z } from 'zod';
 
+import { CloudflareOAuthService } from './cloudflare/oauth-service.js';
 import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
 import { createMcpServer } from './mcp/server.js';
 import { BackendClient } from './registry/backend-client.js';
+import { CloudflareOAuthRepository } from './registry/cloudflare-oauth-repository.js';
 import { ManagedTunnelRepository } from './registry/managed-tunnel-repository.js';
 import { RegistrationRepository } from './registry/registration-repository.js';
 import { BackendRepository } from './registry/repository.js';
@@ -43,11 +45,21 @@ function createServices(env: Env) {
   const backends = new BackendRepository(env.DB);
   const registrations = new RegistrationRepository(env.DB);
   const managedTunnels = new ManagedTunnelRepository(env.DB);
+  const cloudflareOAuth = new CloudflareOAuthService(env, new CloudflareOAuthRepository(env.DB));
   const client = new BackendClient(env.BACKEND_SHARED_TOKEN);
-  const tunnels = new ManagedTunnelService(env, managedTunnels);
+  const tunnels = new ManagedTunnelService(cloudflareOAuth, managedTunnels);
   const tasks = new TaskService(env.DB, backends, client);
   const schedules = new ScheduleService(env.DB, backends, client, tasks);
-  return { backends, client, registrations, managedTunnels, tunnels, tasks, schedules };
+  return {
+    backends,
+    client,
+    registrations,
+    managedTunnels,
+    cloudflareOAuth,
+    tunnels,
+    tasks,
+    schedules,
+  };
 }
 
 async function handleApi(request: Request, env: Env, requestId: string): Promise<Response> {
@@ -161,6 +173,31 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
         .object({ name: z.string().trim().min(1).max(120).optional() })
         .parse(await readJson(request));
       return json(await services.tunnels.provision(input), { status: 201 });
+    }
+
+    if (resource === 'cloudflare' && id === 'oauth') {
+      if (action === 'callback' && request.method === 'GET')
+        return services.cloudflareOAuth.callback(request);
+      if (action === 'status' && request.method === 'GET')
+        return json(await services.cloudflareOAuth.status());
+      if (action === 'connect' && request.method === 'POST')
+        return json(await services.cloudflareOAuth.begin());
+      if (action === 'zones' && request.method === 'GET')
+        return json(await services.cloudflareOAuth.zones());
+      if (action === 'zone' && request.method === 'POST') {
+        const input = z
+          .object({
+            zoneId: z
+              .string()
+              .regex(/^[0-9a-f]{32}$/i, 'Zone ID must be 32 hexadecimal characters.'),
+          })
+          .parse(await readJson(request));
+        return json(await services.cloudflareOAuth.selectZone(input.zoneId));
+      }
+      if (action === 'connection' && request.method === 'DELETE') {
+        await services.cloudflareOAuth.disconnect();
+        return new Response(null, { status: 204 });
+      }
     }
 
     if (resource === 'backends') {

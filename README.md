@@ -22,9 +22,8 @@ Cloudflare does not connect to Redis or execute Shell commands. A task UUID is c
 
 ## Prerequisites
 
-- Node.js 22.14 or later (use an active LTS release; native SQLite prebuilds are published for LTS versions)
-- pnpm 10 or later (`corepack enable` and `corepack prepare pnpm@10.14.0 --activate`)
-- A TLS-enabled Redis instance reachable from each VPS
+- Node.js 24 LTS and pnpm 10.14.0 (the VPS installer installs these through an Agent-scoped NVM directory)
+- A Redis instance reachable from each VPS. Use TLS (`rediss://`) whenever traffic crosses a public or untrusted network; a non-TLS `redis://` endpoint must be private and firewall-restricted.
 - A Cloudflare account with Workers, D1, Access, and (recommended) Tunnel
 - A Pi adapter that implements the included NDJSON protocol
 
@@ -55,10 +54,12 @@ The equivalent parameter form is `pnpm setup:cloudflare -- --cloudflare-account-
 
 Open the deployed Web UI and choose one of its connection modes before copying the VPS command:
 
-- **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. It requires one-time Cloudflare API Token setup; the UI fills the hostname and Tunnel token automatically.
+- **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. A one-time local bootstrap uses an API Token to create a scoped OAuth client, then discards the Token; it never reaches the Worker, browser, VPS, or installer command. The bootstrap saves only the selected Cloudflare account context, and the Web UI loads Zones automatically after browser authorization.
 - **Quick Tunnel** creates a temporary `trycloudflare.com` URL on the VPS and re-registers the Agent whenever that URL changes. Use it only for demos or testing.
 
-The installer downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
+The installer installs Node.js 24 and pnpm 10.14.0 through an Agent-scoped NVM directory, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
+
+To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vps-agent` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
 
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 
