@@ -1,5 +1,9 @@
 import { AppError } from '../lib/http.js';
-import type { Env } from '../env.js';
+import {
+  normalizeBaseDomain,
+  type CloudflareOAuthService,
+  type CloudflareTunnelCredentials,
+} from '../cloudflare/oauth-service.js';
 import type { ManagedTunnelRepository } from '../registry/managed-tunnel-repository.js';
 
 interface ProvisionInput {
@@ -30,28 +34,19 @@ interface CreatedDnsRecord {
 
 export class ManagedTunnelService {
   constructor(
-    private readonly env: Env,
+    private readonly cloudflare: CloudflareOAuthService,
     private readonly repository: ManagedTunnelRepository,
   ) {}
 
-  isConfigured(): boolean {
-    return Boolean(
-      this.env.TUNNEL_PROVISIONING_API_TOKEN &&
-      this.env.TUNNEL_PROVISIONING_ACCOUNT_ID &&
-      this.env.TUNNEL_PROVISIONING_ZONE_ID &&
-      this.env.TUNNEL_PROVISIONING_BASE_DOMAIN,
-    );
-  }
-
   async provision(input: ProvisionInput): Promise<ProvisionedTunnel> {
-    const configuration = this.configuration();
+    const configuration = await this.configuration();
     const backendId = `vps-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`;
     const hostname = `${backendId}.${configuration.baseDomain}`;
     let tunnelId: string | undefined;
     let dnsRecordId: string | undefined;
 
     try {
-      const tunnel = await this.request<CreatedTunnel>('/cfd_tunnel', {
+      const tunnel = await this.request<CreatedTunnel>(configuration, '/cfd_tunnel', {
         method: 'POST',
         body: {
           name: input.name?.trim() || `VPS Agent ${backendId}`,
@@ -62,7 +57,7 @@ export class ManagedTunnelService {
         throw new AppError('tunnel_provisioning_failed', 'Tunnel ID was missing.', 502);
       tunnelId = tunnel.id;
 
-      await this.request(`/cfd_tunnel/${tunnelId}/configurations`, {
+      await this.request(configuration, `/cfd_tunnel/${tunnelId}/configurations`, {
         method: 'PUT',
         body: {
           config: {
@@ -75,6 +70,7 @@ export class ManagedTunnelService {
       });
 
       const dns = await this.request<CreatedDnsRecord>(
+        configuration,
         `/zones/${configuration.zoneId}/dns_records`,
         {
           method: 'POST',
@@ -91,11 +87,11 @@ export class ManagedTunnelService {
         throw new AppError('tunnel_provisioning_failed', 'DNS record ID was missing.', 502);
       dnsRecordId = dns.id;
 
-      const tunnelToken = tunnel.token ?? (await this.tunnelToken(tunnelId));
+      const tunnelToken = tunnel.token ?? (await this.tunnelToken(configuration, tunnelId));
       await this.repository.create({ backendId, tunnelId, hostname, dnsRecordId });
       return { backendId, hostname, publicUrl: `https://${hostname}`, tunnelToken };
     } catch (error) {
-      await this.cleanup(tunnelId, dnsRecordId).catch(() => undefined);
+      await this.cleanup(configuration, tunnelId, dnsRecordId).catch(() => undefined);
       throw error;
     }
   }
@@ -103,69 +99,61 @@ export class ManagedTunnelService {
   async remove(backendId: string): Promise<void> {
     const tunnel = await this.repository.find(backendId);
     if (!tunnel) return;
-    const configuration = this.configuration();
-    await this.request(`/zones/${configuration.zoneId}/dns_records/${tunnel.dnsRecordId}`, {
-      method: 'DELETE',
-      scope: 'zone',
-    });
-    await this.request(`/cfd_tunnel/${tunnel.tunnelId}`, { method: 'DELETE' });
+    const configuration = await this.configuration();
+    await this.request(
+      configuration,
+      `/zones/${configuration.zoneId}/dns_records/${tunnel.dnsRecordId}`,
+      {
+        method: 'DELETE',
+        scope: 'zone',
+      },
+    );
+    await this.request(configuration, `/cfd_tunnel/${tunnel.tunnelId}`, { method: 'DELETE' });
     await this.repository.delete(backendId);
   }
 
-  private configuration(): {
-    token: string;
-    accountId: string;
-    zoneId: string;
-    baseDomain: string;
-  } {
-    const token = this.env.TUNNEL_PROVISIONING_API_TOKEN;
-    const accountId = this.env.TUNNEL_PROVISIONING_ACCOUNT_ID;
-    const zoneId = this.env.TUNNEL_PROVISIONING_ZONE_ID;
-    const baseDomain = this.env.TUNNEL_PROVISIONING_BASE_DOMAIN?.toLowerCase().replace(/\.$/, '');
-    if (!token || !accountId || !zoneId || !baseDomain)
-      throw new AppError(
-        'managed_tunnel_not_configured',
-        'Managed Tunnel is not configured. Set the provisioning token, account ID, zone ID, and base domain.',
-        409,
-      );
-    if (
-      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(
-        baseDomain,
-      )
-    )
-      throw new AppError(
-        'managed_tunnel_misconfigured',
-        'The managed Tunnel base domain is invalid.',
-        500,
-      );
-    return { token, accountId, zoneId, baseDomain };
+  private async configuration(): Promise<CloudflareTunnelCredentials> {
+    const configuration = await this.cloudflare.credentials();
+    return { ...configuration, baseDomain: normalizeBaseDomain(configuration.baseDomain) };
   }
 
-  private async tunnelToken(tunnelId: string): Promise<string> {
-    const response = await this.request<string>(`/cfd_tunnel/${tunnelId}/token`, { method: 'GET' });
+  private async tunnelToken(
+    configuration: CloudflareTunnelCredentials,
+    tunnelId: string,
+  ): Promise<string> {
+    const response = await this.request<string>(configuration, `/cfd_tunnel/${tunnelId}/token`, {
+      method: 'GET',
+    });
     if (!response)
       throw new AppError('tunnel_provisioning_failed', 'Tunnel token was missing.', 502);
     return response;
   }
 
-  private async cleanup(tunnelId?: string, dnsRecordId?: string): Promise<void> {
+  private async cleanup(
+    configuration: CloudflareTunnelCredentials,
+    tunnelId?: string,
+    dnsRecordId?: string,
+  ): Promise<void> {
     if (!tunnelId) return;
-    const configuration = this.configuration();
     if (dnsRecordId)
-      await this.request(`/zones/${configuration.zoneId}/dns_records/${dnsRecordId}`, {
-        method: 'DELETE',
-        scope: 'zone',
-      });
-    await this.request(`/cfd_tunnel/${tunnelId}`, { method: 'DELETE' });
+      await this.request(
+        configuration,
+        `/zones/${configuration.zoneId}/dns_records/${dnsRecordId}`,
+        {
+          method: 'DELETE',
+          scope: 'zone',
+        },
+      );
+    await this.request(configuration, `/cfd_tunnel/${tunnelId}`, { method: 'DELETE' });
   }
 
   private async request<T>(
+    configuration: CloudflareTunnelCredentials,
     path: string,
     input: { method: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; scope?: 'zone' } = {
       method: 'POST',
     },
   ): Promise<T> {
-    const configuration = this.configuration();
     const target =
       input.scope === 'zone'
         ? `https://api.cloudflare.com/client/v4${path}`
@@ -173,7 +161,7 @@ export class ManagedTunnelService {
     const response = await fetch(target, {
       method: input.method,
       headers: {
-        authorization: `Bearer ${configuration.token}`,
+        authorization: `Bearer ${configuration.accessToken}`,
         ...(input.body ? { 'content-type': 'application/json' } : {}),
       },
       ...(input.body ? { body: JSON.stringify(input.body) } : {}),

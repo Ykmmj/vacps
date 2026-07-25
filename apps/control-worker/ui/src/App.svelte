@@ -66,6 +66,15 @@
     tunnelToken: string;
   }
 
+  interface CloudflareOAuthStatus {
+    configured: boolean;
+    connected: boolean;
+    accountId?: string;
+    zoneId?: string;
+    baseDomain?: string;
+    connectedAt?: string;
+  }
+
   const copy = {
     'zh-CN': {
       nodes: '节点',
@@ -106,7 +115,17 @@
       managedTunnelWait:
         '这会创建专属 Tunnel、DNS 记录和稳定域名；成功后安装命令会自动显示在右侧。',
       installCommandPending: '请先创建稳定 Tunnel，安装命令将在成功后生成。',
-      managedTunnelNeedsSetup: '需要先为控制平面配置 Tunnel/DNS API Token。',
+      managedTunnelNeedsSetup: '需要先为控制平面配置 Cloudflare OAuth Client。',
+      cloudflareAccountId: 'Cloudflare 账户 ID',
+      cloudflareZoneId: 'Cloudflare Zone ID',
+      cloudflareBaseDomain: '节点域名',
+      connectCloudflare: '连接 Cloudflare',
+      connectingCloudflare: '正在跳转到 Cloudflare…',
+      cloudflareConnected: 'Cloudflare 已连接',
+      cloudflareConnectHint: '浏览器会跳转到 Cloudflare 授权页；不会要求或保存个人 API Token。',
+      cloudflareConnectedHint: 'Tunnel 与 DNS 将在此账户和域名下创建。',
+      cloudflareAuthorizationComplete: 'Cloudflare 授权完成',
+      cloudflareAuthorizationFailed: 'Cloudflare 授权未完成，请重试。',
       quickTunnelNotice: '地址会在 cloudflared 重连后变化，Agent 会自动重新注册。',
       nodeName: '节点名称（可选）',
       tags: '标签（逗号分隔）',
@@ -180,7 +199,19 @@
         'This creates a dedicated Tunnel, DNS record, and stable hostname. The install command appears here after it succeeds.',
       installCommandPending:
         'Create the stable Tunnel first; the install command appears after it succeeds.',
-      managedTunnelNeedsSetup: 'Configure the Tunnel/DNS API token for this control plane first.',
+      managedTunnelNeedsSetup: 'Configure a Cloudflare OAuth client for this control plane first.',
+      cloudflareAccountId: 'Cloudflare account ID',
+      cloudflareZoneId: 'Cloudflare Zone ID',
+      cloudflareBaseDomain: 'Agent base domain',
+      connectCloudflare: 'Connect Cloudflare',
+      connectingCloudflare: 'Redirecting to Cloudflare…',
+      cloudflareConnected: 'Cloudflare connected',
+      cloudflareConnectHint:
+        'Your browser opens Cloudflare authorization. No personal API token is requested or stored.',
+      cloudflareConnectedHint:
+        'Tunnels and DNS records will be created in this account and domain.',
+      cloudflareAuthorizationComplete: 'Cloudflare authorization completed',
+      cloudflareAuthorizationFailed: 'Cloudflare authorization did not complete. Try again.',
       quickTunnelNotice:
         'The URL may change after cloudflared reconnects; the Agent re-registers automatically.',
       nodeName: 'Node name (optional)',
@@ -238,6 +269,11 @@
   let installTunnelMode: TunnelMode = 'managed';
   let managedProvision: ManagedProvision | undefined;
   let provisioningTunnel = false;
+  let cloudflareOAuth: CloudflareOAuthStatus | undefined;
+  let cloudflareAccountId = '';
+  let cloudflareZoneId = '';
+  let cloudflareBaseDomain = '';
+  let connectingCloudflare = false;
 
   $: text = copy[locale];
   $: visibleNodes = (dashboard?.nodes ?? []).filter(
@@ -264,6 +300,20 @@
         : 'light';
     applyTheme();
     void refresh();
+    void refreshCloudflare();
+    const authorization = new URLSearchParams(window.location.search).get('cloudflare');
+    if (authorization) {
+      activeView = 'install';
+      const url = new URL(window.location.href);
+      url.searchParams.delete('cloudflare');
+      history.replaceState({}, '', url);
+      setNotice(
+        authorization === 'connected'
+          ? text.cloudflareAuthorizationComplete
+          : text.cloudflareAuthorizationFailed,
+        authorization === 'connected' ? 'success' : 'error',
+      );
+    }
   });
 
   async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -297,6 +347,40 @@
       setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
     } finally {
       loading = false;
+    }
+  }
+
+  async function refreshCloudflare() {
+    try {
+      cloudflareOAuth = await api<CloudflareOAuthStatus>('/api/cloudflare/oauth/status');
+      if (cloudflareOAuth.connected) {
+        cloudflareAccountId = cloudflareOAuth.accountId ?? '';
+        cloudflareZoneId = cloudflareOAuth.zoneId ?? '';
+        cloudflareBaseDomain = cloudflareOAuth.baseDomain ?? '';
+      }
+    } catch (error) {
+      setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
+    }
+  }
+
+  async function connectCloudflare() {
+    connectingCloudflare = true;
+    try {
+      const { authorizationUrl } = await api<{ authorizationUrl: string }>(
+        '/api/cloudflare/oauth/connect',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            accountId: cloudflareAccountId.trim(),
+            zoneId: cloudflareZoneId.trim(),
+            baseDomain: cloudflareBaseDomain.trim(),
+          }),
+        },
+      );
+      window.location.assign(authorizationUrl);
+    } catch (error) {
+      setNotice(`${text.syncFailed}${messageOf(error)}`, 'error');
+      connectingCloudflare = false;
     }
   }
 
@@ -388,7 +472,7 @@
     } catch (error) {
       const message = messageOf(error);
       setNotice(
-        message.includes('Managed Tunnel is not configured')
+        message.includes('Cloudflare OAuth is not configured')
           ? text.managedTunnelNeedsSetup
           : `${text.syncFailed}${message}`,
         'error',
@@ -977,7 +1061,47 @@
           </div>
           {#if installTunnelMode === 'managed'}
             <div class="mt-5 rounded-2xl bg-blue-50 p-4 dark:bg-blue-500/10">
-              {#if managedProvision}
+              {#if !cloudflareOAuth?.configured}
+                <p class="text-xs leading-5 text-blue-700 dark:text-blue-200">
+                  {text.managedTunnelNeedsSetup}
+                </p>
+              {:else if !cloudflareOAuth.connected}
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <label class="field-label text-blue-900 dark:text-blue-100"
+                    >{text.cloudflareAccountId}<input
+                      bind:value={cloudflareAccountId}
+                      class="field-input"
+                      autocomplete="off"
+                      placeholder="32-character account ID"
+                    /></label
+                  ><label class="field-label text-blue-900 dark:text-blue-100"
+                    >{text.cloudflareZoneId}<input
+                      bind:value={cloudflareZoneId}
+                      class="field-input"
+                      autocomplete="off"
+                      placeholder="32-character zone ID"
+                    /></label
+                  ><label class="field-label text-blue-900 dark:text-blue-100 sm:col-span-2"
+                    >{text.cloudflareBaseDomain}<input
+                      bind:value={cloudflareBaseDomain}
+                      class="field-input"
+                      autocomplete="off"
+                      placeholder="example.com"
+                    /></label
+                  >
+                </div>
+                <p class="mt-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
+                  {text.cloudflareConnectHint}
+                </p>
+                <button
+                  class="mt-4 rounded-full bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={connectingCloudflare}
+                  onclick={() => void connectCloudflare()}
+                  >{connectingCloudflare
+                    ? text.connectingCloudflare
+                    : text.connectCloudflare}</button
+                >
+              {:else if managedProvision}
                 <p class="text-xs font-semibold text-blue-700 dark:text-blue-200">
                   {text.managedTunnelReady}
                 </p>
@@ -985,7 +1109,14 @@
                   {managedProvision.publicUrl}
                 </p>
               {:else}
+                <p class="text-xs font-semibold text-blue-700 dark:text-blue-200">
+                  {text.cloudflareConnected}
+                </p>
+                <p class="mt-1 truncate font-mono text-xs text-blue-600 dark:text-blue-300">
+                  {cloudflareOAuth.baseDomain}
+                </p>
                 <p class="mt-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
+                  {text.cloudflareConnectedHint}
                   {text.managedTunnelWait}
                 </p>
                 <button
@@ -1022,10 +1153,10 @@
             </div>
             <button
               class="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/15"
-              disabled={provisioningTunnel || (installTunnelMode === 'managed' && !managedProvision)}
+              disabled={provisioningTunnel ||
+                (installTunnelMode === 'managed' && !managedProvision)}
               title={text.copy}
-              onclick={copyInstallCommand}
-              >{text.copy}</button
+              onclick={copyInstallCommand}>{text.copy}</button
             >
           </div>
           <pre

@@ -33,22 +33,34 @@ Configure Cloudflare Access for the control-plane domain (`/` and `/api/*`). The
 
 ### Managed Tunnel (stable, recommended)
 
-The Web UI can create a random node ID, a remotely-managed Cloudflare Tunnel, its ingress route, and the proxied DNS CNAME automatically. Create a separate least-privilege API Token with **Account / Cloudflare Tunnel / Edit** and **Zone / DNS / Edit**, scoped to the account and Zone used for Agent hostnames. Then run the bootstrap again with the extra configuration:
+The Web UI creates a random node ID, a remotely-managed Cloudflare Tunnel, its ingress route, and the proxied DNS CNAME. It uses Cloudflare OAuth rather than a personal Tunnel/DNS API Token.
+
+After the first deployment, create one **private OAuth client** in Cloudflare Dashboard: **Manage Account → OAuth clients**. Select an Authorization Code client with Refresh Token support and `client_secret_post`, then register this exact callback URL:
+
+```text
+https://<your-control-plane>/api/cloudflare/oauth/callback
+```
+
+Grant only the OAuth scopes corresponding to **Cloudflare Tunnel / Edit** and **DNS / Edit**. Save the client ID and client secret, then store them as Worker Secrets by running the bootstrap once more:
 
 ```bash
-export CLOUDFLARE_ACCOUNT_ID='<cloudflare-account-id>'
-read -rsp 'Tunnel provisioning API Token: ' TUNNEL_PROVISIONING_API_TOKEN; echo
-export TUNNEL_PROVISIONING_ZONE_ID='<zone-id>'
-export TUNNEL_PROVISIONING_BASE_DOMAIN='example.com'
+read -rp 'Cloudflare OAuth Client ID: ' CLOUDFLARE_OAUTH_CLIENT_ID
+export CLOUDFLARE_OAUTH_CLIENT_ID
+read -rsp 'Cloudflare OAuth Client Secret: ' CLOUDFLARE_OAUTH_CLIENT_SECRET; echo
+export CLOUDFLARE_OAUTH_CLIENT_SECRET
+export CLOUDFLARE_OAUTH_REDIRECT_URL='https://<your-control-plane>/api/cloudflare/oauth/callback'
 
 pnpm setup:cloudflare
 
-unset TUNNEL_PROVISIONING_API_TOKEN TUNNEL_PROVISIONING_ZONE_ID TUNNEL_PROVISIONING_BASE_DOMAIN
+unset CLOUDFLARE_OAUTH_CLIENT_ID CLOUDFLARE_OAUTH_CLIENT_SECRET CLOUDFLARE_OAUTH_REDIRECT_URL
 ```
 
 When a valid D1 ID already exists in `apps/control-worker/wrangler.jsonc`, the bootstrap reuses it; it does not create a second database.
+When it is invoked only to add the OAuth client configuration, it also leaves the existing `BACKEND_SHARED_TOKEN` unchanged.
 
-Use the Zone apex for `TUNNEL_PROVISIONING_BASE_DOMAIN` unless you have an Advanced Certificate for deeper hostnames. In the Web UI, choose **托管 Tunnel**, fill the node name, Redis URL, and registration secret, then choose **生成并复制安装命令**. That action provisions the stable Tunnel and immediately copies the completed command. Do not manually edit its generated node ID, hostname, or Tunnel Token.
+In the Web UI, choose **托管 Tunnel**, enter the Account ID, Zone ID, and base domain, then choose **连接 Cloudflare**. A logged-in Cloudflare browser session goes directly to its consent screen; no personal API Token reaches the browser, VPS, or command history. Once connected, choose **创建稳定 Tunnel**. The completed VPS command appears on the right; **复制命令** has no side effect. Do not manually edit its generated node ID, hostname, or Tunnel Token.
+
+Use the Zone apex as the base domain unless you have an Advanced Certificate for deeper hostnames. OAuth access and refresh tokens are encrypted in D1 with a key derived from the Worker-only OAuth client secret. Revoking the OAuth grant in Cloudflare or rotating that client secret requires connecting Cloudflare again before creating or removing Managed Tunnels.
 
 ### Quick Tunnel (temporary)
 

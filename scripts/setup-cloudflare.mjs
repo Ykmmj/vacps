@@ -10,44 +10,43 @@ const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const options = parseOptions(process.argv.slice(2));
 const databaseName = options.get('database-name') ?? 'vps-agent-control';
 const suppliedToken = options.get('backend-token') ?? process.env.BACKEND_SHARED_TOKEN;
-const backendToken = suppliedToken ?? randomBytes(32).toString('hex');
 const suppliedDatabaseId =
   options.get('database-id') ?? process.env.D1_DATABASE_ID ?? (await configuredDatabaseId());
 const cloudflareApiToken = options.get('cloudflare-api-token') ?? process.env.CLOUDFLARE_API_TOKEN;
 const cloudflareAccountId =
   options.get('cloudflare-account-id') ?? process.env.CLOUDFLARE_ACCOUNT_ID;
-const tunnelProvisioningToken =
-  options.get('tunnel-api-token') ?? process.env.TUNNEL_PROVISIONING_API_TOKEN;
-const tunnelProvisioningZoneId =
-  options.get('tunnel-zone-id') ?? process.env.TUNNEL_PROVISIONING_ZONE_ID;
-const tunnelProvisioningBaseDomain =
-  options.get('agent-base-domain') ?? process.env.TUNNEL_PROVISIONING_BASE_DOMAIN;
+const cloudflareOAuthClientId =
+  options.get('cloudflare-oauth-client-id') ?? process.env.CLOUDFLARE_OAUTH_CLIENT_ID;
+const cloudflareOAuthClientSecret =
+  options.get('cloudflare-oauth-client-secret') ?? process.env.CLOUDFLARE_OAUTH_CLIENT_SECRET;
+const cloudflareOAuthRedirectUrl =
+  options.get('cloudflare-oauth-redirect-url') ?? process.env.CLOUDFLARE_OAUTH_REDIRECT_URL;
 const hasCloudflareApiToken = Boolean(cloudflareApiToken);
 const cloudflareEnvironment = {
   ...process.env,
   ...(cloudflareApiToken ? { CLOUDFLARE_API_TOKEN: cloudflareApiToken } : {}),
   ...(cloudflareAccountId ? { CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId } : {}),
 };
+const hasCloudflareOAuthInput = Boolean(
+  cloudflareOAuthClientId || cloudflareOAuthClientSecret || cloudflareOAuthRedirectUrl,
+);
+const backendToken =
+  suppliedToken ??
+  (hasCloudflareOAuthInput && suppliedDatabaseId ? undefined : randomBytes(32).toString('hex'));
 
 if (options.has('help')) {
   printUsage();
   process.exit(0);
 }
-if (backendToken.length < 32 || /\s/.test(backendToken)) {
+if (backendToken && (backendToken.length < 32 || /\s/.test(backendToken))) {
   throw new Error('BACKEND_SHARED_TOKEN must be at least 32 non-whitespace characters.');
 }
-const hasTunnelProvisioningInput = Boolean(
-  tunnelProvisioningToken || tunnelProvisioningZoneId || tunnelProvisioningBaseDomain,
-);
 if (
-  hasTunnelProvisioningInput &&
-  (!tunnelProvisioningToken ||
-    !tunnelProvisioningZoneId ||
-    !tunnelProvisioningBaseDomain ||
-    !cloudflareAccountId)
+  hasCloudflareOAuthInput &&
+  (!cloudflareOAuthClientId || !cloudflareOAuthClientSecret || !cloudflareOAuthRedirectUrl)
 ) {
   throw new Error(
-    'Managed Tunnel setup requires --tunnel-api-token, --tunnel-zone-id, --agent-base-domain, and --cloudflare-account-id.',
+    'Cloudflare OAuth setup requires --cloudflare-oauth-client-id, --cloudflare-oauth-client-secret, and --cloudflare-oauth-redirect-url.',
   );
 }
 if (!options.has('skip-login') && !hasCloudflareApiToken) {
@@ -58,12 +57,11 @@ if (!options.has('skip-login') && !hasCloudflareApiToken) {
 
 const databaseId = suppliedDatabaseId ?? (await createDatabase(databaseName));
 await updateDatabaseBinding(databaseId);
-await putSecret('BACKEND_SHARED_TOKEN', backendToken);
-if (hasTunnelProvisioningInput) {
-  await putSecret('TUNNEL_PROVISIONING_API_TOKEN', tunnelProvisioningToken);
-  await putSecret('TUNNEL_PROVISIONING_ACCOUNT_ID', cloudflareAccountId);
-  await putSecret('TUNNEL_PROVISIONING_ZONE_ID', tunnelProvisioningZoneId);
-  await putSecret('TUNNEL_PROVISIONING_BASE_DOMAIN', tunnelProvisioningBaseDomain);
+if (backendToken) await putSecret('BACKEND_SHARED_TOKEN', backendToken);
+if (hasCloudflareOAuthInput) {
+  await putSecret('CLOUDFLARE_OAUTH_CLIENT_ID', cloudflareOAuthClientId);
+  await putSecret('CLOUDFLARE_OAUTH_CLIENT_SECRET', cloudflareOAuthClientSecret);
+  await putSecret('CLOUDFLARE_OAUTH_REDIRECT_URL', cloudflareOAuthRedirectUrl);
 }
 await run('pnpm', [
   '--filter',
@@ -80,15 +78,17 @@ await run('pnpm', ['--filter', '@vps-agent/control-worker', 'run', 'deploy']);
 
 console.log('\nControl plane deployed successfully.');
 console.log(`D1 database ID: ${databaseId}`);
-if (!suppliedToken) {
+if (backendToken && !suppliedToken) {
   console.log(`BACKEND_SHARED_TOKEN (save this now): ${backendToken}`);
-} else {
+} else if (suppliedToken) {
   console.log('BACKEND_SHARED_TOKEN: supplied value stored as a Worker secret.');
+} else {
+  console.log('BACKEND_SHARED_TOKEN: existing Worker secret was left unchanged.');
 }
 console.log(
-  hasTunnelProvisioningInput
-    ? 'Managed Tunnel provisioning is ready. Create a stable node endpoint from the Web UI, then run its generated command on the VPS.'
-    : 'Next: configure Managed Tunnel provisioning or use Quick Tunnel from the Web UI, then run its generated installer command on the VPS.',
+  hasCloudflareOAuthInput
+    ? 'Cloudflare OAuth is ready. Connect Cloudflare in the Web UI, then create a stable node endpoint and run its generated command on the VPS.'
+    : 'Next: configure Cloudflare OAuth for Managed Tunnels or use Quick Tunnel from the Web UI, then run its generated installer command on the VPS.',
 );
 
 async function createDatabase(name) {
@@ -236,13 +236,13 @@ Options:
                            Cloudflare account ID used with API-token authentication.
   --cloudflare-api-token <token>
                            Cloudflare API Token; skips browser OAuth.
-  --tunnel-api-token <token>
-                           Least-privilege token stored only as a Worker secret for
-                           managed Tunnel/DNS provisioning.
-  --tunnel-zone-id <id>    Cloudflare Zone ID that owns the agent base domain.
-  --agent-base-domain <domain>
-                           Parent domain for generated node hostnames, such as
-                           agents.example.com.
+  --cloudflare-oauth-client-id <id>
+                           Cloudflare OAuth client ID for Managed Tunnels.
+  --cloudflare-oauth-client-secret <secret>
+                           OAuth client secret. Stored only as a Worker secret.
+  --cloudflare-oauth-redirect-url <url>
+                           Registered callback URL, ending in
+                           /api/cloudflare/oauth/callback.
   --skip-login             Skip \`wrangler login\` when already authenticated.
 
 Set CLOUDFLARE_API_TOKEN (and preferably CLOUDFLARE_ACCOUNT_ID) to use API-token
