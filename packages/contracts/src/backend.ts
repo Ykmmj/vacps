@@ -40,7 +40,7 @@ export const backendRegistrationSchema = registerBackendSchema.extend({
   updatedAt: z.string().datetime(),
   decisionAt: z.string().datetime().optional(),
   rejectionReason: z.string().max(500).optional(),
-  ip: z.string().ip().optional(),
+  ip: z.union([z.ipv4(), z.ipv6()]).optional(),
   location: z.string().trim().min(1).max(180).optional(),
 });
 
