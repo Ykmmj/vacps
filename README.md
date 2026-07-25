@@ -53,19 +53,12 @@ unset CLOUDFLARE_API_TOKEN
 
 The equivalent parameter form is `pnpm setup:cloudflare -- --cloudflare-account-id <id> --cloudflare-api-token <token>`. Prefer the environment-variable form because command-line tokens can be recorded in shell history and visible to local processes.
 
-```bash
-# Create a Tunnel hostname for the VPS first, then run this on the VPS.
-curl -fsSL https://<your-worker-domain>/install-agent.sh | sudo bash -s -- \
-  --repo https://github.com/<owner>/vps-agent-platform.git \
-  --backend-name 'Los Angeles VPS' \
-  --control-plane-url https://<your-worker-domain> \
-  --public-url https://la-agent.example.com \
-  --backend-token <token-printed-by-setup> \
-  --redis-url 'rediss://default:<password>@<host>:<port>' \
-  --tunnel-token <cloudflare-tunnel-token>
-```
+Open the deployed Web UI and choose one of its connection modes before copying the VPS command:
 
-The installer generates its node ID automatically, downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. A remotely managed Tunnel route must point the chosen hostname to `http://127.0.0.1:3100`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
+- **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. It requires one-time Cloudflare API Token setup; the UI fills the hostname and Tunnel token automatically.
+- **Quick Tunnel** creates a temporary `trycloudflare.com` URL on the VPS and re-registers the Agent whenever that URL changes. Use it only for demos or testing.
+
+The installer downloads Node.js 22 LTS when necessary, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
 
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 

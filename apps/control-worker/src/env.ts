@@ -2,4 +2,8 @@ export interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   BACKEND_SHARED_TOKEN: string;
+  TUNNEL_PROVISIONING_API_TOKEN?: string;
+  TUNNEL_PROVISIONING_ACCOUNT_ID?: string;
+  TUNNEL_PROVISIONING_ZONE_ID?: string;
+  TUNNEL_PROVISIONING_BASE_DOMAIN?: string;
 }

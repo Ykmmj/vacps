@@ -89,9 +89,20 @@ export class RegistrationRepository {
     if (existing.status === 'approved') {
       await this.db
         .prepare(
-          'UPDATE backend_registrations SET updated_at = ?, ip = ?, location = ? WHERE id = ?',
+          `UPDATE backend_registrations
+           SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, updated_at = ?, ip = ?, location = ?
+           WHERE id = ?`,
         )
-        .bind(now, network.ip ?? null, network.location ?? null, existing.id)
+        .bind(
+          input.name,
+          input.baseUrl,
+          JSON.stringify(input.tags),
+          input.agentVersion,
+          now,
+          network.ip ?? null,
+          network.location ?? null,
+          existing.id,
+        )
         .run();
       return this.get(existing.id);
     }

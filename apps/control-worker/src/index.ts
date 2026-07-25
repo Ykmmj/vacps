@@ -13,10 +13,12 @@ import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
 import { createMcpServer } from './mcp/server.js';
 import { BackendClient } from './registry/backend-client.js';
+import { ManagedTunnelRepository } from './registry/managed-tunnel-repository.js';
 import { RegistrationRepository } from './registry/registration-repository.js';
 import { BackendRepository } from './registry/repository.js';
 import { ScheduleService } from './schedules/schedule-service.js';
 import { TaskService } from './tasks/task-service.js';
+import { ManagedTunnelService } from './tunnels/managed-tunnel-service.js';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -40,10 +42,12 @@ export default {
 function createServices(env: Env) {
   const backends = new BackendRepository(env.DB);
   const registrations = new RegistrationRepository(env.DB);
+  const managedTunnels = new ManagedTunnelRepository(env.DB);
   const client = new BackendClient(env.BACKEND_SHARED_TOKEN);
+  const tunnels = new ManagedTunnelService(env, managedTunnels);
   const tasks = new TaskService(env.DB, backends, client);
   const schedules = new ScheduleService(env.DB, backends, client, tasks);
-  return { backends, client, registrations, tasks, schedules };
+  return { backends, client, registrations, managedTunnels, tunnels, tasks, schedules };
 }
 
 async function handleApi(request: Request, env: Env, requestId: string): Promise<Response> {
@@ -93,15 +97,24 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     if (resource === 'registrations') {
       if (!id && request.method === 'POST') {
         requireBackendToken(request, env);
-        return json(
-          await services.registrations.request(
-            registerBackendSchema.parse(await readJson(request)),
-            registrationNetwork(request),
-          ),
-          {
-            status: 202,
-          },
+        const registration = await services.registrations.request(
+          registerBackendSchema.parse(await readJson(request)),
+          registrationNetwork(request),
         );
+        if (registration.status === 'approved') {
+          try {
+            await services.backends.update(registration.backendId, {
+              name: registration.name,
+              baseUrl: registration.baseUrl,
+              tags: registration.tags,
+            });
+          } catch (error) {
+            if (!(error instanceof AppError) || error.code !== 'backend_not_found') throw error;
+          }
+        }
+        return json(registration, {
+          status: 202,
+        });
       }
       if (!id && request.method === 'GET') return json(await services.registrations.list());
       if (id && action === 'approve' && request.method === 'POST') {
@@ -143,6 +156,13 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       }
     }
 
+    if (resource === 'tunnels' && id === 'provision' && request.method === 'POST') {
+      const input = z
+        .object({ name: z.string().trim().min(1).max(120).optional() })
+        .parse(await readJson(request));
+      return json(await services.tunnels.provision(input), { status: 201 });
+    }
+
     if (resource === 'backends') {
       if (!id && request.method === 'GET') return json(await services.backends.list());
       if (id && !action && request.method === 'GET') return json(await services.backends.get(id));
@@ -151,6 +171,7 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           await services.backends.update(id, updateBackendSchema.parse(await readJson(request))),
         );
       if (id && !action && request.method === 'DELETE') {
+        await services.tunnels.remove(id);
         await services.backends.delete(id);
         return new Response(null, { status: 204 });
       }

@@ -1,1 +1,6 @@
 BACKEND_SHARED_TOKEN=replace-with-the-same-token-used-by-each-vps-agent
+# Optional: enables the managed Tunnel provision button in local development.
+# TUNNEL_PROVISIONING_API_TOKEN=replace-with-cloudflare-token
+# TUNNEL_PROVISIONING_ACCOUNT_ID=replace-with-account-id
+# TUNNEL_PROVISIONING_ZONE_ID=replace-with-zone-id
+# TUNNEL_PROVISIONING_BASE_DOMAIN=example.com

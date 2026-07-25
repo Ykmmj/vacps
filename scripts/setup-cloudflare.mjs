@@ -15,6 +15,12 @@ const suppliedDatabaseId = options.get('database-id') ?? process.env.D1_DATABASE
 const cloudflareApiToken = options.get('cloudflare-api-token') ?? process.env.CLOUDFLARE_API_TOKEN;
 const cloudflareAccountId =
   options.get('cloudflare-account-id') ?? process.env.CLOUDFLARE_ACCOUNT_ID;
+const tunnelProvisioningToken =
+  options.get('tunnel-api-token') ?? process.env.TUNNEL_PROVISIONING_API_TOKEN;
+const tunnelProvisioningZoneId =
+  options.get('tunnel-zone-id') ?? process.env.TUNNEL_PROVISIONING_ZONE_ID;
+const tunnelProvisioningBaseDomain =
+  options.get('agent-base-domain') ?? process.env.TUNNEL_PROVISIONING_BASE_DOMAIN;
 const hasCloudflareApiToken = Boolean(cloudflareApiToken);
 const cloudflareEnvironment = {
   ...process.env,
@@ -29,6 +35,20 @@ if (options.has('help')) {
 if (backendToken.length < 32 || /\s/.test(backendToken)) {
   throw new Error('BACKEND_SHARED_TOKEN must be at least 32 non-whitespace characters.');
 }
+const hasTunnelProvisioningInput = Boolean(
+  tunnelProvisioningToken || tunnelProvisioningZoneId || tunnelProvisioningBaseDomain,
+);
+if (
+  hasTunnelProvisioningInput &&
+  (!tunnelProvisioningToken ||
+    !tunnelProvisioningZoneId ||
+    !tunnelProvisioningBaseDomain ||
+    !cloudflareAccountId)
+) {
+  throw new Error(
+    'Managed Tunnel setup requires --tunnel-api-token, --tunnel-zone-id, --agent-base-domain, and --cloudflare-account-id.',
+  );
+}
 if (!options.has('skip-login') && !hasCloudflareApiToken) {
   await run('pnpm', ['--filter', '@vps-agent/control-worker', 'exec', 'wrangler', 'login']);
 } else if (hasCloudflareApiToken) {
@@ -38,6 +58,12 @@ if (!options.has('skip-login') && !hasCloudflareApiToken) {
 const databaseId = suppliedDatabaseId ?? (await createDatabase(databaseName));
 await updateDatabaseBinding(databaseId);
 await putSecret('BACKEND_SHARED_TOKEN', backendToken);
+if (hasTunnelProvisioningInput) {
+  await putSecret('TUNNEL_PROVISIONING_API_TOKEN', tunnelProvisioningToken);
+  await putSecret('TUNNEL_PROVISIONING_ACCOUNT_ID', cloudflareAccountId);
+  await putSecret('TUNNEL_PROVISIONING_ZONE_ID', tunnelProvisioningZoneId);
+  await putSecret('TUNNEL_PROVISIONING_BASE_DOMAIN', tunnelProvisioningBaseDomain);
+}
 await run('pnpm', [
   '--filter',
   '@vps-agent/control-worker',
@@ -59,7 +85,9 @@ if (!suppliedToken) {
   console.log('BACKEND_SHARED_TOKEN: supplied value stored as a Worker secret.');
 }
 console.log(
-  'Next: create a remotely managed Cloudflare Tunnel, then download /install-agent.sh from the deployed Worker on the VPS.',
+  hasTunnelProvisioningInput
+    ? 'Managed Tunnel provisioning is ready. Create a stable node endpoint from the Web UI, then run its generated command on the VPS.'
+    : 'Next: configure Managed Tunnel provisioning or use Quick Tunnel from the Web UI, then run its generated installer command on the VPS.',
 );
 
 async function createDatabase(name) {
@@ -200,6 +228,13 @@ Options:
                            Cloudflare account ID used with API-token authentication.
   --cloudflare-api-token <token>
                            Cloudflare API Token; skips browser OAuth.
+  --tunnel-api-token <token>
+                           Least-privilege token stored only as a Worker secret for
+                           managed Tunnel/DNS provisioning.
+  --tunnel-zone-id <id>    Cloudflare Zone ID that owns the agent base domain.
+  --agent-base-domain <domain>
+                           Parent domain for generated node hostnames, such as
+                           agents.example.com.
   --skip-login             Skip \`wrangler login\` when already authenticated.
 
 Set CLOUDFLARE_API_TOKEN (and preferably CLOUDFLARE_ACCOUNT_ID) to use API-token

@@ -4,6 +4,7 @@
   type RegistrationStatus = 'pending' | 'approved' | 'rejected';
   type Locale = 'zh-CN' | 'en';
   type Theme = 'light' | 'dark';
+  type TunnelMode = 'managed' | 'quick';
 
   interface Backend {
     id: string;
@@ -58,6 +59,13 @@
     nodes: Node[];
   }
 
+  interface ManagedProvision {
+    backendId: string;
+    hostname: string;
+    publicUrl: string;
+    tunnelToken: string;
+  }
+
   const copy = {
     'zh-CN': {
       nodes: '节点',
@@ -87,14 +95,22 @@
       noNodesHint: '在 VPS 执行安装命令后，节点会自动出现在这里。',
       all: '全部',
       installer: '安装命令',
+      tunnelMode: '接入方式',
+      managedTunnel: '托管 Tunnel',
+      managedTunnelDescription: '创建稳定域名、Tunnel 与 DNS；无需填写公开 URL。',
+      quickTunnel: 'Quick Tunnel',
+      quickTunnelDescription: '自动获取临时 trycloudflare.com 地址；适合演示和测试。',
+      provisionTunnel: '创建稳定 Tunnel',
+      provisioningTunnel: '正在创建 Tunnel…',
+      managedTunnelReady: '稳定地址已准备好',
+      managedTunnelNeedsSetup: '需要先为控制平面配置 Tunnel/DNS API Token。',
+      quickTunnelNotice: '地址会在 cloudflared 重连后变化，Agent 会自动重新注册。',
       nodeName: '节点名称（可选）',
-      publicUrl: '公开 Agent URL',
       tags: '标签（逗号分隔）',
       redisUrl: 'Redis TLS URL',
       registrationSecret: '注册密钥',
       registrationSecretHint:
         '与 Cloudflare Worker 保存的密钥相同，仅用于 Agent 发起注册。网页不会保存它。',
-      tunnelToken: 'Cloudflare Tunnel Token（可选）',
       allowApt: '允许 Agent 安装 apt 软件包',
       allowAptHint: '包维护脚本可以 root 权限运行，仅在明确需要时启用。',
       copy: '复制命令',
@@ -113,7 +129,7 @@
       confirmRemove: '确定移除该节点？此操作不会卸载 VPS 上的 Agent。',
       rejectPrompt: '可选：填写拒绝原因。Agent 下次注册会再次进入待审批状态。',
       autoId: '节点 ID 会由安装器自动随机生成。',
-      setupTunnel: '公开地址需在 Cloudflare Tunnel 中路由至 http://127.0.0.1:3100。',
+      setupTunnel: '选择接入方式后生成可直接运行的安装命令。',
       runOnVps: '在 VPS 执行',
       noTask: '任务通过 MCP 或计划工作流提交。',
       mcpCopied: 'MCP 地址已复制',
@@ -147,14 +163,25 @@
       noNodesHint: 'Run the install command on a VPS and its card will appear here.',
       all: 'All',
       installer: 'Install command',
+      tunnelMode: 'Connection mode',
+      managedTunnel: 'Managed Tunnel',
+      managedTunnelDescription:
+        'Creates a stable hostname, Tunnel, and DNS. No public URL to enter.',
+      quickTunnel: 'Quick Tunnel',
+      quickTunnelDescription:
+        'Gets a temporary trycloudflare.com URL automatically; best for demos and tests.',
+      provisionTunnel: 'Create stable Tunnel',
+      provisioningTunnel: 'Creating Tunnel…',
+      managedTunnelReady: 'Stable endpoint is ready',
+      managedTunnelNeedsSetup: 'Configure the Tunnel/DNS API token for this control plane first.',
+      quickTunnelNotice:
+        'The URL may change after cloudflared reconnects; the Agent re-registers automatically.',
       nodeName: 'Node name (optional)',
-      publicUrl: 'Public agent URL',
       tags: 'Tags (comma-separated)',
       redisUrl: 'Redis TLS URL',
       registrationSecret: 'Registration secret',
       registrationSecretHint:
         'The same secret stored in the Cloudflare Worker. It only authorizes agent registration and is never saved by this page.',
-      tunnelToken: 'Cloudflare Tunnel token (optional)',
       allowApt: 'Allow agent to install apt packages',
       allowAptHint: 'Package maintainer scripts may run as root. Enable only when needed.',
       copy: 'Copy command',
@@ -174,7 +201,7 @@
       rejectPrompt:
         'Optional: add a rejection reason. The next registration request will return to pending.',
       autoId: 'The installer generates a random node ID automatically.',
-      setupTunnel: 'Route this public URL to http://127.0.0.1:3100 with Cloudflare Tunnel.',
+      setupTunnel: 'Choose a connection mode to generate a ready-to-run command.',
       runOnVps: 'Run on the VPS',
       noTask: 'Tasks are submitted through MCP or schedules.',
       mcpCopied: 'MCP endpoint copied',
@@ -196,12 +223,13 @@
   let theme: Theme = 'light';
 
   let installBackendName = '';
-  let installPublicUrl = 'https://agent.example.com';
   let installTags = 'production,full';
   let installRedisUrl = '';
   let installRegistrationSecret = '';
-  let installTunnelToken = '';
   let installAllowApt = false;
+  let installTunnelMode: TunnelMode = 'managed';
+  let managedProvision: ManagedProvision | undefined;
+  let provisioningTunnel = false;
 
   $: text = copy[locale];
   $: visibleNodes = (dashboard?.nodes ?? []).filter(
@@ -209,12 +237,12 @@
   );
   $: installCommand = buildInstallCommand(
     installBackendName,
-    installPublicUrl,
     installTags,
     installRedisUrl,
     installRegistrationSecret,
-    installTunnelToken,
     installAllowApt,
+    installTunnelMode,
+    managedProvision,
   );
 
   onMount(() => {
@@ -339,23 +367,54 @@
     void refresh();
   }
 
+  async function provisionManagedTunnel() {
+    provisioningTunnel = true;
+    try {
+      managedProvision = await api<ManagedProvision>('/api/tunnels/provision', {
+        method: 'POST',
+        body: JSON.stringify({ name: installBackendName.trim() || undefined }),
+      });
+      setNotice(`${text.managedTunnelReady}: ${managedProvision.publicUrl}`, 'success');
+    } catch (error) {
+      const message = messageOf(error);
+      setNotice(
+        message.includes('Managed Tunnel is not configured')
+          ? text.managedTunnelNeedsSetup
+          : `${text.syncFailed}${message}`,
+        'error',
+      );
+    } finally {
+      provisioningTunnel = false;
+    }
+  }
+
   function buildInstallCommand(
     backendName: string,
-    publicUrl: string,
     tags: string,
     redisUrl: string,
     registrationSecret: string,
-    tunnelToken: string,
     allowApt: boolean,
+    tunnelMode: TunnelMode,
+    provision: ManagedProvision | undefined,
   ) {
+    if (tunnelMode === 'managed' && !provision) return `# ${text.provisionTunnel}`;
     const lines = [
       `curl -fsSL ${origin}/install-agent.sh | sudo bash -s -- \\`,
       `  --repo ${shellQuote(repositoryUrl)} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
-      `  --public-url ${shellQuote(publicUrl || 'https://agent.example.com')} \\`,
       `  --backend-token ${shellQuote(registrationSecret || '<REGISTRATION_SECRET>')} \\`,
       `  --redis-url ${shellQuote(redisUrl || '<REDIS_TLS_URL>')}`,
     ];
+    if (tunnelMode === 'managed' && provision) {
+      lines[lines.length - 1] += ' \\';
+      lines.push(`  --backend-id ${shellQuote(provision.backendId)} \\`);
+      lines.push(`  --public-url ${shellQuote(provision.publicUrl)} \\`);
+      lines.push(`  --tunnel-token ${shellQuote(provision.tunnelToken)}`);
+    }
+    if (tunnelMode === 'quick') {
+      lines[lines.length - 1] += ' \\';
+      lines.push('  --quick-tunnel');
+    }
     if (backendName.trim()) {
       lines[lines.length - 1] += ' \\';
       lines.push(`  --backend-name ${shellQuote(backendName.trim())}`);
@@ -363,10 +422,6 @@
     if (tags.trim()) {
       lines[lines.length - 1] += ' \\';
       lines.push(`  --tags ${shellQuote(tags.trim())}`);
-    }
-    if (tunnelToken.trim()) {
-      lines[lines.length - 1] += ' \\';
-      lines.push(`  --tunnel-token ${shellQuote(tunnelToken.trim())}`);
     }
     if (allowApt) {
       lines[lines.length - 1] += ' \\';
@@ -817,6 +872,46 @@
       <div class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(390px,.9fr)]">
         <section class="surface-card p-5 sm:p-7">
           <p class="mb-5 text-sm text-zinc-500 dark:text-zinc-400">{text.setupTunnel}</p>
+          <div class="mb-5 grid gap-3 sm:grid-cols-2">
+            <button
+              class:mode-selected={installTunnelMode === 'managed'}
+              class="tunnel-mode-card text-left"
+              onclick={() => (installTunnelMode = 'managed')}
+            >
+              <span class="flex items-center justify-between gap-3"
+                ><strong>{text.managedTunnel}</strong><svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  class="h-4 w-4"
+                  aria-hidden="true"
+                  ><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" /><path
+                    d="m9 12 2 2 4-4"
+                  /></svg
+                ></span
+              >
+              <span>{text.managedTunnelDescription}</span>
+            </button>
+            <button
+              class:mode-selected={installTunnelMode === 'quick'}
+              class="tunnel-mode-card text-left"
+              onclick={() => (installTunnelMode = 'quick')}
+            >
+              <span class="flex items-center justify-between gap-3"
+                ><strong>{text.quickTunnel}</strong><svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  class="h-4 w-4"
+                  aria-hidden="true"
+                  ><path d="M12 4v16M4 12h16M5.8 5.8l12.4 12.4M18.2 5.8 5.8 18.2" /></svg
+                ></span
+              >
+              <span>{text.quickTunnelDescription}</span>
+            </button>
+          </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="field-label"
               >{text.nodeName}<input
@@ -830,13 +925,6 @@
                 bind:value={installTags}
                 class="field-input"
                 placeholder="production,full"
-              /></label
-            ><label class="field-label sm:col-span-2"
-              >{text.publicUrl}<input
-                bind:value={installPublicUrl}
-                class="field-input"
-                type="url"
-                placeholder="https://agent.example.com"
               /></label
             ><label class="field-label sm:col-span-2"
               >{text.redisUrl}<input
@@ -856,16 +944,33 @@
               /><span class="text-[11px] font-normal leading-4 text-zinc-400"
                 >{text.registrationSecretHint}</span
               ></label
-            ><label class="field-label sm:col-span-2"
-              >{text.tunnelToken}<input
-                bind:value={installTunnelToken}
-                class="field-input"
-                type="password"
-                autocomplete="off"
-                placeholder="eyJh..."
-              /></label
             >
           </div>
+          {#if installTunnelMode === 'managed'}
+            <div class="mt-5 rounded-2xl bg-blue-50 p-4 dark:bg-blue-500/10">
+              {#if managedProvision}
+                <p class="text-xs font-semibold text-blue-700 dark:text-blue-200">
+                  {text.managedTunnelReady}
+                </p>
+                <p class="mt-1 truncate font-mono text-xs text-blue-600 dark:text-blue-300">
+                  {managedProvision.publicUrl}
+                </p>
+              {:else}
+                <button
+                  class="primary-button"
+                  onclick={provisionManagedTunnel}
+                  disabled={provisioningTunnel}
+                  >{provisioningTunnel ? text.provisioningTunnel : text.provisionTunnel}</button
+                >
+              {/if}
+            </div>
+          {:else}
+            <p
+              class="mt-5 rounded-2xl bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200"
+            >
+              {text.quickTunnelNotice}
+            </p>
+          {/if}
           <label
             class="mt-5 flex cursor-pointer items-start gap-3 rounded-2xl bg-rose-50 px-4 py-3 text-xs text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"
             ><input
