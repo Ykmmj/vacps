@@ -428,7 +428,7 @@
   ) {
     if (tunnelMode === 'managed' && !provision) return `# ${text.installCommandPending}`;
     const lines = [
-      `curl -fsSL ${origin}/install-agent.sh | sudo bash -s -- \\`,
+      `curl -fsSL ${origin}/agent.sh | sudo bash -s -- install \\`,
       `  --repo ${shellQuote(repositoryUrl)} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
       `  --backend-token ${shellQuote(registrationSecret || '<REGISTRATION_SECRET>')} \\`,

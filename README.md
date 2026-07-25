@@ -59,7 +59,7 @@ Open the deployed Web UI and choose one of its connection modes before copying t
 
 The installer installs Node.js 24 and pnpm 10.14.0 through an Agent-scoped NVM directory, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
 
-To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `uninstall-agent.sh` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vps-agent` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
+To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vps-agent` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
 
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 

@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 APP_DIRECTORY=/opt/vps-agent
+DATA_DIRECTORY=/var/lib/vps-agent
+ENVIRONMENT_DIRECTORY=/etc/vps-agent
 ENVIRONMENT_FILE=/etc/vps-agent/vps-agent.env
 SERVICE_USER=agent
 export NVM_DIR=/usr/local/lib/vps-agent/nvm
@@ -21,7 +23,7 @@ ALLOW_APT=false
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash install-agent.sh --repo <git-url> --backend-token <token> --redis-url <redis-url> --control-plane-url <url> (--public-url <url> | --quick-tunnel) [options]
+Usage: sudo bash agent.sh install --repo <git-url> --backend-token <token> --redis-url <redis-url> --control-plane-url <url> (--public-url <url> | --quick-tunnel) [options]
 
 Required:
   --repo <git-url>          Git repository containing this project.
@@ -40,6 +42,78 @@ Optional:
   --allow-apt               Permit sudo apt-get for the agent. This is root-equivalent.
 EOF
 }
+
+uninstall_usage() {
+  cat <<'EOF'
+Usage: sudo bash agent.sh uninstall [options]
+
+Stops and removes the VPS Agent service, its configuration, Quick Tunnel helper,
+Agent-scoped NVM runtime, and the optional apt sudoers rule. Task records and
+logs are preserved by default.
+
+Options:
+  --purge-data              Delete /var/lib/vps-agent, including SQLite task records and logs.
+  --remove-user             Delete the agent system user. Requires --purge-data.
+  --remove-managed-tunnel   Stop and remove this host's cloudflared system service. Does not delete the remote Tunnel or DNS record.
+  --help, -h                Show this help message.
+EOF
+}
+
+uninstall_agent() {
+  local purge_data=false remove_user=false remove_managed_tunnel=false
+  while (($#)); do
+    case "$1" in
+      --purge-data) purge_data=true; shift ;;
+      --remove-user) remove_user=true; shift ;;
+      --remove-managed-tunnel) remove_managed_tunnel=true; shift ;;
+      --help|-h) uninstall_usage; return 0 ;;
+      *) echo "Unknown uninstall option: $1" >&2; uninstall_usage >&2; return 2 ;;
+    esac
+  done
+  if ((EUID != 0)); then
+    echo 'Run this uninstaller with sudo.' >&2
+    return 1
+  fi
+  if [[ $remove_user == true && $purge_data != true ]]; then
+    echo '--remove-user requires --purge-data so no agent-owned data is left behind.' >&2
+    return 2
+  fi
+
+  systemctl disable --now vps-agent 2>/dev/null || true
+  systemctl disable --now vps-agent-quick-tunnel 2>/dev/null || true
+  if [[ $remove_managed_tunnel == true ]]; then
+    systemctl disable --now cloudflared 2>/dev/null || true
+    if command -v cloudflared >/dev/null; then cloudflared service uninstall 2>/dev/null || true; fi
+  fi
+
+  rm -f /etc/systemd/system/vps-agent.service
+  rm -rf /etc/systemd/system/vps-agent.service.d
+  rm -f /etc/systemd/system/vps-agent-quick-tunnel.service
+  rm -f /usr/local/lib/vps-agent/quick-tunnel.sh
+  rm -rf "$NVM_DIR"
+  rmdir /usr/local/lib/vps-agent 2>/dev/null || true
+  rm -f /etc/sudoers.d/vps-agent-apt
+  rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
+  if [[ $purge_data == true ]]; then
+    rm -rf "$DATA_DIRECTORY"
+  else
+    echo "Preserved $DATA_DIRECTORY (SQLite task records and logs). Re-run with --purge-data to delete it."
+  fi
+  if [[ $remove_user == true ]] && id "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER"; fi
+  systemctl daemon-reload
+  systemctl reset-failed vps-agent vps-agent-quick-tunnel 2>/dev/null || true
+  echo 'VPS Agent service files have been removed.'
+  if [[ $remove_managed_tunnel != true ]]; then
+    echo 'cloudflared was left installed and unchanged. Use --remove-managed-tunnel only when this host has no other cloudflared service.'
+  fi
+}
+
+if [[ ${1:-} == uninstall ]]; then
+  shift
+  uninstall_agent "$@"
+  exit $?
+fi
+if [[ ${1:-} == install ]]; then shift; fi
 
 while (($#)); do
   case "$1" in
