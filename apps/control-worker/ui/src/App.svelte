@@ -100,9 +100,12 @@
       managedTunnelDescription: '创建稳定域名、Tunnel 与 DNS；无需填写公开 URL。',
       quickTunnel: 'Quick Tunnel',
       quickTunnelDescription: '自动获取临时 trycloudflare.com 地址；适合演示和测试。',
-      provisionTunnel: '创建稳定 Tunnel',
+      provisionTunnel: '创建稳定 Tunnel 并生成安装命令',
       provisioningTunnel: '正在创建 Tunnel…',
       managedTunnelReady: '稳定地址已准备好',
+      managedTunnelWait:
+        '这会创建专属 Tunnel、DNS 记录和稳定域名；成功后安装命令会自动显示在右侧。',
+      installCommandPending: '请先创建稳定 Tunnel，安装命令将在成功后生成。',
       managedTunnelNeedsSetup: '需要先为控制平面配置 Tunnel/DNS API Token。',
       quickTunnelNotice: '地址会在 cloudflared 重连后变化，Agent 会自动重新注册。',
       nodeName: '节点名称（可选）',
@@ -173,9 +176,13 @@
       quickTunnel: 'Quick Tunnel',
       quickTunnelDescription:
         'Gets a temporary trycloudflare.com URL automatically; best for demos and tests.',
-      provisionTunnel: 'Create stable Tunnel',
+      provisionTunnel: 'Create stable Tunnel and generate command',
       provisioningTunnel: 'Creating Tunnel…',
       managedTunnelReady: 'Stable endpoint is ready',
+      managedTunnelWait:
+        'This creates a dedicated Tunnel, DNS record, and stable hostname. The install command appears here after it succeeds.',
+      installCommandPending:
+        'Create the stable Tunnel first; the install command appears after it succeeds.',
       managedTunnelNeedsSetup: 'Configure the Tunnel/DNS API token for this control plane first.',
       quickTunnelNotice:
         'The URL may change after cloudflared reconnects; the Agent re-registers automatically.',
@@ -251,6 +258,7 @@
     installTunnelMode,
     managedProvision,
   );
+  $: installCommandReady = installTunnelMode !== 'managed' || Boolean(managedProvision);
 
   onMount(() => {
     const savedLocale = localStorage.getItem('vps-agent-locale');
@@ -404,7 +412,7 @@
     tunnelMode: TunnelMode,
     provision: ManagedProvision | undefined,
   ) {
-    if (tunnelMode === 'managed' && !provision) return `# ${text.provisionTunnel}`;
+    if (tunnelMode === 'managed' && !provision) return `# ${text.installCommandPending}`;
     const lines = [
       `curl -fsSL ${origin}/install-agent.sh | sudo bash -s -- \\`,
       `  --repo ${shellQuote(repositoryUrl)} \\`,
@@ -971,6 +979,9 @@
                   disabled={provisioningTunnel}
                   >{provisioningTunnel ? text.provisioningTunnel : text.provisionTunnel}</button
                 >
+                <p class="mt-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
+                  {text.managedTunnelWait}
+                </p>
               {/if}
             </div>
           {:else}
@@ -999,6 +1010,8 @@
             </div>
             <button
               class="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/15"
+              disabled={!installCommandReady}
+              title={installCommandReady ? text.copy : text.installCommandPending}
               onclick={() => copyToClipboard(installCommand, text.copied)}>{text.copy}</button
             >
           </div>
