@@ -100,12 +100,12 @@
       managedTunnelDescription: '创建稳定域名、Tunnel 与 DNS；无需填写公开 URL。',
       quickTunnel: 'Quick Tunnel',
       quickTunnelDescription: '自动获取临时 trycloudflare.com 地址；适合演示和测试。',
-      provisionTunnel: '创建稳定 Tunnel 并生成安装命令',
       provisioningTunnel: '正在创建 Tunnel…',
       managedTunnelReady: '稳定地址已准备好',
       managedTunnelWait:
         '这会创建专属 Tunnel、DNS 记录和稳定域名；成功后安装命令会自动显示在右侧。',
       installCommandPending: '请先创建稳定 Tunnel，安装命令将在成功后生成。',
+      generateCommand: '生成并复制安装命令',
       managedTunnelNeedsSetup: '需要先为控制平面配置 Tunnel/DNS API Token。',
       quickTunnelNotice: '地址会在 cloudflared 重连后变化，Agent 会自动重新注册。',
       nodeName: '节点名称（可选）',
@@ -118,9 +118,6 @@
       allowApt: '允许 Agent 安装 apt 软件包',
       allowAptHint: '包维护脚本可以 root 权限运行，仅在明确需要时启用。',
       copy: '复制命令',
-      download: '下载脚本',
-      uninstall: '卸载 Agent',
-      downloadUninstaller: '下载卸载脚本',
       copied: '安装命令已复制',
       syncOk: '已同步',
       syncFailed: '同步失败：',
@@ -176,13 +173,13 @@
       quickTunnel: 'Quick Tunnel',
       quickTunnelDescription:
         'Gets a temporary trycloudflare.com URL automatically; best for demos and tests.',
-      provisionTunnel: 'Create stable Tunnel and generate command',
       provisioningTunnel: 'Creating Tunnel…',
       managedTunnelReady: 'Stable endpoint is ready',
       managedTunnelWait:
         'This creates a dedicated Tunnel, DNS record, and stable hostname. The install command appears here after it succeeds.',
       installCommandPending:
         'Create the stable Tunnel first; the install command appears after it succeeds.',
+      generateCommand: 'Generate and copy command',
       managedTunnelNeedsSetup: 'Configure the Tunnel/DNS API token for this control plane first.',
       quickTunnelNotice:
         'The URL may change after cloudflared reconnects; the Agent re-registers automatically.',
@@ -197,9 +194,6 @@
       allowApt: 'Allow agent to install apt packages',
       allowAptHint: 'Package maintainer scripts may run as root. Enable only when needed.',
       copy: 'Copy command',
-      download: 'Download script',
-      uninstall: 'Uninstall agent',
-      downloadUninstaller: 'Download uninstaller',
       copied: 'Install command copied',
       syncOk: 'Synchronized',
       syncFailed: 'Sync failed: ',
@@ -258,7 +252,6 @@
     installTunnelMode,
     managedProvision,
   );
-  $: installCommandReady = installTunnelMode !== 'managed' || Boolean(managedProvision);
 
   onMount(() => {
     const savedLocale = localStorage.getItem('vps-agent-locale');
@@ -382,7 +375,8 @@
     void refresh();
   }
 
-  async function provisionManagedTunnel() {
+  async function ensureManagedProvision(): Promise<ManagedProvision | undefined> {
+    if (managedProvision) return managedProvision;
     provisioningTunnel = true;
     try {
       managedProvision = await api<ManagedProvision>('/api/tunnels/provision', {
@@ -390,6 +384,7 @@
         body: JSON.stringify({ name: installBackendName.trim() || undefined }),
       });
       setNotice(`${text.managedTunnelReady}: ${managedProvision.publicUrl}`, 'success');
+      return managedProvision;
     } catch (error) {
       const message = messageOf(error);
       setNotice(
@@ -398,9 +393,28 @@
           : `${text.syncFailed}${message}`,
         'error',
       );
+      return undefined;
     } finally {
       provisioningTunnel = false;
     }
+  }
+
+  async function copyInstallCommand() {
+    const provision =
+      installTunnelMode === 'managed' ? await ensureManagedProvision() : managedProvision;
+    if (installTunnelMode === 'managed' && !provision) return;
+    await copyToClipboard(
+      buildInstallCommand(
+        installBackendName,
+        installTags,
+        installRedisUrl,
+        installRegistrationSecret,
+        installAllowApt,
+        installTunnelMode,
+        provision,
+      ),
+      text.copied,
+    );
   }
 
   function buildInstallCommand(
@@ -973,12 +987,6 @@
                   {managedProvision.publicUrl}
                 </p>
               {:else}
-                <button
-                  class="primary-button"
-                  onclick={provisionManagedTunnel}
-                  disabled={provisioningTunnel}
-                  >{provisioningTunnel ? text.provisioningTunnel : text.provisionTunnel}</button
-                >
                 <p class="mt-3 text-xs leading-5 text-blue-700 dark:text-blue-200">
                   {text.managedTunnelWait}
                 </p>
@@ -1010,9 +1018,16 @@
             </div>
             <button
               class="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/15"
-              disabled={!installCommandReady}
-              title={installCommandReady ? text.copy : text.installCommandPending}
-              onclick={() => copyToClipboard(installCommand, text.copied)}>{text.copy}</button
+              disabled={provisioningTunnel}
+              title={installTunnelMode === 'managed' && !managedProvision
+                ? text.generateCommand
+                : text.copy}
+              onclick={copyInstallCommand}
+              >{provisioningTunnel
+                ? text.provisioningTunnel
+                : installTunnelMode === 'managed' && !managedProvision
+                  ? text.generateCommand
+                  : text.copy}</button
             >
           </div>
           <pre
@@ -1020,18 +1035,7 @@
           <div
             class="flex items-center justify-between border-t border-white/10 px-5 py-4 text-xs text-zinc-400"
           >
-            <span>{text.noTask}</span><span class="flex items-center gap-2"
-              ><a
-                class="rounded-full bg-white px-3 py-1.5 font-semibold text-zinc-900 hover:bg-zinc-100"
-                href="/install-agent.sh"
-                download>{text.download}</a
-              ><a
-                class="rounded-full border border-white/20 px-3 py-1.5 font-semibold text-white hover:bg-white/10"
-                href="/uninstall-agent.sh"
-                download
-                title={text.uninstall}>{text.downloadUninstaller}</a
-              ></span
-            >
+            <span>{text.noTask}</span>
           </div>
         </aside>
       </div>

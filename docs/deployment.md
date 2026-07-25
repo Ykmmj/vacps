@@ -48,7 +48,7 @@ unset TUNNEL_PROVISIONING_API_TOKEN TUNNEL_PROVISIONING_ZONE_ID TUNNEL_PROVISION
 
 When a valid D1 ID already exists in `apps/control-worker/wrangler.jsonc`, the bootstrap reuses it; it does not create a second database.
 
-Use the Zone apex for `TUNNEL_PROVISIONING_BASE_DOMAIN` unless you have an Advanced Certificate for deeper hostnames. In the Web UI, choose **托管 Tunnel**, click **创建稳定 Tunnel**, then fill only the node name, Redis URL, and registration secret before copying the generated command. Do not manually edit its generated node ID, hostname, or Tunnel Token.
+Use the Zone apex for `TUNNEL_PROVISIONING_BASE_DOMAIN` unless you have an Advanced Certificate for deeper hostnames. In the Web UI, choose **托管 Tunnel**, fill the node name, Redis URL, and registration secret, then choose **生成并复制安装命令**. That action provisions the stable Tunnel and immediately copies the completed command. Do not manually edit its generated node ID, hostname, or Tunnel Token.
 
 ### Quick Tunnel (temporary)
 
