@@ -41,26 +41,73 @@ export const backendRegistrationSchema = registerBackendSchema.omit({ publicIps:
   location: z.string().trim().min(1).max(180).optional(),
 });
 
-export type Backend = z.infer<typeof backendSchema>;
+export const backendHealthSchema = z.object({
+  ok: z.boolean(),
+  backendId: backendIdSchema,
+  version: z.string().trim().min(1).max(48),
+  uptimeSeconds: z.number().int().nonnegative(),
+  worker: z.object({ running: z.boolean(), concurrency: z.number().int().positive() }),
+  redis: z.object({ connected: z.boolean() }),
+  pi: z.object({ available: z.boolean(), version: z.string().trim().min(1).max(48).optional() }),
+});
+
+export const backendMetricsSchema = z.object({
+  cpu: z.object({
+    usagePercent: z.number().min(0).max(100),
+    load1: z.number().nonnegative(),
+    cores: z.number().int().positive(),
+  }),
+  memory: z.object({ totalBytes: z.number().int().nonnegative(), usedBytes: z.number().int().nonnegative() }),
+  disk: z.object({ totalBytes: z.number().int().nonnegative(), usedBytes: z.number().int().nonnegative() }),
+  network: z
+    .object({
+      receivedBytesPerSecond: z.number().nonnegative(),
+      transmittedBytesPerSecond: z.number().nonnegative(),
+    })
+    .optional(),
+  queue: z.object({
+    waiting: z.number().int().nonnegative(),
+    active: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+  }),
+});
+
+export const backendSystemSchema = z.object({
+  platform: z.string().trim().min(1).max(32),
+  distribution: z.string().trim().min(1).max(120).optional(),
+  version: z.string().trim().min(1).max(120).optional(),
+  kernel: z.string().trim().min(1).max(120),
+  architecture: z.string().trim().min(1).max(32),
+});
+
+export const backendStatusSchema = z.object({
+  health: backendHealthSchema,
+  metrics: backendMetricsSchema.optional(),
+  system: backendSystemSchema.optional(),
+});
+
+export const backendTelemetrySchema = backendStatusSchema.extend({
+  backendId: backendIdSchema,
+  agentVersion: z.string().trim().min(1).max(48),
+  observedAt: z.iso.datetime(),
+});
+
+export const telemetrySettingsSchema = z.object({
+  intervalSeconds: z.number().int().min(15).max(3600),
+});
+
+export type BackendHealth = z.infer<typeof backendHealthSchema>;
+export type BackendMetrics = z.infer<typeof backendMetricsSchema>;
+export type BackendSystem = z.infer<typeof backendSystemSchema>;
+export type BackendStatus = z.infer<typeof backendStatusSchema>;
+export type BackendTelemetry = z.infer<typeof backendTelemetrySchema>;
+export type TelemetrySettings = z.infer<typeof telemetrySettingsSchema>;
+export type Backend = z.infer<typeof backendSchema> & {
+  lastStatus?: BackendStatus;
+  lastCheckedAt?: string;
+};
 export type CreateBackendInput = z.infer<typeof createBackendSchema>;
 export type UpdateBackendInput = z.infer<typeof updateBackendSchema>;
 export type RegisterBackendInput = z.infer<typeof registerBackendSchema>;
 export type BackendRegistration = z.infer<typeof backendRegistrationSchema>;
 export type RegistrationStatus = z.infer<typeof registrationStatusSchema>;
-
-export interface BackendHealth {
-  ok: boolean;
-  backendId: string;
-  version: string;
-  uptimeSeconds: number;
-  worker: { running: boolean; concurrency: number };
-  redis: { connected: boolean };
-  pi: { available: boolean; version?: string };
-}
-
-export interface BackendMetrics {
-  cpu: { usagePercent: number; load1: number; cores: number };
-  memory: { totalBytes: number; usedBytes: number };
-  disk: { totalBytes: number; usedBytes: number };
-  queue: { waiting: number; active: number; failed: number };
-}

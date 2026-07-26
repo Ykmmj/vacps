@@ -1,20 +1,19 @@
 import { readFile } from 'node:fs/promises';
-import os from 'node:os';
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createTaskSchema, taskDispatchSchema } from '@vps-agent/contracts';
 import type { AgentConfig } from '../config.js';
 import type { PiRuntime } from '../pi/pi-runtime.js';
 import type { TaskQueue } from '../queue/task-queue.js';
+import type { NodeTelemetryCollector } from '../telemetry/node-telemetry.js';
 
 export async function createServer(input: {
   config: AgentConfig;
   queue: TaskQueue;
   piRuntime: PiRuntime;
+  telemetry: NodeTelemetryCollector;
 }): Promise<FastifyInstance> {
   const app = Fastify({ logger: true, bodyLimit: 256 * 1024 });
-  const startedAt = Date.now();
-  let previousCpuSample = cpuSample();
   app.addHook('onRequest', async (request, reply) => {
     const token = request.headers.authorization?.replace(/^Bearer\s+/i, '');
     if (token !== input.config.BACKEND_SHARED_TOKEN) {
@@ -24,18 +23,7 @@ export async function createServer(input: {
     }
   });
 
-  app.get('/health', async () => ({
-    ok: true,
-    backendId: input.config.BACKEND_ID,
-    version: '0.1.0',
-    uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    worker: {
-      running: input.queue.isWorkerRunning(),
-      concurrency: input.config.WORKER_CONCURRENCY,
-    },
-    redis: { connected: input.queue.isRedisConnected() },
-    pi: await input.piRuntime.availability(),
-  }));
+  app.get('/health', async () => (await input.telemetry.collect()).health);
 
   app.get('/info', async () => ({
     backendId: input.config.BACKEND_ID,
@@ -43,27 +31,7 @@ export async function createServer(input: {
     runMode: input.config.RUN_MODE,
   }));
 
-  app.get('/metrics', async () => {
-    const queue = await input.queue.metrics();
-    const currentCpuSample = cpuSample();
-    const totalDelta = currentCpuSample.total - previousCpuSample.total;
-    const idleDelta = currentCpuSample.idle - previousCpuSample.idle;
-    previousCpuSample = currentCpuSample;
-    const usagePercent =
-      totalDelta > 0
-        ? Math.max(0, Math.min(100, ((totalDelta - idleDelta) / totalDelta) * 100))
-        : 0;
-    return {
-      cpu: {
-        usagePercent: Number(usagePercent.toFixed(1)),
-        load1: Number((os.loadavg()[0] ?? 0).toFixed(2)),
-        cores: os.cpus().length,
-      },
-      memory: { totalBytes: os.totalmem(), usedBytes: os.totalmem() - os.freemem() },
-      disk: { totalBytes: 0, usedBytes: 0 },
-      queue,
-    };
-  });
+  app.get('/metrics', async () => (await input.telemetry.collect()).metrics);
 
   app.post('/tasks', async (request, reply) => {
     const parsed = taskDispatchSchema.safeParse(request.body);
@@ -179,16 +147,6 @@ export async function createServer(input: {
   });
 
   return app;
-}
-
-function cpuSample(): { idle: number; total: number } {
-  return os.cpus().reduce(
-    (sample, cpu) => {
-      const total = Object.values(cpu.times).reduce((sum, value) => sum + value, 0);
-      return { idle: sample.idle + cpu.times.idle, total: sample.total + total };
-    },
-    { idle: 0, total: 0 },
-  );
 }
 
 async function safeRead(path: string): Promise<string> {

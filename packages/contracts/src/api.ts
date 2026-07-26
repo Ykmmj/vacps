@@ -1,4 +1,4 @@
-import type { BackendHealth, BackendMetrics } from './backend.js';
+import type { BackendStatus } from './backend.js';
 import type { CommandExecution, TaskError, TaskStatus } from './task.js';
 
 export interface ApiError {
@@ -14,7 +14,4 @@ export interface TaskDetail {
   commands: CommandExecution[];
 }
 
-export interface BackendStatusResponse {
-  health: BackendHealth;
-  metrics?: BackendMetrics;
-}
+export type BackendStatusResponse = BackendStatus;

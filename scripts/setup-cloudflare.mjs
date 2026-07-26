@@ -10,6 +10,8 @@ const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const options = parseOptions(process.argv.slice(2));
 const databaseName = options.get('database-name') ?? 'vps-agent-control';
 const suppliedToken = options.get('backend-token') ?? process.env.BACKEND_SHARED_TOKEN;
+const suppliedAdminPassword = options.get('admin-password') ?? process.env.CONTROL_PANEL_PASSWORD;
+const suppliedSessionSecret = process.env.CONTROL_PANEL_SESSION_SECRET;
 const suppliedDatabaseId =
   options.get('database-id') ?? process.env.D1_DATABASE_ID ?? (await configuredDatabaseId());
 const cloudflareApiToken = options.get('cloudflare-api-token') ?? process.env.CLOUDFLARE_API_TOKEN;
@@ -39,6 +41,7 @@ const backendToken =
   ((hasCloudflareOAuthInput || bootstrapManagedTunnelOAuth) && suppliedDatabaseId
     ? undefined
     : randomBytes(32).toString('hex'));
+const sessionSecret = suppliedSessionSecret ?? randomBytes(32).toString('base64url');
 
 if (options.has('help')) {
   printUsage();
@@ -46,6 +49,20 @@ if (options.has('help')) {
 }
 if (backendToken && (backendToken.length < 32 || /\s/.test(backendToken))) {
   throw new Error('BACKEND_SHARED_TOKEN must be at least 32 non-whitespace characters.');
+}
+if (!suppliedAdminPassword) {
+  throw new Error(
+    'CONTROL_PANEL_PASSWORD is required. Set it as an environment variable or pass --admin-password.',
+  );
+}
+if (suppliedAdminPassword.length < 12 || /\s/.test(suppliedAdminPassword)) {
+  throw new Error('CONTROL_PANEL_PASSWORD must be at least 12 non-whitespace characters.');
+}
+if (
+  suppliedSessionSecret &&
+  (suppliedSessionSecret.length < 32 || /\s/.test(suppliedSessionSecret))
+) {
+  throw new Error('CONTROL_PANEL_SESSION_SECRET must be at least 32 non-whitespace characters.');
 }
 if (
   hasCloudflareOAuthInput &&
@@ -74,6 +91,8 @@ if (!options.has('skip-login') && !hasCloudflareApiToken) {
 const databaseId = suppliedDatabaseId ?? (await createDatabase(databaseName));
 await updateDatabaseBinding(databaseId);
 if (backendToken) await putSecret('BACKEND_SHARED_TOKEN', backendToken);
+await putSecret('CONTROL_PANEL_PASSWORD', suppliedAdminPassword);
+await putSecret('CONTROL_PANEL_SESSION_SECRET', sessionSecret);
 const oauthConfiguration = bootstrapManagedTunnelOAuth
   ? await createManagedTunnelOAuthClient()
   : hasCloudflareOAuthInput
@@ -113,6 +132,7 @@ if (backendToken && !suppliedToken) {
 } else {
   console.log('BACKEND_SHARED_TOKEN: existing Worker secret was left unchanged.');
 }
+console.log('Control-panel authentication secrets were stored as Worker secrets.');
 console.log(
   bootstrapManagedTunnelOAuth
     ? 'Managed Tunnel OAuth is ready. Connect Cloudflare in the Web UI, then create a stable node endpoint and run its generated command on the VPS.'
@@ -343,6 +363,9 @@ function printUsage() {
 
 Options:
   --backend-token <token>  Reuse this Backend Bearer token (otherwise generated).
+  --admin-password <password>
+                           Control-panel password. Prefer CONTROL_PANEL_PASSWORD
+                           so it is not retained in shell history.
   --database-name <name>   D1 name, default: vps-agent-control.
   --database-id <uuid>     Reuse an existing D1 database instead of creating one.
   --cloudflare-account-id <id>
@@ -366,5 +389,6 @@ Options:
 
 Set CLOUDFLARE_API_TOKEN (and preferably CLOUDFLARE_ACCOUNT_ID) to use API-token
 authentication instead of the browser OAuth callback. Environment variables avoid
-putting the API Token in shell history and process arguments.`);
+putting secrets in shell history and process arguments. CONTROL_PANEL_PASSWORD is
+required; CONTROL_PANEL_SESSION_SECRET is generated securely when omitted.`);
 }

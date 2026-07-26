@@ -2,8 +2,14 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
+    "ignoreDeprecations": "6.0",
     "types": ["@cloudflare/workers-types"],
-    "lib": ["ES2022", "WebWorker"]
+    "lib": ["ES2022", "WebWorker"],
+    "baseUrl": ".",
+    "paths": {
+      "$lib": ["./ui/src/lib"],
+      "$lib/*": ["./ui/src/lib/*"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

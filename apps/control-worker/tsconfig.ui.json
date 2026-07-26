@@ -3,7 +3,14 @@
   "compilerOptions": {
     "allowJs": true,
     "checkJs": false,
-    "types": ["svelte", "vite/client"]
+    "ignoreDeprecations": "6.0",
+    "exactOptionalPropertyTypes": false,
+    "types": ["svelte", "vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "$lib": ["./ui/src/lib"],
+      "$lib/*": ["./ui/src/lib/*"]
+    }
   },
   "include": ["ui/src/**/*.ts", "ui/src/**/*.svelte", "vite.config.ts"]
 }

@@ -1,6 +1,7 @@
 import { mount } from 'svelte';
 
 import './app.css';
+import 'flag-icons/css/flag-icons.min.css';
 import App from './App.svelte';
 
 const target = document.getElementById('app');

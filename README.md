@@ -32,9 +32,14 @@ Cloudflare does not connect to Redis or execute Shell commands. A task UUID is c
 The project provides an interactive control-plane bootstrap and a non-Docker VPS installer. Redis is the only external runtime dependency.
 
 ```bash
-# Logs in to Cloudflare, creates/binds D1, stores the Backend token, migrates, and deploys.
+read -rsp 'Control panel password: ' CONTROL_PANEL_PASSWORD; echo
+export CONTROL_PANEL_PASSWORD
+# Logs in to Cloudflare, creates/binds D1, stores Worker secrets, migrates, and deploys.
 pnpm setup:cloudflare
+unset CONTROL_PANEL_PASSWORD
 ```
+
+`CONTROL_PANEL_PASSWORD` must be at least 12 non-whitespace characters. The setup stores it only as a Worker Secret and generates the session-signing secret without printing it. Prefer the environment-variable form over `--admin-password`, which can be retained in shell history.
 
 If Wrangler's browser callback is unavailable (a WSL networking issue, for
 example), create a scoped Cloudflare API Token and run the same command without
@@ -58,6 +63,8 @@ Open the deployed Web UI and choose one of its connection modes before copying t
 - **Quick Tunnel** creates a temporary `trycloudflare.com` URL on the VPS and re-registers the Agent whenever that URL changes. Use it only for demos or testing.
 
 The installer installs Node.js 24 and pnpm 10.14.0 through an Agent-scoped NVM directory, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
+
+In the **Nodes** view, **Global reporting** controls the Agent reporting cadence for every approved node (15–3,600 seconds; default 120). Each report writes one current snapshot containing CPU, memory, root-disk usage, queue state, operating system, and upload/download byte rates. D1 keeps only the latest snapshot, which makes the UI inexpensive to poll and leaves a clean input for future roll-up charts; it is not raw time-series retention.
 
 To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vps-agent` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
 

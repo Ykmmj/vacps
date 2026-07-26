@@ -12,6 +12,7 @@ const configSchema = z.object({
   CONTROL_PLANE_URL: optionalUrl,
   PUBLIC_BASE_URL: optionalUrl,
   REGISTRATION_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(300),
+  TELEMETRY_FALLBACK_INTERVAL_SECONDS: z.coerce.number().int().min(15).max(3600).default(120),
   LISTEN_HOST: z.string().default('127.0.0.1'),
   LISTEN_PORT: z.coerce.number().int().min(1).max(65_535).default(3100),
   REDIS_URL: z.url(),
