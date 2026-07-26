@@ -54,6 +54,20 @@ export class RegistrationRepository {
     return toRegistration(row);
   }
 
+  async getByBackendId(backendId: string): Promise<BackendRegistration> {
+    const row = await this.db
+      .prepare('SELECT * FROM backend_registrations WHERE backend_id = ?')
+      .bind(backendId)
+      .first<RegistrationRow>();
+    if (!row)
+      throw new AppError(
+        'registration_not_found',
+        `Registration for backend '${backendId}' was not found.`,
+        404,
+      );
+    return toRegistration(row);
+  }
+
   async request(
     input: RegisterBackendInput,
     network: RegistrationNetworkDetails = {},

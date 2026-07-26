@@ -1,4 +1,8 @@
 BACKEND_SHARED_TOKEN=replace-with-the-same-token-used-by-each-vps-agent
+# Required for the control-plane UI. Use at least 12 non-whitespace characters.
+CONTROL_PANEL_PASSWORD=replace-with-a-strong-control-panel-password
+# Generate a random value of at least 32 non-whitespace characters for each environment.
+CONTROL_PANEL_SESSION_SECRET=replace-with-a-random-session-signing-secret
 # Optional: enables Cloudflare OAuth for Managed Tunnels in local development.
 # Create a private Cloudflare OAuth client with the local callback below.
 # CLOUDFLARE_OAUTH_CLIENT_ID=replace-with-oauth-client-id

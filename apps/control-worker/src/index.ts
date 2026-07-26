@@ -1,14 +1,22 @@
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import {
   createScheduleSchema,
+  backendTelemetrySchema,
   createTaskSchema,
   registerBackendSchema,
+  telemetrySettingsSchema,
   updateBackendSchema,
   updateScheduleSchema,
 } from '@vps-agent/contracts';
-import type { Backend, BackendRegistration, BackendStatusResponse } from '@vps-agent/contracts';
+import type { Backend, BackendRegistration, BackendStatus } from '@vps-agent/contracts';
 import { z } from 'zod';
 
+import {
+  clearSessionCookie,
+  createSessionCookie,
+  passwordMatches,
+  requireAuthenticated,
+} from './auth/session.js';
 import { CloudflareOAuthService } from './cloudflare/oauth-service.js';
 import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
@@ -20,17 +28,24 @@ import { RegistrationRepository } from './registry/registration-repository.js';
 import { BackendRepository } from './registry/repository.js';
 import { ScheduleService } from './schedules/schedule-service.js';
 import { TaskService } from './tasks/task-service.js';
+import { TelemetrySettingsRepository } from './telemetry/settings-repository.js';
 import { ManagedTunnelService } from './tunnels/managed-tunnel-service.js';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/mcp') {
-      // MCP SDK >=1.26 requires a fresh server for every stateless request.
-      const server = createMcpServer(env);
-      const transport = new WebStandardStreamableHTTPServerTransport();
-      await server.connect(transport);
-      return transport.handleRequest(request);
+      try {
+        await requireAuthenticated(request, env);
+        if (isStateChanging(request) && request.headers.has('origin')) requireSameOrigin(request);
+        // MCP SDK >=1.26 requires a fresh server for every stateless request.
+        const server = createMcpServer(env);
+        const transport = new WebStandardStreamableHTTPServerTransport();
+        await server.connect(transport);
+        return transport.handleRequest(request);
+      } catch (error) {
+        return errorResponse(error, crypto.randomUUID());
+      }
     }
     if (url.pathname.startsWith('/api/')) return handleApi(request, env, crypto.randomUUID());
     return env.ASSETS.fetch(request);
@@ -50,6 +65,7 @@ function createServices(env: Env) {
   const tunnels = new ManagedTunnelService(cloudflareOAuth, managedTunnels);
   const tasks = new TaskService(env.DB, backends, client);
   const schedules = new ScheduleService(env.DB, backends, client, tasks);
+  const telemetrySettings = new TelemetrySettingsRepository(env.DB);
   return {
     backends,
     client,
@@ -59,6 +75,7 @@ function createServices(env: Env) {
     tunnels,
     tasks,
     schedules,
+    telemetrySettings,
   };
 }
 
@@ -71,17 +88,30 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     const id = segments[2];
     const action = segments[3];
 
+    if (resource === 'auth') return handleAuth(request, env, id);
+
+    const isAgentRequest =
+      (resource === 'registrations' && !id && request.method === 'POST') ||
+      (resource === 'telemetry' && request.method === 'POST');
+    if (!isAgentRequest) {
+      await requireAuthenticated(request, env);
+      if (isStateChanging(request)) requireSameOrigin(request);
+    }
+
     if (resource === 'dashboard' && request.method === 'GET') {
-      const [backends, tasks, schedules, registrations] = await Promise.all([
+      const [backends, tasks, schedules, registrations, telemetry] = await Promise.all([
         services.backends.list(),
         services.tasks.list(100),
         services.schedules.list(),
         services.registrations.list(),
+        services.telemetrySettings.get(),
       ]);
       const backendById = new Map(backends.map((backend) => [backend.id, backend]));
-      const nodes = await Promise.all(
-        registrations.map((registration) =>
-          inspectNode(registration, backendById.get(registration.backendId), services),
+      const nodes = registrations.map((registration) =>
+        inspectNode(
+          registration,
+          backendById.get(registration.backendId),
+          telemetry.intervalSeconds,
         ),
       );
       const active = tasks.filter((task) => task.status === 'running').length;
@@ -103,7 +133,45 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
         backends,
         nodes,
         failed,
+        telemetry,
       });
+    }
+
+    if (resource === 'telemetry') {
+      if (request.method !== 'POST')
+        throw new AppError('method_not_allowed', 'Telemetry requires POST.', 405);
+      requireBackendToken(request, env);
+      const telemetry = backendTelemetrySchema.parse(await readJson(request));
+      const registration = await services.registrations.getByBackendId(telemetry.backendId);
+      if (registration.status !== 'approved')
+        throw new AppError(
+          'telemetry_not_approved',
+          'Telemetry is accepted only after node approval.',
+          409,
+        );
+      const backend = await services.backends.get(telemetry.backendId);
+      if (telemetry.health.backendId !== backend.id)
+        throw new AppError(
+          'backend_identity_mismatch',
+          'Telemetry backend ID does not match.',
+          409,
+        );
+      await services.backends.recordStatus(backend.id, {
+        health: telemetry.health,
+        metrics: telemetry.metrics,
+        system: telemetry.system,
+      });
+      return json(await services.telemetrySettings.get());
+    }
+
+    if (resource === 'telemetry-settings') {
+      if (request.method === 'GET') return json(await services.telemetrySettings.get());
+      if (request.method === 'PATCH')
+        return json(
+          await services.telemetrySettings.update(
+            telemetrySettingsSchema.parse(await readJson(request)),
+          ),
+        );
     }
 
     if (resource === 'registrations') {
@@ -270,7 +338,73 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       { status: 404 },
     );
   } catch (error) {
-    return errorResponse(error, requestId);
+    const response = errorResponse(error, requestId);
+    if (new URL(request.url).pathname.startsWith('/api/auth/')) {
+      response.headers.set('cache-control', 'no-store');
+    }
+    return response;
+  }
+}
+
+async function handleAuth(
+  request: Request,
+  env: Env,
+  action: string | undefined,
+): Promise<Response> {
+  if (action === 'session' && request.method === 'GET') {
+    await requireAuthenticated(request, env);
+    return authJson({ authenticated: true });
+  }
+  if (action === 'login' && request.method === 'POST') {
+    requireSameOrigin(request);
+    let password: string | undefined;
+    try {
+      const input = await request.json();
+      password =
+        input &&
+        typeof input === 'object' &&
+        typeof (input as { password?: unknown }).password === 'string'
+          ? (input as { password: string }).password
+          : undefined;
+    } catch {
+      // Invalid credentials intentionally use the same generic response.
+    }
+    if (!password || !(await passwordMatches(password, env))) {
+      throw new AppError('invalid_credentials', 'Invalid credentials.', 401);
+    }
+    return authJson(
+      { authenticated: true },
+      { headers: { 'set-cookie': await createSessionCookie(env) } },
+    );
+  }
+  if (action === 'logout' && request.method === 'POST') {
+    await requireAuthenticated(request, env);
+    requireSameOrigin(request);
+    return new Response(null, {
+      status: 204,
+      headers: { 'cache-control': 'no-store', 'set-cookie': clearSessionCookie() },
+    });
+  }
+  return json(
+    { error: { code: 'not_found', message: 'API route not found.' } },
+    { status: 404, headers: { 'cache-control': 'no-store' } },
+  );
+}
+
+function authJson(data: unknown, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  headers.set('cache-control', 'no-store');
+  return json(data, { ...init, headers });
+}
+
+function isStateChanging(request: Request): boolean {
+  return ['POST', 'PATCH', 'DELETE'].includes(request.method);
+}
+
+function requireSameOrigin(request: Request): void {
+  const origin = request.headers.get('origin');
+  if (origin !== new URL(request.url).origin) {
+    throw new AppError('invalid_origin', 'Request origin is not allowed.', 403);
   }
 }
 
@@ -285,35 +419,29 @@ function requireBackendToken(request: Request, env: Env): void {
   }
 }
 
-async function inspectNode(
+function inspectNode(
   registration: BackendRegistration,
   backend: Backend | undefined,
-  services: ReturnType<typeof createServices>,
-): Promise<{
+  intervalSeconds: number,
+): {
   registration: BackendRegistration;
   backend?: Backend;
-  status?: BackendStatusResponse;
+  status?: BackendStatus;
   online: boolean;
   checkedAt: string;
-}> {
-  try {
-    const status = await services.client.status(registration);
-    if (backend) await services.backends.recordStatus(backend.id, status);
-    return {
-      registration,
-      ...(backend ? { backend } : {}),
-      status,
-      online: status.health.ok,
-      checkedAt: new Date().toISOString(),
-    };
-  } catch {
-    return {
-      registration,
-      ...(backend ? { backend } : {}),
-      online: false,
-      checkedAt: new Date().toISOString(),
-    };
-  }
+} {
+  const checkedAt = backend?.lastCheckedAt ?? registration.updatedAt;
+  const lastChecked = Date.parse(checkedAt);
+  const fresh =
+    Number.isFinite(lastChecked) && Date.now() - lastChecked <= intervalSeconds * 3 * 1000;
+  const status = backend?.lastStatus;
+  return {
+    registration,
+    ...(backend ? { backend } : {}),
+    ...(status ? { status } : {}),
+    online: registration.status === 'approved' && Boolean(status?.health.ok) && fresh,
+    checkedAt,
+  };
 }
 
 function registrationNetwork(request: Request): { ip?: string; ips?: string[]; location?: string } {

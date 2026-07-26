@@ -1,4 +1,10 @@
-import type { Backend, CreateBackendInput, UpdateBackendInput } from '@vps-agent/contracts';
+import {
+  backendStatusSchema,
+  type Backend,
+  type BackendStatus,
+  type CreateBackendInput,
+  type UpdateBackendInput,
+} from '@vps-agent/contracts';
 
 import { AppError } from '../lib/http.js';
 
@@ -9,6 +15,8 @@ interface BackendRow {
   region: string | null;
   tags_json: string;
   enabled: number;
+  last_status: string | null;
+  last_checked_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -84,7 +92,7 @@ export class BackendRepository {
       throw new AppError('backend_not_found', `Backend '${id}' was not found.`, 404);
   }
 
-  async recordStatus(id: string, status: unknown): Promise<void> {
+  async recordStatus(id: string, status: BackendStatus): Promise<void> {
     await this.db
       .prepare(
         'UPDATE backends SET last_status = ?, last_checked_at = ?, updated_at = ? WHERE id = ?',
@@ -95,6 +103,7 @@ export class BackendRepository {
 }
 
 function toBackend(row: BackendRow): Backend {
+  const status = parseStatus(row.last_status);
   return {
     id: row.id,
     name: row.name,
@@ -103,5 +112,17 @@ function toBackend(row: BackendRow): Backend {
     enabled: Boolean(row.enabled),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(status ? { lastStatus: status } : {}),
+    ...(row.last_checked_at ? { lastCheckedAt: row.last_checked_at } : {}),
   };
+}
+
+function parseStatus(value: string | null): BackendStatus | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = backendStatusSchema.safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
