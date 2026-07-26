@@ -108,7 +108,11 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       ]);
       const backendById = new Map(backends.map((backend) => [backend.id, backend]));
       const nodes = registrations.map((registration) =>
-        inspectNode(registration, backendById.get(registration.backendId), telemetry.intervalSeconds),
+        inspectNode(
+          registration,
+          backendById.get(registration.backendId),
+          telemetry.intervalSeconds,
+        ),
       );
       const active = tasks.filter((task) => task.status === 'running').length;
       const queued = tasks.filter((task) => task.status === 'queued').length;
@@ -147,7 +151,11 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
         );
       const backend = await services.backends.get(telemetry.backendId);
       if (telemetry.health.backendId !== backend.id)
-        throw new AppError('backend_identity_mismatch', 'Telemetry backend ID does not match.', 409);
+        throw new AppError(
+          'backend_identity_mismatch',
+          'Telemetry backend ID does not match.',
+          409,
+        );
       await services.backends.recordStatus(backend.id, {
         health: telemetry.health,
         metrics: telemetry.metrics,

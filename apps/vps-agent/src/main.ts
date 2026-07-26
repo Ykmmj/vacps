@@ -5,7 +5,10 @@ import { TaskGraphRunner } from './graph/task-graph.js';
 import { PiRuntime } from './pi/pi-runtime.js';
 import { FullAccessPolicy } from './policy/full-access-policy.js';
 import { TaskQueue } from './queue/task-queue.js';
-import { registerWithControlPlane, reportTelemetry } from './registration/control-plane-registration.js';
+import {
+  registerWithControlPlane,
+  reportTelemetry,
+} from './registration/control-plane-registration.js';
 import { TaskStore } from './storage/task-store.js';
 import { NodeTelemetryCollector } from './telemetry/node-telemetry.js';
 

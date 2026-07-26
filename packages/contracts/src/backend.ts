@@ -57,8 +57,14 @@ export const backendMetricsSchema = z.object({
     load1: z.number().nonnegative(),
     cores: z.number().int().positive(),
   }),
-  memory: z.object({ totalBytes: z.number().int().nonnegative(), usedBytes: z.number().int().nonnegative() }),
-  disk: z.object({ totalBytes: z.number().int().nonnegative(), usedBytes: z.number().int().nonnegative() }),
+  memory: z.object({
+    totalBytes: z.number().int().nonnegative(),
+    usedBytes: z.number().int().nonnegative(),
+  }),
+  disk: z.object({
+    totalBytes: z.number().int().nonnegative(),
+    usedBytes: z.number().int().nonnegative(),
+  }),
   network: z
     .object({
       receivedBytesPerSecond: z.number().nonnegative(),
