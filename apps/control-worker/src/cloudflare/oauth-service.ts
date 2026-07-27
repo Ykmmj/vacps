@@ -260,7 +260,8 @@ export class CloudflareOAuthService {
       throw new AppError(
         'cloudflare_authorization_expired',
         'Cloudflare authorization expired. Connect Cloudflare again.',
-        401,
+        // Must not be 401: the Web UI treats authentication_required 401 as a control-panel logout.
+        409,
       );
     const refreshToken = await this.decrypt(connection.refreshTokenCiphertext, clientSecret);
     const tokens = await this.tokenRequest({
@@ -271,7 +272,7 @@ export class CloudflareOAuthService {
       throw new AppError(
         'cloudflare_authorization_expired',
         'Cloudflare authorization expired. Connect Cloudflare again.',
-        401,
+        409,
       );
     await this.repository.saveConnection({
       accountId: connection.accountId,

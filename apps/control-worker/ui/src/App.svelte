@@ -221,12 +221,17 @@
     const headers = new Headers(init.headers);
     headers.set('content-type', 'application/json');
     const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
-    if (response.status === 401) {
+    if (response.status === 204) return undefined as T;
+    const body = (await response.json().catch(() => undefined)) as any;
+    // Only the control-panel session uses authentication_required. Other 401s (or historical
+    // Cloudflare OAuth 401s) must not force a logout and bounce the operator to the login screen.
+    if (
+      response.status === 401 &&
+      (body?.error?.code === 'authentication_required' || body?.error?.code === undefined)
+    ) {
       returnToLogin(true);
       throw new AuthenticationRequiredError();
     }
-    if (response.status === 204) return undefined as T;
-    const body = (await response.json().catch(() => undefined)) as any;
     if (!response.ok) throw new Error(body?.error?.message ?? `HTTP ${response.status}`);
     return body as T;
   }
@@ -529,9 +534,16 @@
     try {
       existingTunnels = await api('/api/tunnels');
     } catch (error) {
-      if (!isAuthenticationRequired(error))
-        notice(`${text.syncFailed}${messageOf(error)}`, 'error');
       existingTunnels = [];
+      if (isAuthenticationRequired(error)) return;
+      const detail = messageOf(error);
+      // Expired Cloudflare OAuth is recoverable from the Install page; do not treat it as logout.
+      notice(
+        detail.includes('Connect Cloudflare again') || detail.includes('authorization expired')
+          ? detail
+          : `${text.syncFailed}${detail}`,
+        'error',
+      );
     } finally {
       loadingExistingTunnels = false;
     }
