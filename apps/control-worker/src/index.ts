@@ -119,6 +119,16 @@ function createServices(env: Env) {
   };
 }
 
+type ControlServices = ReturnType<typeof createServices>;
+
+/** Tear down registration, backend row, nonces, and the Cloudflare tunnel for one node. */
+async function removeNode(services: ControlServices, backendId: string): Promise<void> {
+  await services.tunnels.remove(backendId);
+  await services.agentSignatures.purgeBackend(backendId);
+  await services.registrations.deleteByBackendId(backendId);
+  await services.backends.deleteIfPresent(backendId);
+}
+
 async function handleApi(request: Request, env: Env, requestId: string): Promise<Response> {
   try {
     const { pathname, searchParams } = new URL(request.url);
@@ -307,6 +317,11 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           .parse(await readJson(request));
         return json(await services.registrations.reject(id, input.reason));
       }
+      if (id && !action && request.method === 'DELETE') {
+        const registration = await services.registrations.get(id);
+        await removeNode(services, registration.backendId);
+        return new Response(null, { status: 204 });
+      }
     }
 
     if (resource === 'registration-tokens' && !id && request.method === 'POST') {
@@ -325,11 +340,33 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       );
     }
 
-    if (resource === 'tunnels' && id === 'provision' && request.method === 'POST') {
-      const input = z
-        .object({ name: z.string().trim().min(1).max(120).optional() })
-        .parse(await readJson(request));
-      return json(await services.tunnels.provision(input), { status: 201 });
+    if (resource === 'tunnels') {
+      if (!id && request.method === 'GET') return json(await services.tunnels.listAvailable());
+      if (id === 'provision' && request.method === 'POST') {
+        const input = z
+          .object({ name: z.string().trim().min(1).max(120).optional() })
+          .parse(await readJson(request));
+        return json(await services.tunnels.provision(input), { status: 201 });
+      }
+      if (id === 'attach' && request.method === 'POST') {
+        const input = z
+          .object({
+            tunnelId: z.string().uuid(),
+            backendId: z
+              .string()
+              .regex(
+                /^(?:vacps|vps)-[a-f0-9]{12}$/i,
+                'backendId must match vacps-<12 hex characters>.',
+              )
+              .optional(),
+          })
+          .parse(await readJson(request));
+        return json(await services.tunnels.attach(input), { status: 201 });
+      }
+      if (id && !action && request.method === 'DELETE') {
+        await services.tunnels.remove(id);
+        return new Response(null, { status: 204 });
+      }
     }
 
     if (resource === 'cloudflare' && id === 'oauth') {
@@ -365,8 +402,7 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           await services.backends.update(id, updateBackendSchema.parse(await readJson(request))),
         );
       if (id && !action && request.method === 'DELETE') {
-        await services.tunnels.remove(id);
-        await services.backends.delete(id);
+        await removeNode(services, id);
         return new Response(null, { status: 204 });
       }
       if (id && action === 'test' && request.method === 'POST') {

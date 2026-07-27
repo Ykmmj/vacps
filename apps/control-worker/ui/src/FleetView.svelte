@@ -222,7 +222,11 @@
   }
 
   function isActing(node: NodeRecord) {
-    return actingId === node.registration?.id || actingId === node.backend?.id;
+    return (
+      actingId === node.registration?.id ||
+      actingId === node.backend?.id ||
+      actingId === node.registration?.backendId
+    );
   }
 
   function inspect(node: NodeRecord) {
@@ -393,44 +397,42 @@
                   <i aria-hidden="true"></i>
                 {/if}
               </span>
-              {#if node.registration.status !== 'pending'}
-                <DropdownMenu.Root>
-                  <DropdownMenu.Trigger>
-                    {#snippet child({ props })}
-                      <Button
-                        {...props}
-                        variant="ghost"
-                        size="icon"
-                        class="node-overflow-button size-11 rounded-full"
-                        aria-label={label('actions', 'Node actions')}
-                      >
-                        <EllipsisIcon />
-                      </Button>
-                    {/snippet}
-                  </DropdownMenu.Trigger>
-                  <DropdownMenu.Content align="end" class="node-menu">
-                    <DropdownMenu.Item onclick={() => inspect(node)}
-                      ><ServerIcon />{label('inspect', 'Inspect node')}</DropdownMenu.Item
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger>
+                  {#snippet child({ props })}
+                    <Button
+                      {...props}
+                      variant="ghost"
+                      size="icon"
+                      class="node-overflow-button size-11 rounded-full"
+                      aria-label={label('actions', 'Node actions')}
                     >
-                    <DropdownMenu.Item
-                      onclick={() => copyToClipboard?.(ips(node), label('copied', 'Copied'))}
-                      ><CopyIcon />{label('copyIp', 'Copy public IP')}</DropdownMenu.Item
+                      <EllipsisIcon />
+                    </Button>
+                  {/snippet}
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Content align="end" class="node-menu">
+                  <DropdownMenu.Item onclick={() => inspect(node)}
+                    ><ServerIcon />{label('inspect', 'Inspect node')}</DropdownMenu.Item
+                  >
+                  <DropdownMenu.Item
+                    onclick={() => copyToClipboard?.(ips(node), label('copied', 'Copied'))}
+                    ><CopyIcon />{label('copyIp', 'Copy public IP')}</DropdownMenu.Item
+                  >
+                  {#if node.backend}
+                    <DropdownMenu.Item disabled={isActing(node)} onclick={() => testBackend(node)}
+                      ><GaugeIcon />{label('test', 'Test connection')}</DropdownMenu.Item
                     >
-                    {#if node.backend}
-                      <DropdownMenu.Item disabled={isActing(node)} onclick={() => testBackend(node)}
-                        ><GaugeIcon />{label('test', 'Test connection')}</DropdownMenu.Item
-                      >
-                      <DropdownMenu.Separator />
-                      <DropdownMenu.Item
-                        class="danger-menu-item"
-                        disabled={isActing(node)}
-                        onclick={() => deleteBackend(node)}
-                        ><Trash2Icon />{label('remove', 'Remove')}</DropdownMenu.Item
-                      >
-                    {/if}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Root>
-              {/if}
+                  {/if}
+                  <DropdownMenu.Separator />
+                  <DropdownMenu.Item
+                    class="danger-menu-item"
+                    disabled={isActing(node)}
+                    onclick={() => deleteBackend(node)}
+                    ><Trash2Icon />{label('remove', 'Remove node + Tunnel')}</DropdownMenu.Item
+                  >
+                </DropdownMenu.Content>
+              </DropdownMenu.Root>
             </div>
           </div>
 
