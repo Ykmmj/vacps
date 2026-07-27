@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, webcrypto } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
@@ -9,11 +9,14 @@ import { spawn } from 'node:child_process';
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const options = parseOptions(process.argv.slice(2));
 const databaseName = options.get('database-name') ?? 'vps-agent-control';
-const suppliedToken = options.get('backend-token') ?? process.env.BACKEND_SHARED_TOKEN;
 const suppliedAdminPassword = options.get('admin-password') ?? process.env.CONTROL_PANEL_PASSWORD;
 const suppliedSessionSecret = process.env.CONTROL_PANEL_SESSION_SECRET;
 const suppliedDatabaseId =
   options.get('database-id') ?? process.env.D1_DATABASE_ID ?? (await configuredDatabaseId());
+const suppliedOAuthKvNamespaceId =
+  options.get('oauth-kv-id') ??
+  process.env.OAUTH_KV_NAMESPACE_ID ??
+  (await configuredOAuthKvNamespaceId());
 const cloudflareApiToken = options.get('cloudflare-api-token') ?? process.env.CLOUDFLARE_API_TOKEN;
 const cloudflareAccountId =
   options.get('cloudflare-account-id') ?? process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -36,19 +39,11 @@ const cloudflareEnvironment = {
 const hasCloudflareOAuthInput = Boolean(
   cloudflareOAuthClientId || cloudflareOAuthClientSecret || cloudflareOAuthRedirectUrl,
 );
-const backendToken =
-  suppliedToken ??
-  ((hasCloudflareOAuthInput || bootstrapManagedTunnelOAuth) && suppliedDatabaseId
-    ? undefined
-    : randomBytes(32).toString('hex'));
 const sessionSecret = suppliedSessionSecret ?? randomBytes(32).toString('base64url');
 
 if (options.has('help')) {
   printUsage();
   process.exit(0);
-}
-if (backendToken && (backendToken.length < 32 || /\s/.test(backendToken))) {
-  throw new Error('BACKEND_SHARED_TOKEN must be at least 32 non-whitespace characters.');
 }
 if (!suppliedAdminPassword) {
   throw new Error(
@@ -90,7 +85,23 @@ if (!options.has('skip-login') && !hasCloudflareApiToken) {
 
 const databaseId = suppliedDatabaseId ?? (await createDatabase(databaseName));
 await updateDatabaseBinding(databaseId);
-if (backendToken) await putSecret('BACKEND_SHARED_TOKEN', backendToken);
+const oauthKvNamespaceId = suppliedOAuthKvNamespaceId ?? (await createKvNamespace('OAUTH_KV'));
+await updateOAuthKvBinding(oauthKvNamespaceId);
+// The control-plane identity signs every Worker -> Agent request. Its public half is intentionally
+// returned with each one-time registration token so an Agent can authenticate the Worker locally.
+const signingSecretNames = await workerSecretNames();
+const hasControlPlanePrivateKey = signingSecretNames.has('CONTROL_PLANE_SIGNING_PRIVATE_KEY');
+const hasControlPlanePublicKey = signingSecretNames.has('CONTROL_PLANE_SIGNING_PUBLIC_KEY');
+if (hasControlPlanePrivateKey !== hasControlPlanePublicKey) {
+  throw new Error(
+    'Control-plane signing-key secrets are incomplete. Restore both CONTROL_PLANE_SIGNING_* secrets before deploying.',
+  );
+}
+if (!hasControlPlanePrivateKey) {
+  const signingKeys = await generateControlPlaneSigningKeys();
+  await putSecret('CONTROL_PLANE_SIGNING_PRIVATE_KEY', signingKeys.privateKey);
+  await putSecret('CONTROL_PLANE_SIGNING_PUBLIC_KEY', signingKeys.publicKey);
+}
 await putSecret('CONTROL_PANEL_PASSWORD', suppliedAdminPassword);
 await putSecret('CONTROL_PANEL_SESSION_SECRET', sessionSecret);
 const oauthConfiguration = bootstrapManagedTunnelOAuth
@@ -125,14 +136,8 @@ await run('pnpm', ['--filter', '@vps-agent/control-worker', 'run', 'deploy']);
 
 console.log('\nControl plane deployed successfully.');
 console.log(`D1 database ID: ${databaseId}`);
-if (backendToken && !suppliedToken) {
-  console.log(`BACKEND_SHARED_TOKEN (save this now): ${backendToken}`);
-} else if (suppliedToken) {
-  console.log('BACKEND_SHARED_TOKEN: supplied value stored as a Worker secret.');
-} else {
-  console.log('BACKEND_SHARED_TOKEN: existing Worker secret was left unchanged.');
-}
-console.log('Control-panel authentication secrets were stored as Worker secrets.');
+console.log(`OAUTH_KV namespace ID: ${oauthKvNamespaceId}`);
+console.log('Control-panel and control-plane signing secrets were stored as Worker secrets.');
 console.log(
   bootstrapManagedTunnelOAuth
     ? 'Managed Tunnel OAuth is ready. Connect Cloudflare in the Web UI, then create a stable node endpoint and run its generated command on the VPS.'
@@ -196,6 +201,67 @@ async function configuredDatabaseId() {
   const configuration = await readFile(configurationPath, 'utf8');
   const candidate = configuration.match(/"database_id"\s*:\s*"([^"]+)"/)?.[1];
   return candidate && isUuid(candidate) ? candidate : undefined;
+}
+
+async function createKvNamespace(binding) {
+  const output = await capture('pnpm', [
+    '--filter',
+    '@vps-agent/control-worker',
+    'exec',
+    'wrangler',
+    'kv',
+    'namespace',
+    'create',
+    binding,
+  ]);
+  const namespaceId = findKvNamespaceId(output);
+  if (!namespaceId) {
+    throw new Error(
+      `Could not read the KV namespace ID for ${binding}. Re-run with --oauth-kv-id <id> after creating it in Wrangler.`,
+    );
+  }
+  return namespaceId;
+}
+
+function findKvNamespaceId(output) {
+  try {
+    const parsed = JSON.parse(output);
+    const values = Array.isArray(parsed) ? parsed : [parsed];
+    for (const value of values) {
+      const candidate = value?.id ?? value?.kv_namespaces?.[0]?.id;
+      if (typeof candidate === 'string' && isKvNamespaceId(candidate)) return candidate;
+    }
+  } catch {
+    // Fall through to the regular-expression fallback for Wrangler's human-readable output.
+  }
+  // Wrangler prints a suggested binding block; the namespace ID is a 32-character hex string.
+  return (
+    output.match(/"id"\s*:\s*"([0-9a-f]{32})"/i)?.[1] ??
+    output.match(/id\s*=\s*"([0-9a-f]{32})"/i)?.[1] ??
+    output.match(/\b[0-9a-f]{32}\b/i)?.[0]
+  );
+}
+
+async function updateOAuthKvBinding(namespaceId) {
+  const configurationPath = resolve(rootDirectory, 'apps/control-worker/wrangler.jsonc');
+  const configuration = await readFile(configurationPath, 'utf8');
+  const bindingPattern = /("binding"\s*:\s*"OAUTH_KV"[\s\S]*?"id"\s*:\s*")[^"]+("\s*[,}])/;
+  const match = configuration.match(bindingPattern);
+  if (!match) {
+    throw new Error(`Could not update the OAUTH_KV namespace id in ${configurationPath}.`);
+  }
+  if (match[0].includes(`"${namespaceId}"`)) return;
+  const nextConfiguration = configuration.replace(bindingPattern, `$1${namespaceId}$2`);
+  await writeFile(configurationPath, nextConfiguration);
+}
+
+async function configuredOAuthKvNamespaceId() {
+  const configurationPath = resolve(rootDirectory, 'apps/control-worker/wrangler.jsonc');
+  const configuration = await readFile(configurationPath, 'utf8');
+  const candidate = configuration.match(
+    /"binding"\s*:\s*"OAUTH_KV"[\s\S]*?"id"\s*:\s*"([^"]+)"/,
+  )?.[1];
+  return candidate && isKvNamespaceId(candidate) ? candidate : undefined;
 }
 
 async function createManagedTunnelOAuthClient() {
@@ -289,6 +355,46 @@ async function putSecret(name, value) {
   );
 }
 
+async function workerSecretNames() {
+  try {
+    const output = await capture('pnpm', [
+      '--filter',
+      '@vps-agent/control-worker',
+      'exec',
+      'wrangler',
+      'secret',
+      'list',
+    ]);
+    try {
+      const parsed = JSON.parse(output);
+      if (Array.isArray(parsed))
+        return new Set(
+          parsed
+            .map((entry) => (typeof entry?.name === 'string' ? entry.name : undefined))
+            .filter(Boolean),
+        );
+    } catch {
+      // Fall through to Wrangler's human-readable output.
+    }
+    return new Set(output.match(/[A-Z][A-Z0-9_]+/g) ?? []);
+  } catch {
+    // `wrangler secret list` fails when the Worker does not exist yet (first-time setup).
+    return new Set();
+  }
+}
+
+async function generateControlPlaneSigningKeys() {
+  const keyPair = await webcrypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  return {
+    privateKey: Buffer.from(await webcrypto.subtle.exportKey('pkcs8', keyPair.privateKey)).toString(
+      'base64url',
+    ),
+    publicKey: Buffer.from(await webcrypto.subtle.exportKey('raw', keyPair.publicKey)).toString(
+      'base64url',
+    ),
+  };
+}
+
 function run(command, args, input) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
@@ -358,16 +464,20 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
+function isKvNamespaceId(value) {
+  return /^[0-9a-f]{32}$/i.test(value);
+}
+
 function printUsage() {
   console.log(`Usage: pnpm setup:cloudflare [options]
 
 Options:
-  --backend-token <token>  Reuse this Backend Bearer token (otherwise generated).
   --admin-password <password>
                            Control-panel password. Prefer CONTROL_PANEL_PASSWORD
                            so it is not retained in shell history.
   --database-name <name>   D1 name, default: vps-agent-control.
   --database-id <uuid>     Reuse an existing D1 database instead of creating one.
+  --oauth-kv-id <id>       Reuse an existing OAUTH_KV namespace instead of creating one.
   --cloudflare-account-id <id>
                            Cloudflare account ID used with API-token authentication.
   --cloudflare-api-token <token>

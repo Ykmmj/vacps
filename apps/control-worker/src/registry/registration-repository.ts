@@ -21,6 +21,7 @@ interface RegistrationRow {
   ip: string | null;
   ips_json: string | null;
   location: string | null;
+  public_key: string | null;
 }
 
 interface RegistrationNetworkDetails {
@@ -68,6 +69,20 @@ export class RegistrationRepository {
     return toRegistration(row);
   }
 
+  async getPublicKey(backendId: string): Promise<string> {
+    const row = await this.db
+      .prepare('SELECT public_key FROM backend_registrations WHERE backend_id = ?')
+      .bind(backendId)
+      .first<{ public_key: string | null }>();
+    if (!row?.public_key)
+      throw new AppError(
+        'agent_identity_not_enrolled',
+        `Agent identity for backend '${backendId}' is not enrolled.`,
+        401,
+      );
+    return row.public_key;
+  }
+
   async request(
     input: RegisterBackendInput,
     network: RegistrationNetworkDetails = {},
@@ -84,8 +99,8 @@ export class RegistrationRepository {
       await this.db
         .prepare(
           `INSERT INTO backend_registrations
-           (id, backend_id, name, base_url, tags_json, agent_version, status, requested_at, updated_at, ip, ips_json, location)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+           (id, backend_id, name, base_url, tags_json, agent_version, public_key, status, requested_at, updated_at, ip, ips_json, location)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
         )
         .bind(
           id,
@@ -94,6 +109,7 @@ export class RegistrationRepository {
           input.baseUrl,
           JSON.stringify(input.tags),
           input.agentVersion,
+          input.publicKey,
           now,
           now,
           network.ip ?? null,
@@ -104,11 +120,19 @@ export class RegistrationRepository {
       return this.get(id);
     }
 
+    if (existing.public_key && existing.public_key !== input.publicKey) {
+      throw new AppError(
+        'backend_identity_mismatch',
+        `Backend '${input.backendId}' is enrolled with a different Agent identity.`,
+        409,
+      );
+    }
+
     if (existing.status === 'approved') {
       await this.db
         .prepare(
           `UPDATE backend_registrations
-           SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, updated_at = ?, ip = ?, ips_json = ?, location = ?
+           SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, public_key = ?, updated_at = ?, ip = ?, ips_json = ?, location = ?
            WHERE id = ?`,
         )
         .bind(
@@ -116,6 +140,7 @@ export class RegistrationRepository {
           input.baseUrl,
           JSON.stringify(input.tags),
           input.agentVersion,
+          input.publicKey,
           now,
           network.ip ?? null,
           JSON.stringify(ips),
@@ -129,7 +154,7 @@ export class RegistrationRepository {
     await this.db
       .prepare(
         `UPDATE backend_registrations
-         SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, status = 'pending',
+         SET name = ?, base_url = ?, tags_json = ?, agent_version = ?, public_key = ?, status = 'pending',
              rejection_reason = NULL, requested_at = ?, updated_at = ?, decision_at = NULL, ip = ?, ips_json = ?, location = ?
          WHERE id = ?`,
       )
@@ -138,6 +163,7 @@ export class RegistrationRepository {
         input.baseUrl,
         JSON.stringify(input.tags),
         input.agentVersion,
+        input.publicKey,
         now,
         now,
         network.ip ?? null,

@@ -57,4 +57,18 @@ describe('TaskStore', () => {
     ]);
     store.close();
   });
+
+  it('persists accepted control-plane nonces to reject a replay after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'vps-agent-store-'));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, 'agent.db');
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const first = new TaskStore(databasePath);
+    expect(first.claimControlPlaneNonce('nonce-1234567890abcd', expiresAt)).toBe(true);
+    first.close();
+
+    const restarted = new TaskStore(databasePath);
+    expect(restarted.claimControlPlaneNonce('nonce-1234567890abcd', expiresAt)).toBe(false);
+    restarted.close();
+  });
 });

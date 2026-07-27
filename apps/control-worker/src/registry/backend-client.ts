@@ -6,9 +6,10 @@ import type {
 } from '@vps-agent/contracts';
 
 import { AppError } from '../lib/http.js';
+import { createControlPlaneSignatureHeaders } from '../security/request-signatures.js';
 
 export class BackendClient {
-  constructor(private readonly token: string) {}
+  constructor(private readonly controlPlaneSigningPrivateKey: string | undefined) {}
 
   async health(backend: Pick<Backend, 'baseUrl'>): Promise<BackendHealth> {
     return this.request(backend, '/health', { method: 'GET' }) as Promise<BackendHealth>;
@@ -79,17 +80,23 @@ export class BackendClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await fetch(`${backend.baseUrl}${path}`, {
+      const body = typeof init.body === 'string' ? init.body : '';
+      const request = new Request(`${backend.baseUrl}${path}`, { method: init.method ?? 'GET' });
+      const signatureHeaders = await createControlPlaneSignatureHeaders(
+        this.controlPlaneSigningPrivateKey,
+        request,
+        body,
+      );
+      const response = await fetch(request, {
         ...init,
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${this.token}`,
           'content-type': 'application/json',
+          ...signatureHeaders,
           'x-request-id': crypto.randomUUID(),
-          'x-request-timestamp': String(Math.floor(Date.now() / 1000)),
         },
       });
-      const body = await response.json().catch(() => undefined);
+      const responseBody = await response.json().catch(() => undefined);
       if (!response.ok) {
         throw new AppError(
           'backend_request_failed',
@@ -97,7 +104,7 @@ export class BackendClient {
           502,
         );
       }
-      return body;
+      return responseBody;
     } catch (error: unknown) {
       if (error instanceof AppError) throw error;
       throw new AppError(

@@ -92,13 +92,36 @@ export class BackendRepository {
       throw new AppError('backend_not_found', `Backend '${id}' was not found.`, 404);
   }
 
-  async recordStatus(id: string, status: BackendStatus): Promise<void> {
-    await this.db
-      .prepare(
-        'UPDATE backends SET last_status = ?, last_checked_at = ?, updated_at = ? WHERE id = ?',
-      )
-      .bind(JSON.stringify(status), new Date().toISOString(), new Date().toISOString(), id)
-      .run();
+  async recordStatus(
+    id: string,
+    status: BackendStatus,
+    options: { preserveSystem?: boolean } = {},
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const serializedStatus = JSON.stringify(status);
+    const shouldPreserveSystem = options.preserveSystem && status.system === undefined;
+
+    const statement = shouldPreserveSystem
+      ? this.db
+          .prepare(
+            `UPDATE backends
+             SET last_status = CASE
+                   WHEN json_type(last_status, '$.system') = 'object'
+                   THEN json_patch(?, json_object('system', json_extract(last_status, '$.system')))
+                   ELSE ?
+                 END,
+                 last_checked_at = ?,
+                 updated_at = ?
+             WHERE id = ?`,
+          )
+          .bind(serializedStatus, serializedStatus, now, now, id)
+      : this.db
+          .prepare(
+            'UPDATE backends SET last_status = ?, last_checked_at = ?, updated_at = ? WHERE id = ?',
+          )
+          .bind(serializedStatus, now, now, id);
+
+    await statement.run();
   }
 }
 

@@ -5,21 +5,48 @@ import { createTaskSchema, taskDispatchSchema } from '@vps-agent/contracts';
 import type { AgentConfig } from '../config.js';
 import type { PiRuntime } from '../pi/pi-runtime.js';
 import type { TaskQueue } from '../queue/task-queue.js';
+import type { TaskStore } from '../storage/task-store.js';
 import type { NodeTelemetryCollector } from '../telemetry/node-telemetry.js';
+import { verifyControlPlaneRequest } from '../security/request-signatures.js';
 
 export async function createServer(input: {
   config: AgentConfig;
   queue: TaskQueue;
   piRuntime: PiRuntime;
   telemetry: NodeTelemetryCollector;
+  store: TaskStore;
 }): Promise<FastifyInstance> {
   const app = Fastify({ logger: true, bodyLimit: 256 * 1024 });
-  app.addHook('onRequest', async (request, reply) => {
-    const token = request.headers.authorization?.replace(/^Bearer\s+/i, '');
-    if (token !== input.config.BACKEND_SHARED_TOKEN) {
-      return reply
-        .code(401)
-        .send({ error: { code: 'unauthorized', message: 'A valid bearer token is required.' } });
+  app.addHook('preValidation', async (request, reply) => {
+    try {
+      const body = request.body === undefined ? '' : JSON.stringify(request.body);
+      const { nonce } = await verifyControlPlaneRequest(input.config, {
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+        body,
+      });
+      if (
+        !input.store.claimControlPlaneNonce(
+          nonce,
+          new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        )
+      ) {
+        return reply.code(401).send({
+          error: {
+            code: 'replayed_request',
+            message: 'A control-plane request may only be used once.',
+          },
+        });
+      }
+    } catch (error) {
+      return reply.code(401).send({
+        error: {
+          code: 'unauthorized',
+          message:
+            error instanceof Error ? error.message : 'A valid control-plane signature is required.',
+        },
+      });
     }
   });
 

@@ -185,6 +185,20 @@ export class TaskStore {
       .run(taskId, graphNode, JSON.stringify(state), new Date().toISOString());
   }
 
+  /** Returns false when a signed control-plane request has already been accepted. */
+  claimControlPlaneNonce(nonce: string, expiresAt: string): boolean {
+    this.db
+      .prepare('DELETE FROM control_plane_request_nonces WHERE expires_at <= ?')
+      .run(new Date().toISOString());
+    const result = this.db
+      .prepare(
+        `INSERT INTO control_plane_request_nonces (nonce, expires_at)
+         VALUES (?, ?) ON CONFLICT(nonce) DO NOTHING`,
+      )
+      .run(nonce, expiresAt);
+    return result.changes === 1;
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
@@ -223,6 +237,12 @@ export class TaskStore {
         PRIMARY KEY(task_id, graph_node)
       );
       CREATE INDEX IF NOT EXISTS commands_task_id_idx ON commands(task_id, sequence);
+      CREATE TABLE IF NOT EXISTS control_plane_request_nonces (
+        nonce TEXT PRIMARY KEY,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS control_plane_request_nonces_expiry_idx
+        ON control_plane_request_nonces(expires_at);
     `);
   }
 }
