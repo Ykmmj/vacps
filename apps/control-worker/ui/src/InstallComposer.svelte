@@ -137,7 +137,11 @@
   );
   const isConfigured = $derived(Boolean(cloudflareOAuth?.configured));
   const isConnected = $derived(Boolean(cloudflareOAuth?.connected));
-  const hasZone = $derived(Boolean(cloudflareOAuth?.zoneId && cloudflareOAuth?.baseDomain));
+  const authorizationExpired = $derived(Boolean(cloudflareOAuth?.authorizationExpired));
+  // Zone metadata may still be present after expiry; only treat it as selected while authorized.
+  const hasZone = $derived(
+    isConnected && Boolean(cloudflareOAuth?.zoneId && cloudflareOAuth?.baseDomain),
+  );
   const cloudflareStage = $derived(
     !isConfigured ? 0 : !isConnected ? 1 : !hasZone ? 2 : !managedProvision ? 3 : 4,
   );
@@ -381,22 +385,55 @@
                             </div>
                           </div>
                         {:else if !isConnected}
-                          <div class="step-line">
-                            <div class="step-title">
-                              <span class="step-index">1</span>{label(
-                                'connectCloudflare',
-                                'Connect Cloudflare',
-                              )}
+                          <div class="space-y-3">
+                            {#if authorizationExpired}
+                              <p class="text-[12px] text-amber-700 dark:text-amber-300">
+                                {label(
+                                  'cloudflareAuthorizationExpired',
+                                  'Cloudflare authorization expired. Reconnect to create or reuse Managed Tunnels.',
+                                )}
+                              </p>
+                              {#if cloudflareOAuth?.baseDomain}
+                                <p class="font-mono text-[11px] text-muted-foreground">
+                                  {cloudflareOAuth.baseDomain}
+                                </p>
+                              {/if}
+                            {:else}
+                              <p class="text-[12px] text-muted-foreground">
+                                {label(
+                                  'cloudflareConnectHint',
+                                  'Your browser opens Cloudflare authorization.',
+                                )}
+                              </p>
+                            {/if}
+                            <div class="step-line">
+                              <div class="step-title">
+                                <span class="step-index">1</span>{label(
+                                  authorizationExpired
+                                    ? 'reconnectCloudflare'
+                                    : 'connectCloudflare',
+                                  authorizationExpired
+                                    ? 'Reconnect Cloudflare'
+                                    : 'Connect Cloudflare',
+                                )}
+                              </div>
+                              <Button
+                                class="h-11 shrink-0 rounded-[10px] shadow-[0_1px_1px_oklch(20%_.04_255_/_0.18),0_5px_12px_oklch(40%_.12_255_/_0.16)]"
+                                disabled={connectingCloudflare}
+                                onclick={() => connectCloudflare?.()}
+                                >{#if connectingCloudflare}<LoaderCircle
+                                    class="animate-spin"
+                                  />{label('connectingCloudflare', 'Connecting…')}{:else}<Cloud
+                                  />{label(
+                                    authorizationExpired
+                                      ? 'reconnectCloudflare'
+                                      : 'connectCloudflare',
+                                    authorizationExpired
+                                      ? 'Reconnect Cloudflare'
+                                      : 'Connect Cloudflare',
+                                  )}{/if}</Button
+                              >
                             </div>
-                            <Button
-                              class="h-11 shrink-0 rounded-[10px] shadow-[0_1px_1px_oklch(20%_.04_255_/_0.18),0_5px_12px_oklch(40%_.12_255_/_0.16)]"
-                              disabled={connectingCloudflare}
-                              onclick={() => connectCloudflare?.()}
-                              >{#if connectingCloudflare}<LoaderCircle
-                                  class="animate-spin"
-                                />{label('connectingCloudflare', 'Connecting…')}{:else}<Cloud
-                                />{label('connectCloudflare', 'Connect Cloudflare')}{/if}</Button
-                            >
                           </div>
                         {:else if !hasZone}
                           <div class="space-y-3">

@@ -138,8 +138,11 @@
       cloudflareSelectZoneHint: m.cloudflareSelectZoneHint(),
       cloudflareZoneReady: m.cloudflareZoneReady(),
       connectCloudflare: m.connectCloudflare(),
+      reconnectCloudflare: m.reconnectCloudflare(),
       connectingCloudflare: m.connectingCloudflare(),
+      cloudflareConnectHint: m.cloudflareConnectHint(),
       cloudflareConnectedHint: m.cloudflareConnectedHint(),
+      cloudflareAuthorizationExpired: m.cloudflareAuthorizationExpired(),
       quickTunnelNotice: m.quickTunnelNotice(),
       nodeName: m.nodeName(),
       tags: m.tags(),
@@ -377,6 +380,12 @@
       cloudflareOAuth = await api('/api/cloudflare/oauth/status');
       cloudflareZones = undefined;
       selectedCloudflareZone = '';
+      if (cloudflareOAuth.authorizationExpired) {
+        existingTunnels = [];
+        managedProvision = undefined;
+        notice(text.cloudflareAuthorizationExpired, 'error');
+        return;
+      }
       if (cloudflareOAuth.connected && !cloudflareOAuth.zoneId) await loadCloudflareZones();
       if (cloudflareOAuth.connected && cloudflareOAuth.zoneId) await loadExistingTunnels();
       else existingTunnels = [];
@@ -384,6 +393,32 @@
       if (!isAuthenticationRequired(error))
         notice(`${text.syncFailed}${messageOf(error)}`, 'error');
     }
+  }
+
+  function markCloudflareAuthorizationExpired(detail?: string) {
+    cloudflareOAuth = {
+      configured: cloudflareOAuth?.configured ?? true,
+      connected: false,
+      authorizationExpired: true,
+      accountId: cloudflareOAuth?.accountId,
+      zoneId: cloudflareOAuth?.zoneId,
+      baseDomain: cloudflareOAuth?.baseDomain,
+      connectedAt: cloudflareOAuth?.connectedAt,
+    };
+    existingTunnels = [];
+    managedProvision = undefined;
+    selectedExistingTunnelId = '';
+    notice(detail || text.cloudflareAuthorizationExpired, 'error');
+  }
+
+  function isCloudflareAuthorizationError(detail: string): boolean {
+    return (
+      detail.includes('Connect Cloudflare again') ||
+      detail.includes('authorization expired') ||
+      detail.includes('authorization data cannot be decrypted') ||
+      detail.includes('invalid_grant') ||
+      detail.includes('invalid_client')
+    );
   }
   async function connectCloudflare() {
     connectingCloudflare = true;
@@ -515,6 +550,10 @@
     } catch (error) {
       if (isAuthenticationRequired(error)) return;
       const detail = messageOf(error);
+      if (isCloudflareAuthorizationError(detail)) {
+        markCloudflareAuthorizationExpired(detail);
+        return;
+      }
       notice(
         detail.includes('Cloudflare OAuth is not configured')
           ? text.managedTunnelNeedsSetup
@@ -537,13 +576,11 @@
       existingTunnels = [];
       if (isAuthenticationRequired(error)) return;
       const detail = messageOf(error);
-      // Expired Cloudflare OAuth is recoverable from the Install page; do not treat it as logout.
-      notice(
-        detail.includes('Connect Cloudflare again') || detail.includes('authorization expired')
-          ? detail
-          : `${text.syncFailed}${detail}`,
-        'error',
-      );
+      if (isCloudflareAuthorizationError(detail)) {
+        markCloudflareAuthorizationExpired(detail);
+        return;
+      }
+      notice(`${text.syncFailed}${detail}`, 'error');
     } finally {
       loadingExistingTunnels = false;
     }
@@ -564,8 +601,13 @@
       notice(`${text.managedTunnelReady}: ${managedProvision.publicUrl}`, 'success');
       await loadExistingTunnels().catch(() => undefined);
     } catch (error) {
-      if (!isAuthenticationRequired(error))
-        notice(`${text.syncFailed}${messageOf(error)}`, 'error');
+      if (isAuthenticationRequired(error)) return;
+      const detail = messageOf(error);
+      if (isCloudflareAuthorizationError(detail)) {
+        markCloudflareAuthorizationExpired(detail);
+        return;
+      }
+      notice(`${text.syncFailed}${detail}`, 'error');
     } finally {
       attachingTunnel = false;
     }

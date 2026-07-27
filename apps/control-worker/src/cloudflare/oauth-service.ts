@@ -41,6 +41,7 @@ export class CloudflareOAuthService {
   async status(): Promise<{
     configured: boolean;
     connected: boolean;
+    authorizationExpired?: boolean;
     accountId?: string;
     zoneId?: string;
     baseDomain?: string;
@@ -55,14 +56,57 @@ export class CloudflareOAuthService {
         connected: false,
         ...(this.env.CLOUDFLARE_ACCOUNT_ID ? { accountId: this.env.CLOUDFLARE_ACCOUNT_ID } : {}),
       };
+
+    // A D1 row alone is not enough: refresh/access tokens can expire while zone metadata remains.
+    // Probe the stored credentials so the Install UI can fall back to "Connect Cloudflare".
+    try {
+      const accessToken = await this.accessToken(connection, this.configuration().clientSecret);
+      if (!(await this.accessTokenIsUsable(accessToken, connection.accountId))) {
+        return this.expiredStatus(connection);
+      }
+      return {
+        configured,
+        connected: true,
+        accountId: connection.accountId,
+        ...(connection.zoneId ? { zoneId: connection.zoneId } : {}),
+        ...(connection.baseDomain ? { baseDomain: connection.baseDomain } : {}),
+        connectedAt: connection.connectedAt,
+      };
+    } catch (error) {
+      if (isCloudflareAuthorizationFailure(error)) return this.expiredStatus(connection);
+      throw error;
+    }
+  }
+
+  private expiredStatus(connection: CloudflareOAuthConnection): {
+    configured: boolean;
+    connected: false;
+    authorizationExpired: true;
+    accountId: string;
+    zoneId?: string;
+    baseDomain?: string;
+    connectedAt?: string;
+  } {
     return {
-      configured,
-      connected: true,
+      configured: true,
+      connected: false,
+      authorizationExpired: true,
       accountId: connection.accountId,
+      // Keep zone labels so re-authorization can restore the previous domain without re-picking.
       ...(connection.zoneId ? { zoneId: connection.zoneId } : {}),
       ...(connection.baseDomain ? { baseDomain: connection.baseDomain } : {}),
       connectedAt: connection.connectedAt,
     };
+  }
+
+  private async accessTokenIsUsable(accessToken: string, accountId: string): Promise<boolean> {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    // Only treat auth failures as expired; transient 5xx should not bounce the Install wizard.
+    if (response.status === 401 || response.status === 403) return false;
+    return true;
   }
 
   async begin(): Promise<{ authorizationUrl: string }> {
@@ -109,10 +153,14 @@ export class CloudflareOAuthService {
       const tokens = await this.tokenRequest({ grant_type: 'authorization_code', code });
       if (!tokens.access_token)
         throw new AppError('cloudflare_oauth_failed', 'No access token returned.', 502);
+      // Re-authorization must not wipe a previously selected zone (begin() stores empty zone fields).
+      const existing = await this.repository.connection();
+      const zoneId = pending.zoneId || existing?.zoneId || '';
+      const baseDomain = pending.baseDomain || existing?.baseDomain || '';
       await this.repository.saveConnection({
-        accountId: pending.accountId,
-        zoneId: pending.zoneId,
-        baseDomain: pending.baseDomain,
+        accountId: pending.accountId || existing?.accountId || '',
+        zoneId,
+        baseDomain,
         accessTokenCiphertext: await this.encrypt(tokens.access_token, configuration.clientSecret),
         ...(tokens.refresh_token
           ? {
@@ -121,11 +169,17 @@ export class CloudflareOAuthService {
                 configuration.clientSecret,
               ),
             }
-          : {}),
+          : existing?.refreshTokenCiphertext
+            ? { refreshTokenCiphertext: existing.refreshTokenCiphertext }
+            : {}),
         ...(tokens.expires_in
           ? { expiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString() }
           : {}),
-        ...(tokens.scope ? { scopes: tokens.scope } : {}),
+        ...(tokens.scope
+          ? { scopes: tokens.scope }
+          : existing?.scopes
+            ? { scopes: existing.scopes }
+            : {}),
       });
       return redirect(returnUrl, 'connected');
     } catch (error) {
@@ -331,12 +385,12 @@ export class CloudflareOAuthService {
       (OAuthTokenResponse & { error?: string; error_description?: string }) | undefined;
     if (!response.ok || !payload) {
       const oauthError = payload?.error;
+      const expiredGrant = oauthError === 'invalid_grant' || oauthError === 'invalid_client';
       throw new AppError(
-        oauthError === 'invalid_client' || oauthError === 'invalid_grant'
-          ? `cloudflare_oauth_${oauthError}`
-          : 'cloudflare_oauth_failed',
+        expiredGrant ? `cloudflare_oauth_${oauthError}` : 'cloudflare_oauth_failed',
         payload?.error_description ?? payload?.error ?? 'Cloudflare OAuth token exchange failed.',
-        502,
+        // invalid_grant means the operator must re-authorize; keep it out of the session-401 bucket.
+        expiredGrant ? 409 : 502,
       );
     }
     return payload;
@@ -390,6 +444,17 @@ export function normalizeBaseDomain(value: string): string {
   )
     throw new AppError('invalid_base_domain', 'The managed Tunnel base domain is invalid.');
   return baseDomain;
+}
+
+function isCloudflareAuthorizationFailure(error: unknown): boolean {
+  if (!(error instanceof AppError)) return false;
+  return (
+    error.code === 'cloudflare_authorization_expired' ||
+    error.code === 'cloudflare_oauth_corrupt' ||
+    error.code === 'cloudflare_oauth_invalid_grant' ||
+    error.code === 'cloudflare_oauth_invalid_client' ||
+    error.code === 'cloudflare_oauth_failed'
+  );
 }
 
 async function encryptionKey(secret: string, usages: KeyUsage[]): Promise<CryptoKey> {
