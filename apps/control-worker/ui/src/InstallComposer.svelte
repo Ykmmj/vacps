@@ -137,7 +137,10 @@
   );
   const isConfigured = $derived(Boolean(cloudflareOAuth?.configured));
   const isConnected = $derived(Boolean(cloudflareOAuth?.connected));
-  const hasZone = $derived(Boolean(cloudflareOAuth?.zoneId && cloudflareOAuth?.baseDomain));
+  // Zone metadata may remain after token expiry; only treat it as selected while authorized.
+  const hasZone = $derived(
+    isConnected && Boolean(cloudflareOAuth?.zoneId && cloudflareOAuth?.baseDomain),
+  );
   const cloudflareStage = $derived(
     !isConfigured ? 0 : !isConnected ? 1 : !hasZone ? 2 : !managedProvision ? 3 : 4,
   );
@@ -439,30 +442,22 @@
                               >{/if}
                           </div>
                         {:else if managedProvision}
-                          <div class="space-y-3">
-                            <div class="step-line">
-                              <div class="min-w-0">
-                                <div class="step-title">
-                                  <span class="step-index done"><Check class="size-3" /></span
-                                  >{label('managedTunnelReady', 'Stable tunnel ready')}
-                                </div>
-                                <p
-                                  class="mt-1 truncate font-mono text-[11px] text-muted-foreground"
-                                >
-                                  {managedProvision.backendId} · {managedProvision.publicUrl}
-                                </p>
+                          <div class="step-line">
+                            <div class="min-w-0">
+                              <div class="step-title">
+                                <span class="step-index done"><Check class="size-3" /></span>{label(
+                                  'managedTunnelReady',
+                                  'Stable tunnel ready',
+                                )}
                               </div>
-                              <Badge
-                                class="rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
-                                ><Check />{label('ready', 'Ready')}</Badge
-                              >
+                              <p class="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                                {managedProvision.backendId} · {managedProvision.publicUrl}
+                              </p>
                             </div>
-                            <p class="text-[11px] text-muted-foreground">
-                              {label(
-                                'autoId',
-                                'New tunnels use a vacps-<12 hex> node ID (for example vacps-715f765653e6).',
-                              )}
-                            </p>
+                            <Badge
+                              class="rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                              ><Check />{label('ready', 'Ready')}</Badge
+                            >
                           </div>
                         {:else}
                           <div class="space-y-3">
@@ -470,12 +465,6 @@
                               <span class="step-index done"><Check class="size-3" /></span
                               >{cloudflareOAuth?.baseDomain}
                             </div>
-                            <p class="text-[12px] text-muted-foreground">
-                              {label(
-                                'selectExistingTunnelHint',
-                                'Pick a Cloudflare Tunnel named vacps-… (legacy vps-… also works).',
-                              )}
-                            </p>
                             <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                               <Select.Root
                                 type="single"
@@ -519,24 +508,16 @@
                               </Select.Root>
                               <Button
                                 variant="outline"
-                                class="h-11 shrink-0 rounded-[10px]"
+                                size="icon"
+                                class="size-11 shrink-0 rounded-[10px]"
                                 disabled={loadingExistingTunnels || attachingTunnel}
+                                aria-label={label('refreshExistingTunnels', 'Refresh')}
                                 onclick={() => loadExistingTunnels?.()}
                               >
                                 {#if loadingExistingTunnels}<LoaderCircle
                                     class="animate-spin"
-                                  />{:else}<RefreshCw />{/if}{label(
-                                  'refreshExistingTunnels',
-                                  'Refresh',
-                                )}
+                                  />{:else}<RefreshCw />{/if}
                               </Button>
-                            </div>
-                            {#if !loadingExistingTunnels && reusableTunnels.length === 0}
-                              <p class="text-[11px] text-muted-foreground">
-                                {label('noExistingTunnels', 'No reusable tunnels found.')}
-                              </p>
-                            {/if}
-                            <div class="flex flex-wrap items-center gap-2">
                               <Button
                                 class="h-11 shrink-0 rounded-[10px] shadow-[0_1px_1px_oklch(20%_.04_255_/_0.18),0_5px_12px_oklch(40%_.12_255_/_0.16)]"
                                 disabled={provisioningTunnel || attachingTunnel}
@@ -550,10 +531,6 @@
                                   />{label('attachingTunnel', 'Attaching tunnel…')}{:else}<Zap
                                   />{label('createManagedTunnel', 'Create new Tunnel')}{/if}
                               </Button>
-                              <span class="text-[11px] text-muted-foreground">
-                                {label('reuseManagedTunnel', 'Reuse existing Tunnel')} ·
-                                {label('autoId', 'New tunnels use vacps-<12 hex> IDs.')}
-                              </span>
                             </div>
                           </div>
                         {/if}
