@@ -6,7 +6,7 @@ Cloudflare Workers control plane for queued Shell and Pi-powered agent work on m
 - `apps/vps-agent` — the single process deployed to each VPS: Fastify, BullMQ, LangGraph lifecycle, SQLite, Pi adapter, and Shell executor.
 - `packages/contracts` — shared Zod schemas and API contracts.
 
-> **Security warning:** v1 deliberately supports arbitrary commands. Deploy it only behind Cloudflare Access and use a long, secret backend token. Do not expose a VPS Agent port directly to the Internet.
+> **Security warning:** v1 deliberately supports arbitrary commands. Deploy it behind Cloudflare Access, keep the control-panel password private, and do not expose a VPS Agent port directly to the Internet. Each Agent has its own Ed25519 identity; no shared backend bearer secret exists.
 
 ## Architecture
 
@@ -34,7 +34,8 @@ The project provides an interactive control-plane bootstrap and a non-Docker VPS
 ```bash
 read -rsp 'Control panel password: ' CONTROL_PANEL_PASSWORD; echo
 export CONTROL_PANEL_PASSWORD
-# Logs in to Cloudflare, creates/binds D1, stores Worker secrets, migrates, and deploys.
+# Logs in to Cloudflare, creates/binds D1 and KV, creates Worker secrets and a control-plane
+# Ed25519 signing identity, migrates, and deploys.
 pnpm setup:cloudflare
 unset CONTROL_PANEL_PASSWORD
 ```
@@ -44,8 +45,8 @@ unset CONTROL_PANEL_PASSWORD
 If Wrangler's browser callback is unavailable (a WSL networking issue, for
 example), create a scoped Cloudflare API Token and run the same command without
 interactive login. Set `CLOUDFLARE_ACCOUNT_ID` to the account ID shown in the
-Cloudflare dashboard, and grant the token Account-level `Workers Scripts: Edit`
-and `D1: Edit` permissions.
+Cloudflare dashboard, and grant the token Account-level `Workers Scripts: Edit`,
+`D1: Edit`, and `Workers KV Storage: Edit` permissions.
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID='<cloudflare-account-id>'
@@ -62,9 +63,9 @@ Open the deployed Web UI and choose one of its connection modes before copying t
 - **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. A one-time local bootstrap uses an API Token to create a scoped OAuth client, then discards the Token; it never reaches the Worker, browser, VPS, or installer command. The bootstrap saves only the selected Cloudflare account context, and the Web UI loads Zones automatically after browser authorization.
 - **Quick Tunnel** creates a temporary `trycloudflare.com` URL on the VPS and re-registers the Agent whenever that URL changes. Use it only for demos or testing.
 
-The installer installs Node.js 24 and pnpm 10.14.0 through an Agent-scoped NVM directory, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
+Before copying an installer command, use the Web UI to generate a one-time registration Token. It is shown once, lasts ten minutes, and is consumed when the Agent binds its locally generated Ed25519 public key. The installer installs Node.js 24 and pnpm 10.14.0 through an Agent-scoped NVM directory, generates that key pair locally, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
 
-In the **Nodes** view, **Global reporting** controls the Agent reporting cadence for every approved node (15–3,600 seconds; default 120). Each report writes one current snapshot containing CPU, memory, root-disk usage, queue state, operating system, and upload/download byte rates. D1 keeps only the latest snapshot, which makes the UI inexpensive to poll and leaves a clean input for future roll-up charts; it is not raw time-series retention.
+Each report writes one current snapshot containing CPU, memory, root-disk usage, queue state, operating system, and upload/download byte rates. D1 keeps only the latest snapshot, which makes the UI inexpensive to poll and leaves a clean input for future roll-up charts; it is not raw time-series retention.
 
 To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vps-agent` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
 

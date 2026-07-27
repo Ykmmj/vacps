@@ -1,3 +1,4 @@
+import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import {
   createScheduleSchema,
@@ -20,48 +21,85 @@ import {
 import { CloudflareOAuthService } from './cloudflare/oauth-service.js';
 import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
+import { handleAuthorize } from './mcp/authorize-page.js';
 import { createMcpServer } from './mcp/server.js';
 import { BackendClient } from './registry/backend-client.js';
 import { CloudflareOAuthRepository } from './registry/cloudflare-oauth-repository.js';
 import { ManagedTunnelRepository } from './registry/managed-tunnel-repository.js';
+import { AgentSignatureRepository } from './registry/agent-signature-repository.js';
 import { RegistrationRepository } from './registry/registration-repository.js';
+import { RegistrationTokenRepository } from './registry/registration-token-repository.js';
 import { BackendRepository } from './registry/repository.js';
+import { verifyAgentRequestSignature } from './security/request-signatures.js';
 import { ScheduleService } from './schedules/schedule-service.js';
 import { TaskService } from './tasks/task-service.js';
 import { TelemetrySettingsRepository } from './telemetry/settings-repository.js';
 import { ManagedTunnelService } from './tunnels/managed-tunnel-service.js';
 
-export default {
+// The Remote MCP endpoint. The OAuth provider validates the bearer token before delegating here, so
+// unlike the cookie-authenticated WebUI there is no session or same-origin check — the token replaces
+// both, and the granted identity is available on `ctx.props`.
+const mcpApiHandler = {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      // MCP SDK >=1.26 requires a fresh server for every stateless request.
+      const server = createMcpServer(env);
+      const transport = new WebStandardStreamableHTTPServerTransport();
+      await server.connect(transport);
+      return transport.handleRequest(request);
+    } catch (error) {
+      return errorResponse(error, crypto.randomUUID());
+    }
+  },
+};
+
+// Everything that is not a valid MCP API request: the password-authenticated WebUI and `/api/*`, the
+// server-rendered OAuth `/authorize` consent page, and static assets.
+const defaultHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === '/mcp') {
-      try {
-        await requireAuthenticated(request, env);
-        if (isStateChanging(request) && request.headers.has('origin')) requireSameOrigin(request);
-        // MCP SDK >=1.26 requires a fresh server for every stateless request.
-        const server = createMcpServer(env);
-        const transport = new WebStandardStreamableHTTPServerTransport();
-        await server.connect(transport);
-        return transport.handleRequest(request);
-      } catch (error) {
-        return errorResponse(error, crypto.randomUUID());
-      }
-    }
+    if (url.pathname === '/authorize') return handleAuthorize(request, env);
     if (url.pathname.startsWith('/api/')) return handleApi(request, env, crypto.randomUUID());
     return env.ASSETS.fetch(request);
   },
+};
+
+// The provider implements `/token`, `/register` (dynamic client registration), and the
+// `.well-known/oauth-authorization-server` + `.well-known/oauth-protected-resource` metadata endpoints.
+const oauthProvider = new OAuthProvider({
+  apiRoute: '/mcp',
+  apiHandler: mcpApiHandler,
+  defaultHandler,
+  authorizeEndpoint: '/authorize',
+  tokenEndpoint: '/token',
+  clientRegistrationEndpoint: '/register',
+  scopesSupported: ['mcp'],
+});
+
+export default {
+  fetch: (request, env, ctx) => oauthProvider.fetch(request, env, ctx),
   async scheduled(_controller, env, ctx): Promise<void> {
     const services = createServices(env);
     ctx.waitUntil(services.schedules.reconcile());
+    ctx.waitUntil(
+      Promise.all([
+        services.registrationTokens.purgeExpired(),
+        services.agentSignatures.purgeExpired(),
+      ]),
+    );
+    // Best-effort cleanup of expired OAuth grants/tokens from KV.
+    ctx.waitUntil(oauthProvider.purgeExpiredData(env));
   },
 } satisfies ExportedHandler<Env>;
 
 function createServices(env: Env) {
   const backends = new BackendRepository(env.DB);
   const registrations = new RegistrationRepository(env.DB);
+  const registrationTokens = new RegistrationTokenRepository(env.DB);
+  const agentSignatures = new AgentSignatureRepository(env.DB);
   const managedTunnels = new ManagedTunnelRepository(env.DB);
   const cloudflareOAuth = new CloudflareOAuthService(env, new CloudflareOAuthRepository(env.DB));
-  const client = new BackendClient(env.BACKEND_SHARED_TOKEN);
+  const client = new BackendClient(env.CONTROL_PLANE_SIGNING_PRIVATE_KEY);
   const tunnels = new ManagedTunnelService(cloudflareOAuth, managedTunnels);
   const tasks = new TaskService(env.DB, backends, client);
   const schedules = new ScheduleService(env.DB, backends, client, tasks);
@@ -70,6 +108,8 @@ function createServices(env: Env) {
     backends,
     client,
     registrations,
+    registrationTokens,
+    agentSignatures,
     managedTunnels,
     cloudflareOAuth,
     tunnels,
@@ -140,8 +180,16 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     if (resource === 'telemetry') {
       if (request.method !== 'POST')
         throw new AppError('method_not_allowed', 'Telemetry requires POST.', 405);
-      requireBackendToken(request, env);
-      const telemetry = backendTelemetrySchema.parse(await readJson(request));
+      const { input: telemetry, body } = await readSignedJson(request, backendTelemetrySchema);
+      const publicKey = await services.registrations.getPublicKey(telemetry.backendId);
+      const identity = await verifyAgentRequestSignature(request, publicKey, body);
+      if (identity.backendId !== telemetry.backendId)
+        throw new AppError(
+          'backend_identity_mismatch',
+          'Telemetry backend ID does not match.',
+          409,
+        );
+      await services.agentSignatures.claimNonce(identity.backendId, identity.nonce);
       const registration = await services.registrations.getByBackendId(telemetry.backendId);
       if (registration.status !== 'approved')
         throw new AppError(
@@ -176,9 +224,34 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
 
     if (resource === 'registrations') {
       if (!id && request.method === 'POST') {
-        requireBackendToken(request, env);
+        const { input, body } = await readSignedJson(request, registerBackendSchema);
+        const registrationToken = registrationTokenFromRequest(request);
+        const publicKey = registrationToken
+          ? input.publicKey
+          : await services.registrations.getPublicKey(input.backendId);
+        const identity = await verifyAgentRequestSignature(request, publicKey, body);
+        if (identity.backendId !== input.backendId)
+          throw new AppError(
+            'backend_identity_mismatch',
+            'Registration backend ID does not match.',
+            409,
+          );
+        if (registrationToken) {
+          try {
+            await services.registrationTokens.consume(registrationToken);
+          } catch (error) {
+            // The installer intentionally retains an already-spent token in its root-owned
+            // environment file. On a restart, an enrolled Agent is still allowed to refresh a
+            // Quick Tunnel URL, but only if it proves the pre-existing private-key identity.
+            const enrolledPublicKey = await services.registrations
+              .getPublicKey(input.backendId)
+              .catch(() => undefined);
+            if (enrolledPublicKey !== input.publicKey) throw error;
+          }
+        }
+        await services.agentSignatures.claimNonce(identity.backendId, identity.nonce);
         const registration = await services.registrations.request(
-          registerBackendSchema.parse(await readJson(request)),
+          input,
           registrationNetwork(request),
         );
         if (registration.status === 'approved') {
@@ -225,7 +298,7 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
             enabled: true,
           });
         }
-        await services.backends.recordStatus(backend.id, status);
+        await services.backends.recordStatus(backend.id, status, { preserveSystem: true });
         return json({ registration: await services.registrations.approve(id), backend, health });
       }
       if (id && action === 'reject' && request.method === 'POST') {
@@ -234,6 +307,22 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           .parse(await readJson(request));
         return json(await services.registrations.reject(id, input.reason));
       }
+    }
+
+    if (resource === 'registration-tokens' && !id && request.method === 'POST') {
+      if (!env.CONTROL_PLANE_SIGNING_PUBLIC_KEY)
+        throw new AppError(
+          'control_plane_identity_unconfigured',
+          'Control-plane signing key is not configured.',
+          503,
+        );
+      return json(
+        {
+          ...(await services.registrationTokens.issue()),
+          controlPlanePublicKey: env.CONTROL_PLANE_SIGNING_PUBLIC_KEY,
+        },
+        { status: 201 },
+      );
     }
 
     if (resource === 'tunnels' && id === 'provision' && request.method === 'POST') {
@@ -283,13 +372,13 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       if (id && action === 'test' && request.method === 'POST') {
         const backend = await services.backends.get(id);
         const status = await services.client.status(backend);
-        await services.backends.recordStatus(id, status);
+        await services.backends.recordStatus(id, status, { preserveSystem: true });
         return json(status);
       }
       if (id && action === 'status' && request.method === 'GET') {
         const backend = await services.backends.get(id);
         const status = await services.client.status(backend);
-        await services.backends.recordStatus(id, status);
+        await services.backends.recordStatus(id, status, { preserveSystem: true });
         return json(status);
       }
     }
@@ -408,14 +497,25 @@ function requireSameOrigin(request: Request): void {
   }
 }
 
-function requireBackendToken(request: Request, env: Env): void {
-  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  if (token !== env.BACKEND_SHARED_TOKEN) {
-    throw new AppError(
-      'unauthorized_registration',
-      'A valid Backend Shared Token is required.',
-      401,
-    );
+function registrationTokenFromRequest(request: Request): string | undefined {
+  const token = request.headers
+    .get('authorization')
+    ?.match(/^Bearer\s+(.+)$/i)?.[1]
+    ?.trim();
+  return token || undefined;
+}
+
+async function readSignedJson<T>(
+  request: Request,
+  schema: { parse(input: unknown): T },
+): Promise<{ input: T; body: string }> {
+  const body = await request.clone().text();
+  try {
+    return { input: schema.parse(JSON.parse(body)), body };
+  } catch (error) {
+    if (error instanceof z.ZodError)
+      throw new AppError('invalid_request', error.issues[0]?.message ?? 'Invalid request.', 400);
+    throw new AppError('invalid_json', 'Request body must be valid JSON.', 400);
   }
 }
 

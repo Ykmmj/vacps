@@ -30,7 +30,7 @@ let telemetryTimer: NodeJS.Timeout | undefined;
 
 if (config.RUN_MODE !== 'api') await queue.startWorker();
 if (config.RUN_MODE !== 'worker') {
-  const server = await createServer({ config, queue, piRuntime, telemetry });
+  const server = await createServer({ config, queue, piRuntime, telemetry, store });
   await server.listen({ host: config.LISTEN_HOST, port: config.LISTEN_PORT });
   if (config.CONTROL_PLANE_URL) {
     const register = async () => {

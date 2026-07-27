@@ -9,17 +9,20 @@
     "check:ui": "pnpm run generate:i18n && svelte-check --tsconfig tsconfig.ui.json",
     "copy:installer": "node scripts/copy-installer.mjs",
     "dev": "pnpm run build:ui && pnpm run copy:installer && wrangler dev",
-    "deploy": "pnpm run migrate:remote && pnpm run build:ui && pnpm run copy:installer && wrangler deploy",
+    "deploy": "pnpm run ensure:control-plane-identity && pnpm run migrate:remote && pnpm run build:ui && pnpm run copy:installer && wrangler deploy",
+    "ensure:control-plane-identity": "node scripts/ensure-control-plane-identity.mjs",
     "generate:i18n": "node scripts/generate-i18n.mjs",
     "migrate:remote": "wrangler d1 migrations apply vps-agent-control --remote",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --root .",
     "typecheck": "pnpm run check:ui && tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.8.2",
     "@inlang/paraglide-js": "^2.22.0",
     "@modelcontextprotocol/sdk": "^1.15.1",
     "@vps-agent/contracts": "workspace:*",
     "flag-icons": "^7.5.0",
+    "simple-icons": "^16.27.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

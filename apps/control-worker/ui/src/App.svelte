@@ -42,7 +42,11 @@
   let installBackendName = $state('');
   let installTags = $state('production,full');
   let installRedisUrl = $state('');
-  let installRegistrationSecret = $state('');
+  let registrationToken = $state<
+    { token: string; expiresAt: string; controlPlanePublicKey: string } | undefined
+  >();
+  let generatingToken = $state(false);
+  let now = $state(Date.now());
   let installAllowApt = $state(false);
   let installTunnelMode = $state<TunnelMode>('managed');
   let managedProvision = $state<any>();
@@ -54,7 +58,6 @@
   let loadingCloudflareZones = $state(false);
   let selectingCloudflareZone = $state(false);
   let dashboardRequestInFlight = $state(false);
-  let telemetryIntervalOverride = $state<number | undefined>();
 
   let text = $derived.by(() => {
     locale;
@@ -118,8 +121,18 @@
       tags: m.tags(),
       redisUrl: m.redisUrl(),
       redisUrlHint: m.redisUrlHint(),
-      registrationSecret: m.registrationSecret(),
-      registrationSecretHint: m.registrationSecretHint(),
+      registrationToken: m.registrationToken(),
+      registrationTokenHint: m.registrationTokenHint(),
+      generateRegistrationToken: m.generateRegistrationToken(),
+      generatingRegistrationToken: m.generatingRegistrationToken(),
+      regenerateRegistrationToken: m.regenerateRegistrationToken(),
+      registrationTokenReadyStatus: m.registrationTokenReadyStatus(),
+      registrationTokenOneTime: m.registrationTokenOneTime(),
+      registrationTokenExpiresIn: m.registrationTokenExpiresIn(),
+      registrationTokenExpired: m.registrationTokenExpired(),
+      registrationTokenReady: m.registrationTokenReady(),
+      registrationTokenFailed: m.registrationTokenFailed(),
+      installTokenPending: m.installTokenPending(),
       allowApt: m.allowApt(),
       allowAptHint: m.allowAptHint(),
       copy: m.copy(),
@@ -142,13 +155,6 @@
       control: m.control(),
       footer: m.footer(),
       clipboardUnavailable: m.clipboardUnavailable(),
-      globalReporting: m.globalReporting(),
-      seconds: m.seconds(),
-      apply: m.apply(),
-      reportsPerDay: m.reportsPerDay(),
-      telemetryIntervalInvalid: m.telemetryIntervalInvalid(),
-      telemetryUpdated: m.telemetryUpdated(),
-      telemetrySaveFailed: m.telemetrySaveFailed(),
       cachedTelemetry: m.cachedTelemetry(),
       system: m.system(),
       download: m.download(),
@@ -156,6 +162,10 @@
       unavailable: m.unavailable(),
     };
   });
+  const tokenExpiry = $derived(registrationToken ? Date.parse(registrationToken.expiresAt) : 0);
+  const tokenActive = $derived(Boolean(registrationToken) && tokenExpiry > now);
+  const tokenExpired = $derived(Boolean(registrationToken) && tokenExpiry <= now);
+  const tokenMsRemaining = $derived(tokenActive ? Math.max(0, tokenExpiry - now) : 0);
   let installCommand = $derived(buildInstallCommand());
 
   $effect(() => {
@@ -163,6 +173,13 @@
   });
   $effect(() => {
     document.documentElement.lang = locale;
+  });
+  $effect(() => {
+    if (!registrationToken || tokenExpired) return;
+    const timer = window.setInterval(() => {
+      now = Date.now();
+    }, 1000);
+    return () => window.clearInterval(timer);
   });
 
   onMount(() => {
@@ -266,6 +283,7 @@
 
   function returnToLogin(announce: boolean) {
     dashboard = undefined;
+    registrationToken = undefined;
     managedProvision = undefined;
     cloudflareOAuth = undefined;
     cloudflareZones = undefined;
@@ -294,40 +312,13 @@
     dashboardRequestInFlight = true;
     if (!background) loading = true;
     try {
-      const nextDashboard = await api<any>('/api/dashboard');
-      if (telemetryIntervalOverride !== undefined) {
-        if (nextDashboard?.telemetry?.intervalSeconds === telemetryIntervalOverride) {
-          telemetryIntervalOverride = undefined;
-        } else {
-          nextDashboard.telemetry = {
-            ...(nextDashboard?.telemetry ?? {}),
-            intervalSeconds: telemetryIntervalOverride,
-          };
-        }
-      }
-      dashboard = nextDashboard;
+      dashboard = await api('/api/dashboard');
     } catch (error) {
       if (!background && !isAuthenticationRequired(error))
         notice(`${text.syncFailed}${messageOf(error)}`, 'error');
     } finally {
       dashboardRequestInFlight = false;
       if (!background) loading = false;
-    }
-  }
-  async function saveTelemetryInterval(intervalSeconds: number) {
-    try {
-      const telemetry = await api<{ intervalSeconds: number }>('/api/telemetry-settings', {
-        method: 'PATCH',
-        body: JSON.stringify({ intervalSeconds }),
-      });
-      telemetryIntervalOverride = telemetry.intervalSeconds;
-      dashboard = dashboard ? { ...dashboard, telemetry } : { telemetry };
-      notice(text.telemetryUpdated, 'success');
-      return telemetry;
-    } catch (error) {
-      if (!isAuthenticationRequired(error))
-        notice(`${text.telemetrySaveFailed} ${messageOf(error)}`, 'error');
-      throw error;
     }
   }
   function handleVisibilityChange() {
@@ -495,8 +486,27 @@
       provisioningTunnel = false;
     }
   }
+  async function generateRegistrationToken() {
+    if (generatingToken) return;
+    generatingToken = true;
+    try {
+      registrationToken = await api<{
+        token: string;
+        expiresAt: string;
+        controlPlanePublicKey: string;
+      }>('/api/registration-tokens', { method: 'POST' });
+      now = Date.now();
+      notice(text.registrationTokenReady, 'success');
+    } catch (error) {
+      if (!isAuthenticationRequired(error))
+        notice(`${text.registrationTokenFailed}${messageOf(error)}`, 'error');
+    } finally {
+      generatingToken = false;
+    }
+  }
   async function copyInstallCommand(): Promise<boolean> {
     if (installTunnelMode === 'managed' && !managedProvision) return false;
+    if (!tokenActive) return false;
     return writeToClipboard(installCommand, text.copied);
   }
   async function copyToClipboard(value: string, success?: string) {
@@ -518,11 +528,14 @@
   function buildInstallCommand() {
     if (installTunnelMode === 'managed' && !managedProvision)
       return `# ${text.installCommandPending}`;
+    if (!tokenActive || !registrationToken || !registrationToken.controlPlanePublicKey)
+      return `# ${text.installTokenPending}`;
     const lines = [
       `curl -fsSL ${origin}/agent.sh | sudo bash -s -- install \\`,
       `  --repo ${shellQuote(repositoryUrl)} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
-      `  --backend-token ${shellQuote(installRegistrationSecret || '<REGISTRATION_SECRET>')} \\`,
+      `  --registration-token ${shellQuote(registrationToken.token)} \\`,
+      `  --control-plane-public-key ${shellQuote(registrationToken.controlPlanePublicKey)} \\`,
       `  --redis-url ${shellQuote(installRedisUrl || '<REDIS_URL>')}`,
     ];
     if (installTunnelMode === 'managed') {
@@ -558,7 +571,6 @@
         backendName: installBackendName,
         tags: installTags,
         redisUrl: installRedisUrl,
-        registrationSecret: installRegistrationSecret,
         allowApt: installAllowApt,
         tunnelMode: installTunnelMode,
       }),
@@ -572,7 +584,6 @@
       installBackendName = draft.backendName ?? '';
       installTags = draft.tags ?? installTags;
       installRedisUrl = draft.redisUrl ?? '';
-      installRegistrationSecret = draft.registrationSecret ?? '';
       installAllowApt = draft.allowApt === true;
       installTunnelMode = draft.tunnelMode === 'quick' ? 'quick' : 'managed';
     } catch {
@@ -663,7 +674,6 @@
           {testBackend}
           {deleteBackend}
           {refresh}
-          {saveTelemetryInterval}
           {copyToClipboard}
         />
       {:else}
@@ -672,10 +682,14 @@
           bind:installBackendName
           bind:installTags
           bind:installRedisUrl
-          bind:installRegistrationSecret
           bind:installAllowApt
           bind:installTunnelMode
           {installCommand}
+          {tokenActive}
+          {tokenExpired}
+          {tokenMsRemaining}
+          {generatingToken}
+          {generateRegistrationToken}
           {managedProvision}
           {provisioningTunnel}
           {cloudflareOAuth}

@@ -11,12 +11,13 @@ NODE_MAJOR_VERSION=24
 REPOSITORY_URL=''
 REPOSITORY_REF=main
 BACKEND_ID=''
-BACKEND_TOKEN=''
+REGISTRATION_TOKEN=''
 BACKEND_NAME=''
 BACKEND_TAGS=''
 REDIS_URL=''
 TUNNEL_TOKEN=''
 CONTROL_PLANE_URL=''
+CONTROL_PLANE_PUBLIC_KEY=''
 PUBLIC_BASE_URL=''
 QUICK_TUNNEL=false
 ALLOW_APT=false
@@ -26,13 +27,16 @@ HEALTH_CHECK_DELAY_SECONDS=2
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash agent.sh install --repo <git-url> --backend-token <token> --redis-url <redis-url> --control-plane-url <url> (--public-url <url> | --quick-tunnel) [options]
+Usage: sudo bash agent.sh install --repo <git-url> --registration-token <token> --redis-url <redis-url> --control-plane-url <url> --control-plane-public-key <key> (--public-url <url> | --quick-tunnel) [options]
 
 Required:
   --repo <git-url>          Git repository containing this project.
-  --backend-token <token>   Registration secret configured in the Cloudflare Worker.
+  --registration-token <token>
+                            One-time registration token from the control panel (valid 10 minutes).
   --redis-url <url>         Redis URL: prefer rediss://; redis:// is allowed only on a private/restricted network.
   --control-plane-url <url> Worker URL used for self-registration.
+  --control-plane-public-key <key>
+                            Ed25519 public key returned with the registration token.
   --public-url <url>        Stable Agent URL. Required for managed/manual Tunnel mode.
   --quick-tunnel            Create a temporary trycloudflare.com URL automatically.
 
@@ -122,12 +126,13 @@ while (($#)); do
   case "$1" in
     --repo) REPOSITORY_URL=${2:?missing value for --repo}; shift 2 ;;
     --backend-id) BACKEND_ID=${2:?missing value for --backend-id}; shift 2 ;;
-    --backend-token) BACKEND_TOKEN=${2:?missing value for --backend-token}; shift 2 ;;
+    --registration-token) REGISTRATION_TOKEN=${2:?missing value for --registration-token}; shift 2 ;;
     --backend-name) BACKEND_NAME=${2:?missing value for --backend-name}; shift 2 ;;
     --tags) BACKEND_TAGS=${2:?missing value for --tags}; shift 2 ;;
     --redis-url) REDIS_URL=${2:?missing value for --redis-url}; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN=${2:?missing value for --tunnel-token}; shift 2 ;;
     --control-plane-url) CONTROL_PLANE_URL=${2:?missing value for --control-plane-url}; shift 2 ;;
+    --control-plane-public-key) CONTROL_PLANE_PUBLIC_KEY=${2:?missing value for --control-plane-public-key}; shift 2 ;;
     --public-url) PUBLIC_BASE_URL=${2:?missing value for --public-url}; shift 2 ;;
     --quick-tunnel) QUICK_TUNNEL=true; shift ;;
     --ref) REPOSITORY_REF=${2:?missing value for --ref}; shift 2 ;;
@@ -141,7 +146,7 @@ if ((EUID != 0)); then
   echo 'Run this installer with sudo.' >&2
   exit 1
 fi
-if [[ -z $REPOSITORY_URL || -z $BACKEND_TOKEN || -z $REDIS_URL || -z $CONTROL_PLANE_URL ]]; then
+if [[ -z $REPOSITORY_URL || -z $REGISTRATION_TOKEN || -z $REDIS_URL || -z $CONTROL_PLANE_URL || -z $CONTROL_PLANE_PUBLIC_KEY ]]; then
   echo 'Missing a required option.' >&2
   usage >&2
   exit 2
@@ -155,6 +160,14 @@ if [[ $REDIS_URL == redis://* ]]; then
 fi
 if [[ $CONTROL_PLANE_URL != https://* ]]; then
   echo 'Control-plane URL must use HTTPS.' >&2
+  exit 2
+fi
+if [[ ! $REGISTRATION_TOKEN =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+  echo 'Registration token must be a base64url 32-byte value.' >&2
+  exit 2
+fi
+if [[ ! $CONTROL_PLANE_PUBLIC_KEY =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+  echo 'Control-plane public key must be a base64url Ed25519 public key.' >&2
   exit 2
 fi
 if [[ $QUICK_TUNNEL == true && ( -n $PUBLIC_BASE_URL || -n $TUNNEL_TOKEN ) ]]; then
@@ -253,6 +266,30 @@ else
   git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
 fi
 
+generate_agent_identity() {
+  local identity
+  identity=$(node --input-type=module -e '
+    const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const privateKey = Buffer.from(await crypto.subtle.exportKey("pkcs8", pair.privateKey)).toString("base64url");
+    const publicKey = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString("base64url");
+    process.stdout.write(`${privateKey} ${publicKey}`);
+  ')
+  AGENT_PRIVATE_KEY=${identity%% *}
+  AGENT_PUBLIC_KEY=${identity##* }
+  if [[ ! $AGENT_PRIVATE_KEY =~ ^[A-Za-z0-9_-]{64,256}$ || ! $AGENT_PUBLIC_KEY =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+    echo 'Could not generate a local Ed25519 Agent identity.' >&2
+    exit 1
+  fi
+}
+
+if [[ $RESUME_INSTALL == true ]]; then
+  AGENT_PRIVATE_KEY=$(sed -n 's/^AGENT_PRIVATE_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
+  AGENT_PUBLIC_KEY=$(sed -n 's/^AGENT_PUBLIC_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
+fi
+if [[ ! $AGENT_PRIVATE_KEY =~ ^[A-Za-z0-9_-]{64,256}$ || ! $AGENT_PUBLIC_KEY =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+  generate_agent_identity
+fi
+
 cd "$APP_DIRECTORY"
 if [[ $RESUME_INSTALL == false ]]; then
   pnpm --version
@@ -272,7 +309,10 @@ cat >"$ENVIRONMENT_FILE" <<EOF
 BACKEND_ID=$BACKEND_ID
 BACKEND_NAME=$BACKEND_NAME
 BACKEND_TAGS=$BACKEND_TAGS
-BACKEND_SHARED_TOKEN=$BACKEND_TOKEN
+AGENT_PRIVATE_KEY=$AGENT_PRIVATE_KEY
+AGENT_PUBLIC_KEY=$AGENT_PUBLIC_KEY
+CONTROL_PLANE_PUBLIC_KEY=$CONTROL_PLANE_PUBLIC_KEY
+REGISTRATION_TOKEN=$REGISTRATION_TOKEN
 CONTROL_PLANE_URL=$CONTROL_PLANE_URL
 PUBLIC_BASE_URL=$PUBLIC_BASE_URL
 REGISTRATION_INTERVAL_SECONDS=300
@@ -319,10 +359,8 @@ wait_for_agent_health() {
   local deadline=$((SECONDS + HEALTH_CHECK_TIMEOUT_SECONDS))
   local response=''
   while ((SECONDS < deadline)); do
-    if response=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
-      -H "Authorization: Bearer $BACKEND_TOKEN" \
-      http://127.0.0.1:3100/health 2>&1); then
-      printf '%s\n' "$response"
+    if systemctl is-active --quiet vps-agent; then
+      echo 'VPS Agent service is active; it will complete signed registration in the background.'
       return 0
     fi
     if ((SECONDS < deadline)); then

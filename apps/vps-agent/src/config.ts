@@ -8,7 +8,17 @@ const configSchema = z.object({
   BACKEND_ID: z.string().regex(/^[a-z0-9-]{1,64}$/),
   BACKEND_NAME: z.string().trim().min(1).max(120).optional(),
   BACKEND_TAGS: z.string().default(''),
-  BACKEND_SHARED_TOKEN: z.string().min(32),
+  /** The installer generates this PKCS#8 Ed25519 key locally; it never leaves the VPS. */
+  AGENT_PRIVATE_KEY: z.string().regex(/^[A-Za-z0-9_-]{64,256}$/),
+  /** Raw Ed25519 public key paired with AGENT_PRIVATE_KEY. */
+  AGENT_PUBLIC_KEY: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  /** Public half of the Worker control-plane signing key. */
+  CONTROL_PLANE_PUBLIC_KEY: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  /** A short-lived, one-time registration capability. It is not used after enrollment. */
+  REGISTRATION_TOKEN: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{43}$/)
+    .optional(),
   CONTROL_PLANE_URL: optionalUrl,
   PUBLIC_BASE_URL: optionalUrl,
   REGISTRATION_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(300),

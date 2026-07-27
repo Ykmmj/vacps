@@ -24,6 +24,8 @@
   import UploadIcon from '@lucide/svelte/icons/upload';
   import XIcon from '@lucide/svelte/icons/x';
 
+  import SystemIcon from './SystemIcon.svelte';
+
   type Filter = 'all' | 'online' | 'offline' | 'pending';
   type NodeRecord = Record<string, any>;
 
@@ -32,7 +34,6 @@
     dashboard?: {
       nodes?: NodeRecord[];
       totals?: Record<string, number>;
-      telemetry?: { intervalSeconds?: number };
     };
     loading: boolean;
     filter?: Filter;
@@ -42,7 +43,6 @@
     testBackend: (node: NodeRecord) => void | Promise<void>;
     deleteBackend: (node: NodeRecord) => void | Promise<void>;
     refresh: () => void | Promise<void>;
-    saveTelemetryInterval: (intervalSeconds: number) => Promise<{ intervalSeconds: number }>;
     copyToClipboard?: (value: string, success?: string) => void | Promise<void>;
   };
 
@@ -57,7 +57,6 @@
     testBackend,
     deleteBackend,
     refresh,
-    saveTelemetryInterval,
     copyToClipboard,
   }: Props = $props();
 
@@ -66,10 +65,6 @@
   let sheetOpen = $state(false);
   let approvalNode = $state<NodeRecord | undefined>();
   let approvalOpen = $state(false);
-  let telemetryIntervalInput = $state('');
-  let telemetryIntervalSaving = $state(false);
-  let telemetryIntervalError = $state<string | undefined>();
-  let lastServerTelemetryInterval = $state<number | undefined>();
 
   const allNodes = $derived(dashboard?.nodes ?? []);
   const visibleNodes = $derived(
@@ -100,17 +95,6 @@
   const pendingCount = $derived(
     allNodes.filter((node) => node.registration?.status === 'pending').length,
   );
-  const configuredTelemetryInterval = $derived(dashboard?.telemetry?.intervalSeconds);
-
-  $effect(() => {
-    if (
-      typeof configuredTelemetryInterval === 'number' &&
-      configuredTelemetryInterval !== lastServerTelemetryInterval
-    ) {
-      telemetryIntervalInput = String(configuredTelemetryInterval);
-      lastServerTelemetryInterval = configuredTelemetryInterval;
-    }
-  });
 
   function label(key: string, fallback: string) {
     return text[key] ?? fallback;
@@ -237,44 +221,6 @@
     return byteRate(node.status?.metrics?.network?.transmittedBytesPerSecond);
   }
 
-  function validTelemetryInterval(value: number) {
-    return Number.isInteger(value) && value >= 15 && value <= 3600;
-  }
-
-  function cadenceEstimate() {
-    const typedInterval = Number(telemetryIntervalInput);
-    const interval = validTelemetryInterval(typedInterval)
-      ? typedInterval
-      : configuredTelemetryInterval;
-    if (typeof interval !== 'number') return label('unavailable', 'Unavailable');
-    const perNode = Math.round(86_400 / interval);
-    const total = allNodes.length * perNode;
-    return `${allNodes.length} × ${perNode.toLocaleString()} = ${total.toLocaleString()} ${label(
-      'reportsPerDay',
-      'reports/day',
-    )}`;
-  }
-
-  async function applyTelemetryInterval(event: SubmitEvent) {
-    event.preventDefault();
-    const interval = Number(telemetryIntervalInput);
-    if (!validTelemetryInterval(interval)) {
-      telemetryIntervalError = label('telemetryIntervalInvalid', 'Enter 15–3,600 seconds.');
-      return;
-    }
-    telemetryIntervalSaving = true;
-    telemetryIntervalError = undefined;
-    try {
-      const telemetry = await saveTelemetryInterval(interval);
-      telemetryIntervalInput = String(telemetry.intervalSeconds);
-      lastServerTelemetryInterval = telemetry.intervalSeconds;
-    } catch {
-      telemetryIntervalError = label('telemetrySaveFailed', 'Could not update reporting cadence.');
-    } finally {
-      telemetryIntervalSaving = false;
-    }
-  }
-
   function isActing(node: NodeRecord) {
     return actingId === node.registration?.id || actingId === node.backend?.id;
   }
@@ -356,36 +302,6 @@
         <span>{label('offline', 'Offline')}</span><span class="segment-count">{offlineCount}</span>
       </Button>
     </div>
-    <form class="cadence-control" onsubmit={applyTelemetryInterval}>
-      <div class="cadence-summary">
-        <span class="cadence-title">{label('globalReporting', 'Global reporting')}</span>
-        <span
-          id="reporting-cadence-status"
-          class:cadence-error={Boolean(telemetryIntervalError)}
-          class="cadence-estimate"
-          aria-live="polite">{telemetryIntervalError ?? cadenceEstimate()}</span
-        >
-      </div>
-      <label class="cadence-input">
-        <span class="sr-only">{label('globalReporting', 'Global reporting')}</span>
-        <input
-          type="number"
-          min="15"
-          max="3600"
-          step="1"
-          inputmode="numeric"
-          bind:value={telemetryIntervalInput}
-          aria-describedby="reporting-cadence-status"
-          aria-invalid={telemetryIntervalError ? 'true' : undefined}
-        />
-        <span>{label('seconds', 's')}</span>
-      </label>
-      <Button
-        type="submit"
-        class="cadence-apply h-11 rounded-[10px] px-3 text-xs"
-        disabled={telemetryIntervalSaving}>{label('apply', 'Apply')}</Button
-      >
-    </form>
     <Button
       variant="ghost"
       size="icon"
@@ -567,7 +483,7 @@
               class="secondary-detail system-detail"
               title={`${label('system', 'System')}: ${systemDescription(node)}`}
             >
-              <ServerIcon aria-hidden="true" />
+              <SystemIcon distribution={node.status?.system?.distribution} />
               <span class="sr-only">{label('system', 'System')}</span>
               <span>{systemSummary(node)}</span>
             </span>
@@ -788,7 +704,7 @@
   }
   .fleet-toolbar {
     display: grid;
-    grid-template-columns: minmax(16rem, 1fr) auto auto 2.75rem;
+    grid-template-columns: minmax(16rem, 1fr) auto 2.75rem;
     align-items: center;
     gap: 0.625rem;
     margin-bottom: 1.25rem;
@@ -881,74 +797,6 @@
     font-size: 0.625rem;
     font-variant-numeric: tabular-nums;
   }
-  .cadence-control {
-    height: 2.75rem;
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    min-width: 0;
-    padding-left: 0.625rem;
-    border: 1px solid color-mix(in oklch, var(--border) 76%, transparent);
-    border-radius: 0.875rem;
-    background: var(--surface-soft);
-    box-shadow: inset 0 1px 0 color-mix(in oklch, var(--surface) 70%, transparent);
-  }
-  .cadence-summary {
-    display: grid;
-    min-width: 0;
-    line-height: 1.15;
-  }
-  .cadence-title {
-    color: var(--foreground-soft);
-    font-size: 0.5625rem;
-    font-weight: 650;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    white-space: nowrap;
-  }
-  .cadence-estimate {
-    overflow: hidden;
-    color: var(--muted-foreground);
-    font-family: var(--font-mono);
-    font-size: 0.5625rem;
-    font-variant-numeric: tabular-nums;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .cadence-estimate.cadence-error {
-    color: var(--destructive);
-  }
-  .cadence-input {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    flex: none;
-    gap: 0.125rem;
-    color: var(--muted-foreground);
-    font-family: var(--font-mono);
-    font-size: 0.6875rem;
-  }
-  .cadence-input input {
-    width: 3.25rem;
-    min-width: 0;
-    height: 100%;
-    padding: 0;
-    outline: 0;
-    border: 0;
-    color: var(--foreground);
-    background: transparent;
-    font: inherit;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-  }
-  .cadence-input input:focus,
-  .cadence-input input:focus-visible {
-    outline: none;
-    box-shadow: none;
-  }
-  :global(.cadence-apply) {
-    flex: none;
-  }
   :global(.refresh-button) {
     flex: none;
     color: var(--foreground-soft);
@@ -972,9 +820,10 @@
     gap: 1.125rem;
   }
   :global(.fleet-card) {
+    --fleet-card-inset: 0.875rem;
     min-width: 0;
     gap: 0;
-    padding: 0.875rem;
+    padding: var(--fleet-card-inset);
     border: 1px solid color-mix(in oklch, var(--border) 82%, transparent);
     border-radius: 1.375rem;
     background: var(--card);
@@ -1282,31 +1131,41 @@
     opacity: 0.95;
   }
   .node-secondary-details {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content max-content;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 0.375rem 0.625rem;
+    column-gap: 0.625rem;
     min-width: 0;
     margin-top: 0.5rem;
+    padding-block: 0.5rem;
+    border-top: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
     color: var(--muted-foreground);
+  }
+  .node-secondary-details:last-child {
+    margin-bottom: calc(-1 * var(--fleet-card-inset));
   }
   .secondary-detail {
     display: inline-flex;
     align-items: center;
+    min-height: 1rem;
     min-width: 0;
     gap: 0.3125rem;
     font-size: 0.625rem;
-    line-height: 1.3;
+    line-height: 1rem;
   }
   .secondary-detail :global(svg) {
+    display: block;
     width: 0.75rem;
     height: 0.75rem;
-    flex: none;
+    flex: 0 0 0.75rem;
     stroke-width: 1.75;
   }
+  .secondary-detail > span:last-child {
+    min-width: 0;
+    line-height: inherit;
+  }
   .system-detail {
-    flex: 1 1 8rem;
-    max-width: 100%;
+    min-width: 0;
   }
   .system-detail span:last-child {
     overflow: hidden;
@@ -1314,7 +1173,6 @@
     white-space: nowrap;
   }
   .network-detail {
-    flex: 0 1 auto;
     color: var(--foreground-soft);
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
@@ -1326,8 +1184,8 @@
     justify-content: space-between;
     gap: 0.5rem;
     min-height: 0;
-    margin-top: 0.625rem;
-    padding-top: 0.625rem;
+    margin-top: 0;
+    padding-top: 0.5rem;
     border-top: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
   }
   .node-context,
@@ -1640,14 +1498,8 @@
       width: max-content;
       max-width: 100%;
     }
-    .cadence-control {
-      grid-column: 1;
-      width: max-content;
-      max-width: 100%;
-    }
     :global(.refresh-button) {
       grid-column: 2;
-      grid-row: 2 / span 2;
     }
   }
   @media (max-width: 700px) {
@@ -1666,9 +1518,6 @@
     .segment-count {
       display: none;
     }
-    .cadence-control {
-      width: 100%;
-    }
   }
   @media (max-width: 430px) {
     :global(.fleet-card) {
@@ -1676,21 +1525,6 @@
     }
     .node-card-actions {
       gap: 0.125rem;
-    }
-    .node-location {
-      width: 0.875rem;
-      max-width: 0.875rem;
-      flex: 0 0 0.875rem;
-      gap: 0;
-    }
-    .node-identity h2 {
-      max-width: calc(100% - 1.75rem);
-    }
-    .location-group {
-      gap: 0;
-    }
-    .location-name {
-      display: none;
     }
     .metric {
       padding-inline: 0.375rem;
@@ -1704,9 +1538,6 @@
     .metric-label {
       width: 1.375rem;
       height: 1.375rem;
-    }
-    .system-detail {
-      flex-basis: 100%;
     }
     .pending-actions {
       width: 100%;

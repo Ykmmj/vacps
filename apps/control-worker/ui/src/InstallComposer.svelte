@@ -1,12 +1,13 @@
 <script lang="ts">
   import { fade, fly } from 'svelte/transition';
   import Check from '@lucide/svelte/icons/check';
+  import Clock from '@lucide/svelte/icons/clock';
   import Cloud from '@lucide/svelte/icons/cloud';
   import Copy from '@lucide/svelte/icons/copy';
   import ExternalLink from '@lucide/svelte/icons/external-link';
-  import Eye from '@lucide/svelte/icons/eye';
-  import EyeOff from '@lucide/svelte/icons/eye-off';
+  import KeyRound from '@lucide/svelte/icons/key-round';
   import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+  import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import Terminal from '@lucide/svelte/icons/terminal';
   import Zap from '@lucide/svelte/icons/zap';
   import { Badge } from '$lib/components/ui/badge/index.js';
@@ -26,10 +27,14 @@
     installBackendName?: string;
     installTags?: string;
     installRedisUrl?: string;
-    installRegistrationSecret?: string;
     installAllowApt?: boolean;
     installTunnelMode?: TunnelMode;
     installCommand?: string;
+    tokenActive?: boolean;
+    tokenExpired?: boolean;
+    tokenMsRemaining?: number;
+    generatingToken?: boolean;
+    generateRegistrationToken: AsyncAction;
     managedProvision?: any;
     provisioningTunnel?: boolean;
     cloudflareOAuth?: any;
@@ -52,10 +57,14 @@
     installBackendName = $bindable(''),
     installTags = $bindable(''),
     installRedisUrl = $bindable(''),
-    installRegistrationSecret = $bindable(''),
     installAllowApt = $bindable(false),
     installTunnelMode = $bindable<TunnelMode>('managed'),
     installCommand = '',
+    tokenActive = false,
+    tokenExpired = false,
+    tokenMsRemaining = 0,
+    generatingToken = false,
+    generateRegistrationToken,
     managedProvision,
     provisioningTunnel = false,
     cloudflareOAuth,
@@ -73,8 +82,17 @@
     copyToClipboard,
   }: Props = $props();
 
-  let revealRegistrationSecret = $state(false);
   let commandCopied = $state(false);
+
+  const tokenLowTime = $derived(tokenActive && tokenMsRemaining <= 60_000);
+  const tokenCountdown = $derived(formatCountdown(tokenMsRemaining));
+
+  function formatCountdown(ms: number) {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
 
   const copy = (value: string, success?: string) => copyToClipboard?.(value, success);
   const label = (key: string, fallback: string) => text?.[key] || fallback;
@@ -163,29 +181,81 @@
                 class="h-11 rounded-[10px] border-border bg-background font-mono text-xs shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
               />
             </label>
-            <label class="grid min-w-0 gap-1.5 sm:col-span-2">
-              <span class="field-label">{label('registrationSecret', 'Registration secret')}</span>
-              <span class="relative block">
-                <Input
-                  bind:value={installRegistrationSecret}
-                  type={revealRegistrationSecret ? 'text' : 'password'}
-                  autocomplete="off"
-                  placeholder="&lt;REGISTRATION_SECRET&gt;"
-                  class="h-11 rounded-[10px] border-border bg-background pr-12 font-mono text-xs shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
-                />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="absolute top-0 right-0 size-11 rounded-[10px] text-muted-foreground"
-                  aria-label={revealRegistrationSecret
-                    ? 'Hide registration secret'
-                    : 'Show registration secret'}
-                  onclick={() => (revealRegistrationSecret = !revealRegistrationSecret)}
+            <div class="grid min-w-0 gap-1.5 sm:col-span-2" data-od-id="registration-token">
+              <span class="field-label">{label('registrationToken', 'Registration token')}</span>
+              <div
+                class="token-row flex min-h-[3.25rem] items-center gap-3 rounded-[10px] border px-3 py-2.5"
+                class:token-row-active={tokenActive}
+                class:token-row-expired={tokenExpired}
+              >
+                <span
+                  class="token-mark"
+                  class:token-mark-active={tokenActive}
+                  class:token-mark-expired={tokenExpired}
+                  aria-hidden="true"
                 >
-                  {#if revealRegistrationSecret}<EyeOff />{:else}<Eye />{/if}
-                </Button>
-              </span>
-            </label>
+                  {#if tokenActive}<Check />{:else}<KeyRound />{/if}
+                </span>
+                <div class="min-w-0 flex-1">
+                  {#if tokenActive}
+                    <div class="token-headline">
+                      <span class="token-title"
+                        >{label('registrationTokenReadyStatus', 'Token ready')}</span
+                      >
+                      <Badge
+                        class="rounded-full bg-emerald-500/12 text-[10px] font-semibold tracking-[0.04em] text-emerald-700 dark:text-emerald-300"
+                        >{label('registrationTokenOneTime', 'One-time · 10 min')}</Badge
+                      >
+                    </div>
+                    <p class="token-sub" class:token-sub-low={tokenLowTime}>
+                      <Clock class="size-3" aria-hidden="true" />{label(
+                        'registrationTokenExpiresIn',
+                        'Expires in',
+                      )}
+                      <span class="token-clock">{tokenCountdown}</span>
+                    </p>
+                  {:else if tokenExpired}
+                    <span class="token-title"
+                      >{label('registrationTokenExpired', 'Token expired')}</span
+                    >
+                  {:else}
+                    <p class="token-sub token-sub-idle">
+                      {label(
+                        'registrationTokenHint',
+                        'One-time token, valid for 10 minutes. Never stored by this page.',
+                      )}
+                    </p>
+                  {/if}
+                </div>
+                {#if tokenActive}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="size-10 shrink-0 rounded-[9px] text-muted-foreground"
+                    aria-label={label('regenerateRegistrationToken', 'Generate a replacement')}
+                    disabled={generatingToken}
+                    onclick={() => generateRegistrationToken?.()}
+                  >
+                    {#if generatingToken}<LoaderCircle class="animate-spin" />{:else}<RefreshCw
+                      />{/if}
+                  </Button>
+                {:else}
+                  <Button
+                    variant={tokenExpired ? 'outline' : 'default'}
+                    class="h-10 shrink-0 rounded-[10px]"
+                    disabled={generatingToken}
+                    onclick={() => generateRegistrationToken?.()}
+                  >
+                    {#if generatingToken}<LoaderCircle class="animate-spin" />{label(
+                        'generatingRegistrationToken',
+                        'Generating…',
+                      )}{:else}<KeyRound />{tokenExpired
+                        ? label('regenerateRegistrationToken', 'Generate a replacement')
+                        : label('generateRegistrationToken', 'Generate token')}{/if}
+                  </Button>
+                {/if}
+              </div>
+            </div>
 
             <div
               class="flex min-h-[58px] items-center gap-3 rounded-[10px] border border-border bg-muted/55 px-3 py-2.5 sm:col-span-2"
@@ -751,6 +821,79 @@
       opacity: 0;
       transform: translateY(3px);
     }
+  }
+  .token-row {
+    border-color: var(--border);
+    background: color-mix(in oklch, var(--muted) 55%, transparent);
+    transition:
+      border-color 160ms cubic-bezier(0.23, 1, 0.32, 1),
+      background 160ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  .token-row-active {
+    border-color: color-mix(in oklch, var(--success) 34%, var(--border));
+    background: color-mix(in oklch, var(--success-soft) 55%, transparent);
+  }
+  .token-row-expired {
+    border-color: color-mix(in oklch, var(--warning) 32%, var(--border));
+    background: color-mix(in oklch, var(--warning-soft) 55%, transparent);
+  }
+  .token-mark {
+    width: 2rem;
+    height: 2rem;
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: 0.5625rem;
+    color: var(--muted-foreground);
+    background: var(--card);
+  }
+  .token-mark :global(svg) {
+    width: 0.9375rem;
+    height: 0.9375rem;
+  }
+  .token-mark-active {
+    color: var(--success);
+    border-color: color-mix(in oklch, var(--success) 32%, var(--border));
+    background: var(--success-soft);
+  }
+  .token-mark-expired {
+    color: color-mix(in oklch, var(--warning) 84%, var(--foreground));
+    border-color: color-mix(in oklch, var(--warning) 30%, var(--border));
+    background: color-mix(in oklch, var(--warning-soft) 70%, transparent);
+  }
+  .token-headline {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .token-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+  .token-sub {
+    display: flex;
+    align-items: center;
+    gap: 0.3125rem;
+    margin-top: 0.125rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+  .token-sub :global(svg) {
+    flex: 0 0 auto;
+  }
+  .token-sub-idle {
+    margin-top: 0;
+  }
+  .token-sub-low {
+    color: color-mix(in oklch, var(--warning) 82%, var(--foreground));
+  }
+  .token-clock {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    letter-spacing: 0.01em;
   }
   @media (max-width: 640px) {
     .progress-rail {

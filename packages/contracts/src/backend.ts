@@ -19,6 +19,10 @@ export const updateBackendSchema = createBackendSchema.omit({ id: true }).partia
 
 export const registrationStatusSchema = z.enum(['pending', 'approved', 'rejected']);
 const ipAddressSchema = z.union([z.ipv4(), z.ipv6()]);
+export const agentPublicKeySchema = z
+  .string()
+  // An Ed25519 raw public key is exactly 32 bytes, encoded as unpadded base64url.
+  .regex(/^[A-Za-z0-9_-]{43}$/, 'Agent public key must be a base64url-encoded Ed25519 key.');
 
 export const registerBackendSchema = z.object({
   backendId: backendIdSchema,
@@ -27,19 +31,22 @@ export const registerBackendSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
   publicIps: z.array(ipAddressSchema).max(32).default([]),
   agentVersion: z.string().trim().min(1).max(48).default('unknown'),
+  publicKey: agentPublicKeySchema,
 });
 
-export const backendRegistrationSchema = registerBackendSchema.omit({ publicIps: true }).extend({
-  id: z.uuid(),
-  status: registrationStatusSchema,
-  requestedAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime(),
-  decisionAt: z.iso.datetime().optional(),
-  rejectionReason: z.string().max(500).optional(),
-  ip: ipAddressSchema.optional(),
-  ips: z.array(ipAddressSchema).max(33).default([]),
-  location: z.string().trim().min(1).max(180).optional(),
-});
+export const backendRegistrationSchema = registerBackendSchema
+  .omit({ publicIps: true, publicKey: true })
+  .extend({
+    id: z.uuid(),
+    status: registrationStatusSchema,
+    requestedAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+    decisionAt: z.iso.datetime().optional(),
+    rejectionReason: z.string().max(500).optional(),
+    ip: ipAddressSchema.optional(),
+    ips: z.array(ipAddressSchema).max(33).default([]),
+    location: z.string().trim().min(1).max(180).optional(),
+  });
 
 export const backendHealthSchema = z.object({
   ok: z.boolean(),

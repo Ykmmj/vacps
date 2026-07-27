@@ -3,12 +3,16 @@
   "name": "vps-agent-control",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-17",
-  "compatibility_flags": ["nodejs_compat"],
+  // `global_fetch_strictly_public` is required by @cloudflare/workers-oauth-provider for its
+  // client-ID-metadata-document (CIMD) support.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": {
     "directory": "./web",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/mcp"],
+    // The OAuth endpoints served by the Worker must run before the SPA asset fallback, otherwise
+    // `not_found_handling` returns index.html for metadata discovery and the token/authorize flow.
+    "run_worker_first": ["/api/*", "/mcp", "/authorize", "/token", "/register", "/.well-known/*"],
   },
   "d1_databases": [
     {
@@ -16,6 +20,14 @@
       "database_name": "vps-agent-control",
       "database_id": "810577ab-90fe-4008-a2f6-f36f915ab041",
       "migrations_dir": "migrations",
+    },
+  ],
+  // OAuth 2.1 provider state (clients, grants, tokens) for the Remote MCP endpoint.
+  // Create with: wrangler kv namespace create OAUTH_KV  — then paste the returned id below.
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "eaf4f1b7c8484cb4b3b7247dbb62d11f",
     },
   ],
   "triggers": {
