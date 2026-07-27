@@ -117,10 +117,7 @@
       provisioningTunnel: m.provisioningTunnel(),
       attachingTunnel: m.attachingTunnel(),
       createManagedTunnel: m.createManagedTunnel(),
-      reuseManagedTunnel: m.reuseManagedTunnel(),
       selectExistingTunnel: m.selectExistingTunnel(),
-      selectExistingTunnelHint: m.selectExistingTunnelHint(),
-      noExistingTunnels: m.noExistingTunnels(),
       loadingExistingTunnels: m.loadingExistingTunnels(),
       refreshExistingTunnels: m.refreshExistingTunnels(),
       tunnelBound: m.tunnelBound(),
@@ -138,11 +135,8 @@
       cloudflareSelectZoneHint: m.cloudflareSelectZoneHint(),
       cloudflareZoneReady: m.cloudflareZoneReady(),
       connectCloudflare: m.connectCloudflare(),
-      reconnectCloudflare: m.reconnectCloudflare(),
       connectingCloudflare: m.connectingCloudflare(),
-      cloudflareConnectHint: m.cloudflareConnectHint(),
       cloudflareConnectedHint: m.cloudflareConnectedHint(),
-      cloudflareAuthorizationExpired: m.cloudflareAuthorizationExpired(),
       quickTunnelNotice: m.quickTunnelNotice(),
       nodeName: m.nodeName(),
       tags: m.tags(),
@@ -175,7 +169,6 @@
       removeFailed: m.removeFailed(),
       confirmRemove: m.confirmRemove(),
       rejectPrompt: m.rejectPrompt(),
-      autoId: m.autoId(),
       runOnVps: m.runOnVps(),
       noTask: m.noTask(),
       mcpCopied: m.mcpCopied(),
@@ -380,10 +373,11 @@
       cloudflareOAuth = await api('/api/cloudflare/oauth/status');
       cloudflareZones = undefined;
       selectedCloudflareZone = '';
-      if (cloudflareOAuth.authorizationExpired) {
+      if (!cloudflareOAuth.connected) {
+        // Expired or disconnected tokens fall back to the plain Connect Cloudflare step.
         existingTunnels = [];
         managedProvision = undefined;
-        notice(text.cloudflareAuthorizationExpired, 'error');
+        selectedExistingTunnelId = '';
         return;
       }
       if (cloudflareOAuth.connected && !cloudflareOAuth.zoneId) await loadCloudflareZones();
@@ -395,20 +389,15 @@
     }
   }
 
-  function markCloudflareAuthorizationExpired(detail?: string) {
+  function markCloudflareDisconnected() {
     cloudflareOAuth = {
       configured: cloudflareOAuth?.configured ?? true,
       connected: false,
-      authorizationExpired: true,
       accountId: cloudflareOAuth?.accountId,
-      zoneId: cloudflareOAuth?.zoneId,
-      baseDomain: cloudflareOAuth?.baseDomain,
-      connectedAt: cloudflareOAuth?.connectedAt,
     };
     existingTunnels = [];
     managedProvision = undefined;
     selectedExistingTunnelId = '';
-    notice(detail || text.cloudflareAuthorizationExpired, 'error');
   }
 
   function isCloudflareAuthorizationError(detail: string): boolean {
@@ -551,7 +540,7 @@
       if (isAuthenticationRequired(error)) return;
       const detail = messageOf(error);
       if (isCloudflareAuthorizationError(detail)) {
-        markCloudflareAuthorizationExpired(detail);
+        markCloudflareDisconnected();
         return;
       }
       notice(
@@ -577,7 +566,7 @@
       if (isAuthenticationRequired(error)) return;
       const detail = messageOf(error);
       if (isCloudflareAuthorizationError(detail)) {
-        markCloudflareAuthorizationExpired(detail);
+        markCloudflareDisconnected();
         return;
       }
       notice(`${text.syncFailed}${detail}`, 'error');
@@ -604,7 +593,7 @@
       if (isAuthenticationRequired(error)) return;
       const detail = messageOf(error);
       if (isCloudflareAuthorizationError(detail)) {
-        markCloudflareAuthorizationExpired(detail);
+        markCloudflareDisconnected();
         return;
       }
       notice(`${text.syncFailed}${detail}`, 'error');
