@@ -282,11 +282,14 @@ generate_agent_identity() {
   fi
 }
 
+AGENT_PRIVATE_KEY=''
+AGENT_PUBLIC_KEY=''
 if [[ $RESUME_INSTALL == true ]]; then
   AGENT_PRIVATE_KEY=$(sed -n 's/^AGENT_PRIVATE_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
   AGENT_PUBLIC_KEY=$(sed -n 's/^AGENT_PUBLIC_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
 fi
-if [[ ! $AGENT_PRIVATE_KEY =~ ^[A-Za-z0-9_-]{64,256}$ || ! $AGENT_PUBLIC_KEY =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+# Fresh installs never set these above; under `set -u` the regex test must use defaults.
+if [[ ! ${AGENT_PRIVATE_KEY} =~ ^[A-Za-z0-9_-]{64,256}$ || ! ${AGENT_PUBLIC_KEY} =~ ^[A-Za-z0-9_-]{43}$ ]]; then
   generate_agent_identity
 fi
 
