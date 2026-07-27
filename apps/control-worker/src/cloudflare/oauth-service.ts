@@ -57,13 +57,11 @@ export class CloudflareOAuthService {
         ...(this.env.CLOUDFLARE_ACCOUNT_ID ? { accountId: this.env.CLOUDFLARE_ACCOUNT_ID } : {}),
       };
 
-    // A D1 row alone is not enough: refresh/access tokens can expire while zone metadata remains.
-    // Probe the stored credentials so the Install UI can fall back to "Connect Cloudflare".
+    // A D1 row alone is not enough: tokens can expire. Validate by decrypt/refresh only.
+    // Do NOT probe GET /accounts/{id}: Managed Tunnel OAuth is scoped to Tunnel Write + DNS Write
+    // and that account-read call returns 403, which previously false-negatived a fresh connect.
     try {
-      const accessToken = await this.accessToken(connection, this.configuration().clientSecret);
-      if (!(await this.accessTokenIsUsable(accessToken, connection.accountId))) {
-        return this.expiredStatus(connection);
-      }
+      await this.accessToken(connection, this.configuration().clientSecret);
       return {
         configured,
         connected: true,
@@ -97,16 +95,6 @@ export class CloudflareOAuthService {
       ...(connection.baseDomain ? { baseDomain: connection.baseDomain } : {}),
       connectedAt: connection.connectedAt,
     };
-  }
-
-  private async accessTokenIsUsable(accessToken: string, accountId: string): Promise<boolean> {
-    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}`, {
-      method: 'GET',
-      headers: { authorization: `Bearer ${accessToken}` },
-    });
-    // Only treat auth failures as expired; transient 5xx should not bounce the Install wizard.
-    if (response.status === 401 || response.status === 403) return false;
-    return true;
   }
 
   async begin(): Promise<{ authorizationUrl: string }> {

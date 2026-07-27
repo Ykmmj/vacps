@@ -17,6 +17,7 @@
   import * as Select from '$lib/components/ui/select/index.js';
   import * as Tabs from '$lib/components/ui/tabs/index.js';
   import * as Tooltip from '$lib/components/ui/tooltip/index.js';
+  import { deriveManagedTunnelStage, managedTunnelStageIndex } from './managed-tunnel-stage.js';
 
   type TunnelMode = 'managed' | 'quick';
   type Zone = { id: string; name: string };
@@ -135,15 +136,8 @@
   const commandReady = $derived(
     !waitingForTunnel && Boolean(installCommand) && !installCommand.startsWith('#'),
   );
-  const isConfigured = $derived(Boolean(cloudflareOAuth?.configured));
-  const isConnected = $derived(Boolean(cloudflareOAuth?.connected));
-  // Zone metadata may remain after token expiry; only treat it as selected while authorized.
-  const hasZone = $derived(
-    isConnected && Boolean(cloudflareOAuth?.zoneId && cloudflareOAuth?.baseDomain),
-  );
-  const cloudflareStage = $derived(
-    !isConfigured ? 0 : !isConnected ? 1 : !hasZone ? 2 : !managedProvision ? 3 : 4,
-  );
+  const managedStage = $derived(deriveManagedTunnelStage(cloudflareOAuth, managedProvision));
+  const cloudflareStage = $derived(managedTunnelStageIndex(managedStage));
   const reusableTunnels = $derived(
     (existingTunnels ?? []).filter(
       (tunnel) => !tunnel.deleted && Boolean(tunnel.backendId || tunnel.name),
@@ -344,7 +338,7 @@
                         </div>
                       </div>
                       <div class="connection-state">
-                        {#if !isConfigured}
+                        {#if managedStage === 'unconfigured'}
                           <div class="space-y-3">
                             <h3 class="text-[13px] font-semibold">
                               {label('managedTunnelSetupTitle', 'Configure managed tunnels')}
@@ -383,7 +377,7 @@
                               >
                             </div>
                           </div>
-                        {:else if !isConnected}
+                        {:else if managedStage === 'needs_connect'}
                           <div class="step-line">
                             <div class="step-title">
                               <span class="step-index">1</span>{label(
@@ -401,7 +395,7 @@
                                 />{label('connectCloudflare', 'Connect Cloudflare')}{/if}</Button
                             >
                           </div>
-                        {:else if !hasZone}
+                        {:else if managedStage === 'needs_zone'}
                           <div class="space-y-3">
                             <div class="step-title">
                               <span class="step-index done"><Check class="size-3" /></span>{label(
@@ -441,7 +435,7 @@
                                 ></Select.Root
                               >{/if}
                           </div>
-                        {:else if managedProvision}
+                        {:else if managedStage === 'ready'}
                           <div class="step-line">
                             <div class="min-w-0">
                               <div class="step-title">

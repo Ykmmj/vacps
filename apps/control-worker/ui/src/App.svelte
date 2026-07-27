@@ -253,13 +253,17 @@
   async function beginAuthenticatedSession() {
     authState = 'authenticated';
     loading = true;
-    consumeCloudflareAuthorization();
+    const cloudflareReturn = consumeCloudflareAuthorization();
     await Promise.all([refresh(), refreshCloudflare()]);
+    // OAuth callback claims success, but status must still report a usable token.
+    if (cloudflareReturn === 'connected' && !cloudflareOAuth?.connected) {
+      notice(m.cloudflareAuthorizationFailed() + ' (status_not_connected)', 'error');
+    }
   }
 
-  function consumeCloudflareAuthorization() {
-    const authorization = new URLSearchParams(location.search).get('cloudflare');
-    if (!authorization) return;
+  function consumeCloudflareAuthorization(): string | undefined {
+    const authorization = new URLSearchParams(location.search).get('cloudflare') ?? undefined;
+    if (!authorization) return undefined;
     activeView = 'install';
     const url = new URL(location.href);
     url.searchParams.delete('cloudflare');
@@ -270,6 +274,7 @@
         : `${m.cloudflareAuthorizationFailed()} (${authorization})`,
       authorization === 'connected' ? 'success' : 'error',
     );
+    return authorization;
   }
 
   async function login(event: SubmitEvent) {
