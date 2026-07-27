@@ -24,4 +24,11 @@ export class AgentSignatureRepository {
       .bind(new Date().toISOString())
       .run();
   }
+
+  async purgeBackend(backendId: string): Promise<void> {
+    await this.db
+      .prepare('DELETE FROM agent_request_nonces WHERE backend_id = ?')
+      .bind(backendId)
+      .run();
+  }
 }

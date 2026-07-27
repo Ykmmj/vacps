@@ -20,6 +20,16 @@
 
   type TunnelMode = 'managed' | 'quick';
   type Zone = { id: string; name: string };
+  type ExistingTunnel = {
+    tunnelId: string;
+    name: string;
+    backendId?: string;
+    hostname?: string;
+    publicUrl?: string;
+    bound: boolean;
+    boundBackendId?: string;
+    deleted: boolean;
+  };
   type AsyncAction = () => void | Promise<void>;
 
   type Props = {
@@ -37,6 +47,10 @@
     generateRegistrationToken: AsyncAction;
     managedProvision?: any;
     provisioningTunnel?: boolean;
+    attachingTunnel?: boolean;
+    existingTunnels?: ExistingTunnel[];
+    selectedExistingTunnelId?: string;
+    loadingExistingTunnels?: boolean;
     cloudflareOAuth?: any;
     cloudflareZones?: Zone[];
     selectedCloudflareZone?: string;
@@ -48,6 +62,8 @@
     connectCloudflare: AsyncAction;
     selectCloudflareZone: (zoneId: string) => void | Promise<void>;
     ensureManagedProvision: AsyncAction;
+    loadExistingTunnels: AsyncAction;
+    attachExistingTunnel: (tunnelId: string) => void | Promise<void>;
     copyInstallCommand: () => boolean | Promise<boolean>;
     copyToClipboard: (value: string, success?: string) => void | Promise<void>;
   };
@@ -67,6 +83,10 @@
     generateRegistrationToken,
     managedProvision,
     provisioningTunnel = false,
+    attachingTunnel = false,
+    existingTunnels = [],
+    selectedExistingTunnelId = $bindable(''),
+    loadingExistingTunnels = false,
     cloudflareOAuth,
     cloudflareZones,
     selectedCloudflareZone = $bindable(''),
@@ -78,6 +98,8 @@
     connectCloudflare,
     selectCloudflareZone,
     ensureManagedProvision,
+    loadExistingTunnels,
+    attachExistingTunnel,
     copyInstallCommand,
     copyToClipboard,
   }: Props = $props();
@@ -119,6 +141,24 @@
   const cloudflareStage = $derived(
     !isConfigured ? 0 : !isConnected ? 1 : !hasZone ? 2 : !managedProvision ? 3 : 4,
   );
+  const reusableTunnels = $derived(
+    (existingTunnels ?? []).filter(
+      (tunnel) => !tunnel.deleted && Boolean(tunnel.backendId || tunnel.name),
+    ),
+  );
+
+  function tunnelOptionLabel(tunnel: ExistingTunnel) {
+    const id = tunnel.backendId || tunnel.name;
+    const status = tunnel.bound
+      ? label('tunnelBound', 'In use')
+      : label('tunnelAvailable', 'Available');
+    return `${id} · ${status}`;
+  }
+
+  function chooseExistingTunnel(tunnelId: string) {
+    selectedExistingTunnelId = tunnelId;
+    if (tunnelId) void attachExistingTunnel?.(tunnelId);
+  }
 </script>
 
 <Tooltip.Provider>
@@ -399,41 +439,122 @@
                               >{/if}
                           </div>
                         {:else if managedProvision}
-                          <div class="step-line">
-                            <div class="min-w-0">
-                              <div class="step-title">
-                                <span class="step-index done"><Check class="size-3" /></span>{label(
-                                  'managedTunnelReady',
-                                  'Stable tunnel ready',
-                                )}
+                          <div class="space-y-3">
+                            <div class="step-line">
+                              <div class="min-w-0">
+                                <div class="step-title">
+                                  <span class="step-index done"><Check class="size-3" /></span
+                                  >{label('managedTunnelReady', 'Stable tunnel ready')}
+                                </div>
+                                <p
+                                  class="mt-1 truncate font-mono text-[11px] text-muted-foreground"
+                                >
+                                  {managedProvision.backendId} · {managedProvision.publicUrl}
+                                </p>
                               </div>
-                              <p class="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-                                {managedProvision.publicUrl}
-                              </p>
+                              <Badge
+                                class="rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                                ><Check />{label('ready', 'Ready')}</Badge
+                              >
                             </div>
-                            <Badge
-                              class="rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
-                              ><Check />{label('ready', 'Ready')}</Badge
-                            >
+                            <p class="text-[11px] text-muted-foreground">
+                              {label(
+                                'autoId',
+                                'New tunnels use a vacps-<12 hex> node ID (for example vacps-715f765653e6).',
+                              )}
+                            </p>
                           </div>
                         {:else}
-                          <div class="step-line">
+                          <div class="space-y-3">
                             <div class="step-title">
                               <span class="step-index done"><Check class="size-3" /></span
                               >{cloudflareOAuth?.baseDomain}
                             </div>
-                            <Button
-                              class="h-11 shrink-0 rounded-[10px] shadow-[0_1px_1px_oklch(20%_.04_255_/_0.18),0_5px_12px_oklch(40%_.12_255_/_0.16)]"
-                              disabled={provisioningTunnel}
-                              onclick={() => ensureManagedProvision?.()}
-                              >{#if provisioningTunnel}<LoaderCircle class="animate-spin" />{label(
-                                  'provisioningTunnel',
-                                  'Creating tunnel…',
-                                )}{:else}<Zap />{label(
-                                  'createManagedTunnel',
-                                  'Create stable Tunnel',
-                                )}{/if}</Button
-                            >
+                            <p class="text-[12px] text-muted-foreground">
+                              {label(
+                                'selectExistingTunnelHint',
+                                'Pick a Cloudflare Tunnel named vacps-… (legacy vps-… also works).',
+                              )}
+                            </p>
+                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                              <Select.Root
+                                type="single"
+                                value={selectedExistingTunnelId}
+                                onValueChange={chooseExistingTunnel}
+                                disabled={attachingTunnel ||
+                                  loadingExistingTunnels ||
+                                  reusableTunnels.length === 0}
+                              >
+                                <Select.Trigger
+                                  class="h-11 w-full rounded-[10px] border-border bg-background shadow-sm sm:min-w-[18rem]"
+                                >
+                                  {#if loadingExistingTunnels}
+                                    {label('loadingExistingTunnels', 'Loading tunnels…')}
+                                  {:else if selectedExistingTunnelId}
+                                    {tunnelOptionLabel(
+                                      reusableTunnels.find(
+                                        (tunnel) => tunnel.tunnelId === selectedExistingTunnelId,
+                                      ) ?? {
+                                        tunnelId: selectedExistingTunnelId,
+                                        name: selectedExistingTunnelId,
+                                        bound: false,
+                                        deleted: false,
+                                      },
+                                    )}
+                                  {:else}
+                                    {label('selectExistingTunnel', 'Existing Tunnel')}
+                                  {/if}
+                                </Select.Trigger>
+                                <Select.Content>
+                                  <Select.Group>
+                                    {#each reusableTunnels as tunnel (tunnel.tunnelId)}
+                                      <Select.Item
+                                        value={tunnel.tunnelId}
+                                        label={tunnelOptionLabel(tunnel)}
+                                        >{tunnelOptionLabel(tunnel)}</Select.Item
+                                      >
+                                    {/each}
+                                  </Select.Group>
+                                </Select.Content>
+                              </Select.Root>
+                              <Button
+                                variant="outline"
+                                class="h-11 shrink-0 rounded-[10px]"
+                                disabled={loadingExistingTunnels || attachingTunnel}
+                                onclick={() => loadExistingTunnels?.()}
+                              >
+                                {#if loadingExistingTunnels}<LoaderCircle
+                                    class="animate-spin"
+                                  />{:else}<RefreshCw />{/if}{label(
+                                  'refreshExistingTunnels',
+                                  'Refresh',
+                                )}
+                              </Button>
+                            </div>
+                            {#if !loadingExistingTunnels && reusableTunnels.length === 0}
+                              <p class="text-[11px] text-muted-foreground">
+                                {label('noExistingTunnels', 'No reusable tunnels found.')}
+                              </p>
+                            {/if}
+                            <div class="flex flex-wrap items-center gap-2">
+                              <Button
+                                class="h-11 shrink-0 rounded-[10px] shadow-[0_1px_1px_oklch(20%_.04_255_/_0.18),0_5px_12px_oklch(40%_.12_255_/_0.16)]"
+                                disabled={provisioningTunnel || attachingTunnel}
+                                onclick={() => ensureManagedProvision?.()}
+                              >
+                                {#if provisioningTunnel}<LoaderCircle class="animate-spin" />{label(
+                                    'provisioningTunnel',
+                                    'Creating tunnel…',
+                                  )}{:else if attachingTunnel}<LoaderCircle
+                                    class="animate-spin"
+                                  />{label('attachingTunnel', 'Attaching tunnel…')}{:else}<Zap
+                                  />{label('createManagedTunnel', 'Create new Tunnel')}{/if}
+                              </Button>
+                              <span class="text-[11px] text-muted-foreground">
+                                {label('reuseManagedTunnel', 'Reuse existing Tunnel')} ·
+                                {label('autoId', 'New tunnels use vacps-<12 hex> IDs.')}
+                              </span>
+                            </div>
                           </div>
                         {/if}
                       </div>

@@ -92,6 +92,11 @@ export class BackendRepository {
       throw new AppError('backend_not_found', `Backend '${id}' was not found.`, 404);
   }
 
+  /** Best-effort delete used when tearing down a node that may only exist as a registration. */
+  async deleteIfPresent(id: string): Promise<void> {
+    await this.db.prepare('DELETE FROM backends WHERE id = ?').bind(id).run();
+  }
+
   async recordStatus(
     id: string,
     status: BackendStatus,

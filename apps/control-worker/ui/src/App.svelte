@@ -51,6 +51,21 @@
   let installTunnelMode = $state<TunnelMode>('managed');
   let managedProvision = $state<any>();
   let provisioningTunnel = $state(false);
+  let attachingTunnel = $state(false);
+  let existingTunnels = $state<
+    Array<{
+      tunnelId: string;
+      name: string;
+      backendId?: string;
+      hostname?: string;
+      publicUrl?: string;
+      bound: boolean;
+      boundBackendId?: string;
+      deleted: boolean;
+    }>
+  >([]);
+  let selectedExistingTunnelId = $state('');
+  let loadingExistingTunnels = $state(false);
   let cloudflareOAuth = $state<any>();
   let cloudflareZones = $state<Array<{ id: string; name: string }> | undefined>();
   let selectedCloudflareZone = $state('');
@@ -100,7 +115,16 @@
       managedTunnel: m.managedTunnel(),
       quickTunnel: m.quickTunnel(),
       provisioningTunnel: m.provisioningTunnel(),
+      attachingTunnel: m.attachingTunnel(),
       createManagedTunnel: m.createManagedTunnel(),
+      reuseManagedTunnel: m.reuseManagedTunnel(),
+      selectExistingTunnel: m.selectExistingTunnel(),
+      selectExistingTunnelHint: m.selectExistingTunnelHint(),
+      noExistingTunnels: m.noExistingTunnels(),
+      loadingExistingTunnels: m.loadingExistingTunnels(),
+      refreshExistingTunnels: m.refreshExistingTunnels(),
+      tunnelBound: m.tunnelBound(),
+      tunnelAvailable: m.tunnelAvailable(),
       managedTunnelReady: m.managedTunnelReady(),
       installCommandPending: m.installCommandPending(),
       managedTunnelNeedsSetup: m.managedTunnelNeedsSetup(),
@@ -349,6 +373,8 @@
       cloudflareZones = undefined;
       selectedCloudflareZone = '';
       if (cloudflareOAuth.connected && !cloudflareOAuth.zoneId) await loadCloudflareZones();
+      if (cloudflareOAuth.connected && cloudflareOAuth.zoneId) await loadExistingTunnels();
+      else existingTunnels = [];
     } catch (error) {
       if (!isAuthenticationRequired(error))
         notice(`${text.syncFailed}${messageOf(error)}`, 'error');
@@ -389,6 +415,7 @@
         method: 'POST',
         body: JSON.stringify({ zoneId }),
       });
+      await loadExistingTunnels();
       if (announce) notice(m.cloudflareZoneReady(), 'success');
     } catch (error) {
       if (!isAuthenticationRequired(error))
@@ -443,12 +470,17 @@
     }
   }
   async function deleteBackend(node: any) {
-    if (!node.backend || !confirm(text.confirmRemove)) return;
-    actingId = node.backend.id;
+    if (!confirm(text.confirmRemove)) return;
+    const backendId = node.backend?.id ?? node.registration?.backendId;
+    const registrationId = node.registration?.id;
+    if (!backendId && !registrationId) return;
+    actingId = backendId ?? registrationId;
     try {
-      await api(`/api/backends/${node.backend.id}`, { method: 'DELETE' });
-      notice(`${node.registration.name} ${text.removeOk}`);
-      await refresh();
+      if (registrationId) await api(`/api/registrations/${registrationId}`, { method: 'DELETE' });
+      else await api(`/api/backends/${backendId}`, { method: 'DELETE' });
+      notice(`${node.registration?.name ?? backendId} ${text.removeOk}`);
+      if (managedProvision?.backendId === backendId) managedProvision = undefined;
+      await Promise.all([refresh(), loadExistingTunnels().catch(() => undefined)]);
     } catch (error) {
       if (!isAuthenticationRequired(error))
         notice(`${text.removeFailed}${messageOf(error)}`, 'error');
@@ -472,7 +504,9 @@
         method: 'POST',
         body: JSON.stringify({ name: installBackendName.trim() || undefined }),
       });
+      selectedExistingTunnelId = managedProvision.tunnelId ?? '';
       notice(`${text.managedTunnelReady}: ${managedProvision.publicUrl}`, 'success');
+      await loadExistingTunnels().catch(() => undefined);
     } catch (error) {
       if (isAuthenticationRequired(error)) return;
       const detail = messageOf(error);
@@ -484,6 +518,44 @@
       );
     } finally {
       provisioningTunnel = false;
+    }
+  }
+  async function loadExistingTunnels() {
+    if (!cloudflareOAuth?.connected || !cloudflareOAuth?.zoneId) {
+      existingTunnels = [];
+      return;
+    }
+    loadingExistingTunnels = true;
+    try {
+      existingTunnels = await api('/api/tunnels');
+    } catch (error) {
+      if (!isAuthenticationRequired(error))
+        notice(`${text.syncFailed}${messageOf(error)}`, 'error');
+      existingTunnels = [];
+    } finally {
+      loadingExistingTunnels = false;
+    }
+  }
+  async function attachExistingTunnel(tunnelId: string) {
+    if (!tunnelId || attachingTunnel) return;
+    selectedExistingTunnelId = tunnelId;
+    attachingTunnel = true;
+    try {
+      const tunnel = existingTunnels.find((item) => item.tunnelId === tunnelId);
+      managedProvision = await api('/api/tunnels/attach', {
+        method: 'POST',
+        body: JSON.stringify({
+          tunnelId,
+          ...(tunnel?.backendId ? { backendId: tunnel.backendId } : {}),
+        }),
+      });
+      notice(`${text.managedTunnelReady}: ${managedProvision.publicUrl}`, 'success');
+      await loadExistingTunnels().catch(() => undefined);
+    } catch (error) {
+      if (!isAuthenticationRequired(error))
+        notice(`${text.syncFailed}${messageOf(error)}`, 'error');
+    } finally {
+      attachingTunnel = false;
     }
   }
   async function generateRegistrationToken() {
@@ -692,6 +764,10 @@
           {generateRegistrationToken}
           {managedProvision}
           {provisioningTunnel}
+          {attachingTunnel}
+          {existingTunnels}
+          bind:selectedExistingTunnelId
+          {loadingExistingTunnels}
           {cloudflareOAuth}
           {cloudflareZones}
           bind:selectedCloudflareZone
@@ -703,6 +779,8 @@
           {connectCloudflare}
           {selectCloudflareZone}
           {ensureManagedProvision}
+          {loadExistingTunnels}
+          {attachExistingTunnel}
           {copyInstallCommand}
           {copyToClipboard}
         />

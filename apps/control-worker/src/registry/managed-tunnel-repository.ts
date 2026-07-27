@@ -31,10 +31,41 @@ export class ManagedTunnelRepository {
     return { ...input, createdAt };
   }
 
+  async upsert(input: Omit<ManagedTunnel, 'createdAt'>): Promise<ManagedTunnel> {
+    const existing = await this.find(input.backendId);
+    if (existing) {
+      await this.db
+        .prepare(
+          `UPDATE managed_tunnels
+           SET tunnel_id = ?, hostname = ?, dns_record_id = ?
+           WHERE backend_id = ?`,
+        )
+        .bind(input.tunnelId, input.hostname, input.dnsRecordId, input.backendId)
+        .run();
+      return { ...input, createdAt: existing.createdAt };
+    }
+    return this.create(input);
+  }
+
+  async list(): Promise<ManagedTunnel[]> {
+    const result = await this.db
+      .prepare('SELECT * FROM managed_tunnels ORDER BY created_at DESC')
+      .all<ManagedTunnelRow>();
+    return result.results.map(toManagedTunnel);
+  }
+
   async find(backendId: string): Promise<ManagedTunnel | undefined> {
     const row = await this.db
       .prepare('SELECT * FROM managed_tunnels WHERE backend_id = ?')
       .bind(backendId)
+      .first<ManagedTunnelRow>();
+    return row ? toManagedTunnel(row) : undefined;
+  }
+
+  async findByTunnelId(tunnelId: string): Promise<ManagedTunnel | undefined> {
+    const row = await this.db
+      .prepare('SELECT * FROM managed_tunnels WHERE tunnel_id = ?')
+      .bind(tunnelId)
       .first<ManagedTunnelRow>();
     return row ? toManagedTunnel(row) : undefined;
   }

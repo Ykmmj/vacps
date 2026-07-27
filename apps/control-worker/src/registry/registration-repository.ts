@@ -198,6 +198,22 @@ export class RegistrationRepository {
       .run();
     return this.get(id);
   }
+
+  async delete(id: string): Promise<void> {
+    const result = await this.db
+      .prepare('DELETE FROM backend_registrations WHERE id = ?')
+      .bind(id)
+      .run();
+    if ((result.meta.changes ?? 0) === 0)
+      throw new AppError('registration_not_found', `Registration '${id}' was not found.`, 404);
+  }
+
+  async deleteByBackendId(backendId: string): Promise<void> {
+    await this.db
+      .prepare('DELETE FROM backend_registrations WHERE backend_id = ?')
+      .bind(backendId)
+      .run();
+  }
 }
 
 function toRegistration(row: RegistrationRow): BackendRegistration {
