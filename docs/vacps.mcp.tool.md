@@ -405,11 +405,27 @@ revision: 1..2147483647
 
 ```text
 apps/control-worker/src/mcp/
-  tool-schemas.ts
-  task-schedule-adapters.ts
-  schema/{defs,annotations,envelope}.ts
-  server.ts
+  server.ts                 # tool 注册 + handler
+  schema/
+    common.ts               # 版本常量 + $defs 再导出
+    annotations.ts
+    envelope.ts
+    defs.ts
+    backends.ts
+    command.ts
+    shell.ts
+    process.ts
+    files.ts
+    git.ts
+    tasks.ts
+    schedules.ts
+    registry.ts             # publicToolJsonSchemas（全量 tools）
+    index.ts
+  tool-schemas.ts           # 兼容 re-export
+  task-schedule-adapters.ts # 兼容 re-export
 ```
+
+D1 schedule 行：`task_json`（V3 task 载荷）；`cron`/`timezone` 为 trigger 的列存储。
 
 共享 wire：
 
