@@ -15,5 +15,3 @@ logs/
 *.db-*
 apps/control-worker/web/
 temp
-# Local design draft; not tracked in git
-docs/vacps.mcp.tool.md

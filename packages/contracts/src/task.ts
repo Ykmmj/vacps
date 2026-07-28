@@ -193,14 +193,6 @@ export function taskToCommand(input: CreateTaskInput | ScheduleTaskInput): strin
   return '(Pi agent task)';
 }
 
-/** @deprecated Use taskToCommand. */
-export function shellToCommand(input: CreateTaskInput | ScheduleTaskInput | { mode?: string }): string {
-  if (input && typeof input === 'object' && 'kind' in input) {
-    return taskToCommand(input as CreateTaskInput);
-  }
-  return '';
-}
-
 /** Attach backend_id to a schedule task template for dispatch. */
 export function withBackendId(
   task: ScheduleTaskInput | CreateTaskInput,
