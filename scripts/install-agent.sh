@@ -330,6 +330,85 @@ EOF
   systemctl enable --now vacps-quick-tunnel
 }
 
+# Create/repair the agent system user with a full login home (required for shell.exec).
+# Idempotent: existing users keep their files; missing homes and bad /home modes are fixed.
+ensure_service_user() {
+  # /home must be traversable (0755 or 0711). ProtectHome bind also needs a real home.
+  if [[ ! -d /home ]]; then
+    install -d -m 755 /home
+  else
+    # Fix extreme lockdown (e.g. mode 000) so unprivileged users can reach /home/<user>.
+    local home_mode
+    home_mode=$(stat -c '%a' /home 2>/dev/null || echo 000)
+    if [[ $home_mode == 0* || $home_mode == 000 ]]; then
+      chmod 755 /home || true
+    fi
+  fi
+
+  if ! getent group "$SERVICE_USER" >/dev/null 2>&1; then
+    groupadd --system "$SERVICE_USER"
+  fi
+
+  local home_dir="/home/$SERVICE_USER"
+  if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+    useradd \
+      --system \
+      --gid "$SERVICE_USER" \
+      --create-home \
+      --home-dir "$home_dir" \
+      --shell /bin/bash \
+      --skel /etc/skel \
+      "$SERVICE_USER"
+  else
+    # Migrate legacy installs (nologin, no home) without deleting existing homes.
+    usermod -s /bin/bash -d "$home_dir" -g "$SERVICE_USER" "$SERVICE_USER" 2>/dev/null || true
+    if [[ ! -d $home_dir ]]; then
+      if command -v mkhomedir_helper >/dev/null 2>&1; then
+        mkhomedir_helper "$SERVICE_USER" 2>/dev/null || true
+      fi
+      if [[ ! -d $home_dir ]]; then
+        install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$home_dir"
+        if [[ -d /etc/skel ]]; then
+          # Copy skel only into a brand-new empty home.
+          if [[ -z $(find "$home_dir" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1) ]]; then
+            cp -a /etc/skel/. "$home_dir"/ 2>/dev/null || true
+            chown -R "$SERVICE_USER:$SERVICE_USER" "$home_dir"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  chown "$SERVICE_USER:$SERVICE_USER" "$home_dir"
+  chmod 750 "$home_dir"
+  # Ensure common rc files exist and are readable by the agent (do not overwrite custom content).
+  for rc in .bashrc .profile .bash_profile; do
+    if [[ ! -e $home_dir/$rc && -f /etc/skel/$rc ]]; then
+      install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" "/etc/skel/$rc" "$home_dir/$rc"
+    elif [[ -e $home_dir/$rc ]]; then
+      chown "$SERVICE_USER:$SERVICE_USER" "$home_dir/$rc" 2>/dev/null || true
+      chmod u+rw "$home_dir/$rc" 2>/dev/null || true
+    fi
+  done
+  if [[ ! -e $home_dir/.bashrc ]]; then
+    cat >"$home_dir/.bashrc" <<'EOF'
+# Vacps agent shell environment (loaded by bash -lc for non-interactive too via BASH_ENV unset path).
+# Keep this readable by the agent user so shell.exec does not emit Permission denied.
+EOF
+    chown "$SERVICE_USER:$SERVICE_USER" "$home_dir/.bashrc"
+    chmod 644 "$home_dir/.bashrc"
+  fi
+
+  # Final smoke: agent must be able to traverse /home and its home directory.
+  if ! runuser -u "$SERVICE_USER" -- test -x /home 2>/dev/null && ! su -s /bin/bash "$SERVICE_USER" -c 'test -x /home' 2>/dev/null; then
+    chmod 755 /home || true
+  fi
+  if ! runuser -u "$SERVICE_USER" -- test -x "$home_dir" 2>/dev/null && ! su -s /bin/bash "$SERVICE_USER" -c "test -x '$home_dir'" 2>/dev/null; then
+    chmod 750 "$home_dir" || true
+    chown "$SERVICE_USER:$SERVICE_USER" "$home_dir" || true
+  fi
+}
+
 write_systemd_unit() {
   install -d /etc/systemd/system/vacps.service.d
   install -m 644 "$APP_DIRECTORY/apps/vacps/systemd/vacps.service" /etc/systemd/system/vacps.service
@@ -338,6 +417,10 @@ write_systemd_unit() {
 [Service]
 ExecStart=
 ExecStart=$NODE_BINARY /opt/vacps/apps/vacps/dist/main.js
+Environment=HOME=/home/$SERVICE_USER
+Environment=USER=$SERVICE_USER
+Environment=LOGNAME=$SERVICE_USER
+Environment=SHELL=/bin/bash
 EOF
 
   if [[ $ALLOW_APT == true ]]; then
@@ -574,7 +657,7 @@ upgrade_agent() {
     fi
   fi
 
-  useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
+  ensure_service_user
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
   chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
@@ -653,7 +736,7 @@ install_agent() {
     build_agent_packages
   fi
 
-  useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
+  ensure_service_user
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
   install -d /etc/vacps /etc/systemd/system/vacps.service.d

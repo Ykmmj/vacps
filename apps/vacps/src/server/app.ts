@@ -1,4 +1,5 @@
 import { open, stat } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createTaskSchema, taskDispatchSchema } from '@vacps/contracts';
@@ -9,6 +10,7 @@ import type { TaskStore } from '../storage/task-store.js';
 import type { NodeTelemetryCollector } from '../telemetry/node-telemetry.js';
 import { verifyControlPlaneRequest } from '../security/request-signatures.js';
 import { ProcessManager } from '../runtime/process-manager.js';
+import { hashRequest, IdempotencyStore } from '../runtime/idempotency.js';
 import * as files from '../runtime/files.js';
 
 export async function createServer(input: {
@@ -20,6 +22,7 @@ export async function createServer(input: {
 }): Promise<FastifyInstance> {
   const app = Fastify({ logger: true, bodyLimit: 2 * 1024 * 1024 });
   const processes = new ProcessManager(input.config.BACKEND_ID);
+  const idempotency = new IdempotencyStore();
   app.addHook('preValidation', async (request, reply) => {
     try {
       const body = request.body === undefined ? '' : JSON.stringify(request.body);
@@ -53,12 +56,22 @@ export async function createServer(input: {
     }
   });
 
-  app.get('/health', async () => (await input.telemetry.collect()).health);
+  app.get('/health', async () => {
+    const health = await input.telemetry.collect();
+    const agentEnv = await probeAgentEnvironment();
+    return {
+      ...health.health,
+      agent_environment: agentEnv,
+      // shell_exec is only healthy when the agent can use its real home + bashrc.
+      shell_environment_ok: agentEnv.home_accessible && agentEnv.shell_smoke_ok,
+    };
+  });
 
   app.get('/info', async () => ({
     backendId: input.config.BACKEND_ID,
     queue: input.queue.queueName,
     runMode: input.config.RUN_MODE,
+    agent_environment: await probeAgentEnvironment(),
   }));
 
   app.get('/metrics', async () => (await input.telemetry.collect()).metrics);
@@ -277,18 +290,24 @@ export async function createServer(input: {
         error: { code: 'validation_error', message: 'path, old_text, and new_text are required.' },
       });
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.filesEdit({
-          path: body.path,
-          oldText: body.old_text,
-          newText: body.new_text,
-          replaceAll: body.replace_all === true,
-          expectedSha256:
-            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
-        })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.edit',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesEdit({
+            path: body.path as string,
+            oldText: body.old_text as string,
+            newText: body.new_text as string,
+            replaceAll: body.replace_all === true,
+            expectedSha256:
+              typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -313,18 +332,24 @@ export async function createServer(input: {
       });
     }
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.filesWrite({
-          path: body.path,
-          content: body.content,
-          mode: body.mode,
-          expectedSha256:
-            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
-          createParentDirectories: body.create_parent_directories !== false,
-        })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.write',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesWrite({
+            path: body.path as string,
+            content: body.content as string,
+            mode: body.mode as 'create' | 'overwrite' | 'create_or_overwrite',
+            expectedSha256:
+              typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+            createParentDirectories: body.create_parent_directories !== false,
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -337,16 +362,23 @@ export async function createServer(input: {
         .code(400)
         .send({ error: { code: 'validation_error', message: 'patch is required.' } });
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.applyPatch({
-          patch: body.patch,
-          workspacePath: typeof body.workspace_path === 'string' ? body.workspace_path : undefined,
-          dryRun: body.dry_run === true,
-          atomic: body.atomic !== false,
-        })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.apply_patch',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.applyPatch({
+            patch: body.patch as string,
+            workspacePath:
+              typeof body.workspace_path === 'string' ? body.workspace_path : undefined,
+            dryRun: body.dry_run === true,
+            atomic: body.atomic !== false,
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -359,17 +391,23 @@ export async function createServer(input: {
         .code(400)
         .send({ error: { code: 'validation_error', message: 'from and to are required.' } });
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.filesMove({
-          from: body.from,
-          to: body.to,
-          overwrite: body.overwrite === true,
-          expectedSha256:
-            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
-        })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.move',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesMove({
+            from: body.from as string,
+            to: body.to as string,
+            overwrite: body.overwrite === true,
+            expectedSha256:
+              typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -382,21 +420,27 @@ export async function createServer(input: {
         .code(400)
         .send({ error: { code: 'validation_error', message: 'path is required.' } });
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.filesDelete({
-          path: body.path,
-          recursive: body.recursive === true,
-          expectedSha256:
-            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
-          expectedType:
-            body.expected_type === 'file' || body.expected_type === 'directory'
-              ? body.expected_type
-              : undefined,
-          dryRun: body.dry_run === true,
-        })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.delete',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesDelete({
+            path: body.path as string,
+            recursive: body.recursive === true,
+            expectedSha256:
+              typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+            expectedType:
+              body.expected_type === 'file' || body.expected_type === 'directory'
+                ? body.expected_type
+                : undefined,
+            dryRun: body.dry_run === true,
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -409,11 +453,20 @@ export async function createServer(input: {
         .code(400)
         .send({ error: { code: 'validation_error', message: 'path is required.' } });
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.filesMkdir({ path: body.path, recursive: body.recursive !== false })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.mkdir',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesMkdir({
+            path: body.path as string,
+            recursive: body.recursive !== false,
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -478,6 +531,8 @@ export async function createServer(input: {
         stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
         stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
         idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
+        // Default true: shell.exec loads the real agent login environment.
+        loadUserEnvironment: body.load_user_environment !== false,
         closeStdin: true,
       });
       return { ok: true, ...result };
@@ -793,6 +848,130 @@ function numberOr(value: string | undefined, fallback: number | undefined): numb
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return parsed;
+}
+
+async function withFileIdempotency(
+  store: IdempotencyStore,
+  backendId: string,
+  toolName: string,
+  body: Record<string, unknown>,
+  run: () => Promise<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  const key = typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined;
+  // Hash the mutating arguments (exclude nothing critical — full body minus nothing).
+  const requestHash = hashRequest({
+    tool_name: toolName,
+    backend_id: backendId,
+    arguments: body,
+  });
+  const cached = store.lookup(toolName, key, requestHash);
+  if (cached && typeof cached === 'object') {
+    return store.withIdempotencyMeta(key, requestHash, true, cached as Record<string, unknown>);
+  }
+  const result = await run();
+  store.store(toolName, key, requestHash, result);
+  return store.withIdempotencyMeta(key, requestHash, false, result);
+}
+
+async function probeAgentEnvironment(): Promise<{
+  uid: number;
+  gid: number;
+  user: string;
+  home: string;
+  shell: string;
+  home_accessible: boolean;
+  home_writable: boolean;
+  bashrc_readable: boolean;
+  shell_smoke_ok: boolean;
+  bashrc_path: string;
+  notes: string[];
+}> {
+  const { access, constants } = await import('node:fs/promises');
+  const { spawn } = await import('node:child_process');
+  let user = process.env.USER || 'agent';
+  let home = process.env.HOME || `/home/${user}`;
+  try {
+    const info = userInfo();
+    if (typeof info.username === 'string') user = info.username;
+    if (typeof info.homedir === 'string') home = info.homedir;
+  } catch {
+    /* keep defaults */
+  }
+  const bashrc = `${home}/.bashrc`;
+  const notes: string[] = [];
+  let home_accessible = false;
+  let home_writable = false;
+  let bashrc_readable = false;
+  try {
+    await access(home, constants.X_OK);
+    home_accessible = true;
+  } catch {
+    notes.push(
+      `HOME ${home} is not accessible (check /home mode and systemd ProtectHome/BindPaths).`,
+    );
+  }
+  try {
+    await access(home, constants.W_OK);
+    home_writable = true;
+  } catch {
+    notes.push(`HOME ${home} is not writable by the agent user.`);
+  }
+  try {
+    await access(bashrc, constants.R_OK);
+    bashrc_readable = true;
+  } catch {
+    notes.push(`${bashrc} is not readable; shell login env may emit Permission denied.`);
+  }
+
+  const shell_smoke_ok = await new Promise<boolean>((resolve) => {
+    const child = spawn('/bin/bash', ['-lc', 'test -n "$HOME" && test -x "$HOME" && id -un'], {
+      env: {
+        ...process.env,
+        HOME: home,
+        USER: user,
+        LOGNAME: user,
+        SHELL: '/bin/bash',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve(false);
+    }, 3_000);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    child.stderr.on('data', (chunk) => (stderr += chunk));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (stderr.includes('Permission denied')) {
+        notes.push(`bash -lc reported: ${stderr.trim()}`);
+        resolve(false);
+        return;
+      }
+      resolve(code === 0 && stdout.trim().length > 0);
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+
+  return {
+    uid: process.getuid?.() ?? -1,
+    gid: process.getgid?.() ?? -1,
+    user,
+    home,
+    shell: process.env.SHELL || '/bin/bash',
+    home_accessible,
+    home_writable,
+    bashrc_readable,
+    shell_smoke_ok,
+    bashrc_path: bashrc,
+    notes,
+  };
 }
 
 function runtimeError(

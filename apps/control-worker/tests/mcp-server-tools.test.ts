@@ -41,4 +41,33 @@ describe('MCP server tools', () => {
     expect(body.backends).toEqual([]);
     await client.close();
   });
+
+  it('exposes JSON Schema that matches runtime constraints for write/process.start', async () => {
+    const client = await connect(baseEnv);
+    const { tools } = await client.listTools();
+
+    const write = tools.find((tool) => tool.name === 'vacps.files.write');
+    expect(write).toBeTruthy();
+    const writeSchema = write?.inputSchema as {
+      required?: string[];
+      properties?: Record<string, { default?: unknown; minimum?: number }>;
+    };
+    expect(writeSchema.required).toContain('mode');
+    expect(writeSchema.required).toContain('path');
+    expect(writeSchema.required).toContain('content');
+    expect(writeSchema.properties?.mode?.default).toBeUndefined();
+
+    const start = tools.find((tool) => tool.name === 'vacps.process.start');
+    expect(start).toBeTruthy();
+    const startSchema = start?.inputSchema as {
+      properties?: Record<string, { minimum?: number; maximum?: number; default?: unknown }>;
+    };
+    const hard = startSchema.properties?.stdout_hard_max_bytes;
+    expect(hard?.minimum).toBe(0);
+    expect(hard?.maximum).toBe(1_073_741_824);
+    // Defaults must not advertise a fake "optional overwrite everything" path.
+    expect(hard?.minimum).not.toBeLessThan(0);
+
+    await client.close();
+  });
 });

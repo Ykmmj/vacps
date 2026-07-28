@@ -382,18 +382,18 @@ export function createMcpServer(env: Env): McpServer {
     {
       description:
         'Run a non-interactive program on a backend (argv form, no shell). Uses yield_time_ms for sync wait.',
-      inputSchema: {
-        backend_id: z.string(),
-        program: z.string(),
-        arguments: z.array(z.string()).optional(),
+      inputSchema: z.object({
+        backend_id: z.string().min(1),
+        program: z.string().min(1),
+        arguments: z.array(z.string()).max(1000).optional(),
         working_directory: z.string().optional(),
         environment: z.record(z.string(), z.string()).optional(),
-        timeout_ms: z.number().int().min(1).max(3_600_000).default(120_000),
-        yield_time_ms: z.number().int().min(1).max(120_000).default(10_000),
-        stdout_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
-        stderr_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
+        timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
+        yield_time_ms: z.number().int().min(1).max(120_000).optional(),
+        stdout_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
+        stderr_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
         idempotency_key: z.string().optional(),
-      },
+      }),
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     },
     wrap(
@@ -409,19 +409,22 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.shell.exec',
     {
       description:
-        'Run a shell command string on a backend when pipes/redirection are required. Prefer vacps.command.exec.',
-      inputSchema: {
-        backend_id: z.string(),
-        command: z.string(),
+        'Run a shell command as the agent user with full login environment (bash -lc, sources ~/.bashrc). Prefer vacps.command.exec for non-shell work. Set load_user_environment=false only for a clean --noprofile --norc shell.',
+      // Full z.object so tools/list JSON Schema matches runtime validation (not raw-shape z4mini wrap).
+      inputSchema: z.object({
+        backend_id: z.string().min(1),
+        command: z.string().min(1),
         shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
         working_directory: z.string().optional(),
         environment: z.record(z.string(), z.string()).optional(),
-        timeout_ms: z.number().int().min(1).max(3_600_000).default(120_000),
-        yield_time_ms: z.number().int().min(1).max(120_000).default(10_000),
-        stdout_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
-        stderr_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
+        timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
+        yield_time_ms: z.number().int().min(1).max(120_000).optional(),
+        stdout_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
+        stderr_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
+        // Default true at runtime (full agent login env). Explicit false opts out.
+        load_user_environment: z.boolean().optional(),
         idempotency_key: z.string().optional(),
-      },
+      }),
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     },
     wrap(
@@ -433,36 +436,45 @@ export function createMcpServer(env: Env): McpServer {
     ),
   );
 
+  const processStartSchema = z
+    .object({
+      backend_id: z.string().min(1),
+      program: z.string().min(1).optional(),
+      arguments: z.array(z.string()).max(1000).optional(),
+      command: z.string().min(1).optional(),
+      working_directory: z.string().optional(),
+      environment: z.record(z.string(), z.string()).optional(),
+      tty: z.boolean().optional(),
+      timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
+      stdout_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
+      stderr_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
+      idempotency_key: z.string().optional(),
+    })
+    .superRefine((value, context) => {
+      const hasProgram = value.program !== undefined;
+      const hasCommand = value.command !== undefined;
+      if (hasProgram === hasCommand) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Provide exactly one of program or command.',
+        });
+      }
+    });
+
   server.registerTool(
     'vacps.process.start',
     {
       description:
-        'Start a long-running or interactive process on a backend. Provide exactly one of program or command.',
-      inputSchema: {
-        backend_id: z.string(),
-        program: z.string().optional(),
-        arguments: z.array(z.string()).optional(),
-        command: z.string().optional(),
-        working_directory: z.string().optional(),
-        environment: z.record(z.string(), z.string()).optional(),
-        tty: z.boolean().optional(),
-        timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
-        stdout_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).default(104_857_600),
-        stderr_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).default(104_857_600),
-        idempotency_key: z.string().optional(),
-      },
+        'Start a long-running or interactive process on a backend. Provide exactly one of program or command (not both, not neither). stdout/stderr_hard_max_bytes are 0..1073741824.',
+      inputSchema: processStartSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     },
     wrap(
       (value) => `started ${String(value.process_id)}`,
       async (args) => {
-        const hasProgram = typeof args.program === 'string' && args.program.length > 0;
-        const hasCommand = typeof args.command === 'string' && args.command.length > 0;
-        if (hasProgram === hasCommand) {
-          throw new AppError('validation_error', 'Provide exactly one of program or command.', 400);
-        }
-        const backend = await requireBackend(args.backend_id);
-        return (await client.processStart(backend, args)) as Record<string, unknown>;
+        const parsed = processStartSchema.parse(args);
+        const backend = await requireBackend(parsed.backend_id);
+        return (await client.processStart(backend, parsed)) as Record<string, unknown>;
       },
     ),
   );
@@ -680,27 +692,31 @@ export function createMcpServer(env: Env): McpServer {
     ),
   );
 
+  const filesWriteSchema = z.object({
+    backend_id: z.string().min(1),
+    path: z.string().min(1),
+    content: z.string(),
+    // Required — no default. Callers must choose create | overwrite | create_or_overwrite.
+    mode: z.enum(['create', 'overwrite', 'create_or_overwrite']),
+    expected_sha256: z.string().optional(),
+    create_parent_directories: z.boolean().optional(),
+    idempotency_key: z.string().optional(),
+  });
+
   server.registerTool(
     'vacps.files.write',
     {
       description:
-        'Write a file on a backend (atomic temp+rename). mode is required: create (fail if exists), overwrite (fail if missing), or create_or_overwrite.',
-      inputSchema: {
-        backend_id: z.string(),
-        path: z.string(),
-        content: z.string(),
-        mode: z.enum(['create', 'overwrite', 'create_or_overwrite']),
-        expected_sha256: z.string().optional(),
-        create_parent_directories: z.boolean().optional(),
-        idempotency_key: z.string().optional(),
-      },
+        'Write a file on a backend (atomic temp+rename). mode is required: create (fail if exists), overwrite (fail if missing), or create_or_overwrite. Supports idempotency_key + expected_sha256.',
+      inputSchema: filesWriteSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
     },
     wrap(
       (value) => `Wrote ${String(value.path)} (${String(value.operation)})`,
       async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.writeFile(backend, args)) as Record<string, unknown>;
+        const parsed = filesWriteSchema.parse(args);
+        const backend = await requireBackend(parsed.backend_id);
+        return (await client.writeFile(backend, parsed)) as Record<string, unknown>;
       },
     ),
   );

@@ -79,6 +79,12 @@ export type ExecInput = {
   tty?: boolean | undefined;
   idempotencyKey?: string | undefined;
   closeStdin?: boolean | undefined;
+  /**
+   * Shell only: load agent login environment (.bashrc / profile).
+   * Default true for shell.exec so PATH and user tooling match a real agent login.
+   * Set false for a clean non-interactive shell (--noprofile --norc).
+   */
+  loadUserEnvironment?: boolean | undefined;
 };
 
 export class ProcessManager {
@@ -135,15 +141,25 @@ export class ProcessManager {
     const cwd = input.workingDirectory
       ? assertSafeAbsolutePath(input.workingDirectory)
       : process.cwd();
-    const env = buildExecEnvironment(input.environment);
+    // shell.exec defaults to full agent login env; command.exec never uses a shell.
+    const loadUserEnvironment =
+      input.loadUserEnvironment !== undefined ? input.loadUserEnvironment : Boolean(input.command);
+    const env = buildExecEnvironment(input.environment, { loadUserEnvironment });
     const hardMaxStdout = clamp(input.hardMaxStdout ?? 100 * 1024 * 1024, 0, 1024 * 1024 * 1024);
     const hardMaxStderr = clamp(input.hardMaxStderr ?? 100 * 1024 * 1024, 0, 1024 * 1024 * 1024);
 
     let child: ChildProcessWithoutNullStreams;
     if (input.command) {
-      // Non-login shell: avoid .bash_profile / .profile noise on stderr.
       const shell = input.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
-      child = spawn(shell, ['-c', input.command], {
+      // Login shell (-lc) sources profile/bashrc for the real agent user environment.
+      // Opt out with load_user_environment=false → --noprofile --norc -c.
+      const shellArgs =
+        shell === '/bin/sh'
+          ? (['-c', input.command] as string[])
+          : loadUserEnvironment
+            ? (['-lc', input.command] as string[])
+            : (['--noprofile', '--norc', '-c', input.command] as string[]);
+      child = spawn(shell, shellArgs, {
         cwd,
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -476,6 +492,7 @@ export function canonicalRequestHash(
     hard_max_stderr: input.hardMaxStderr ?? null,
     tty: input.tty ?? null,
     close_stdin: input.closeStdin ?? null,
+    load_user_environment: input.loadUserEnvironment ?? false,
   };
   return createHash('sha256').update(stableStringify(payload)).digest('hex');
 }
@@ -511,8 +528,11 @@ function encodeCursor(sequence: number, byteOffset: number): string {
   return `${sequence}:${byteOffset}`;
 }
 
-function buildExecEnvironment(overrides: Record<string, string> | undefined): NodeJS.ProcessEnv {
-  let home = process.env.HOME || '/';
+function buildExecEnvironment(
+  overrides: Record<string, string> | undefined,
+  options: { loadUserEnvironment: boolean },
+): NodeJS.ProcessEnv {
+  let home = process.env.HOME || '/home/agent';
   let username = process.env.USER || 'agent';
   try {
     const user = userInfo();
@@ -521,14 +541,18 @@ function buildExecEnvironment(overrides: Record<string, string> | undefined): No
   } catch {
     /* keep env defaults */
   }
-  const base: NodeJS.ProcessEnv = {
-    ...process.env,
-    HOME: home,
-    USER: username,
-    LOGNAME: process.env.LOGNAME || username,
-    SHELL: process.env.SHELL || '/bin/bash',
-  };
-  return { ...base, ...overrides };
+  const base: NodeJS.ProcessEnv = { ...process.env, ...overrides };
+  // Always clear accidental BASH_ENV hijacks; login shells still load ~/.bashrc via -lc.
+  delete base.BASH_ENV;
+  delete base.ENV;
+  base.HOME = overrides?.HOME ?? home;
+  base.USER = overrides?.USER ?? username;
+  base.LOGNAME = overrides?.LOGNAME ?? process.env.LOGNAME ?? username;
+  base.SHELL = overrides?.SHELL ?? process.env.SHELL ?? '/bin/bash';
+  // Document intent for operators inspecting process env.
+  if (options.loadUserEnvironment) base.VACPS_SHELL_USER_ENV = '1';
+  else base.VACPS_SHELL_USER_ENV = '0';
+  return base;
 }
 
 function waitFor(managed: ManagedProcess, ms: number): Promise<void> {
