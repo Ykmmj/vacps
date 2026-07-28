@@ -1,11 +1,12 @@
 import type {
   CreateScheduleInput,
+  CreateTaskInput,
   PatchScheduleInput,
   Schedule,
   SchedulePolicy,
   UpdateScheduleInput,
 } from '@vacps/contracts';
-import { schedulePolicySchema } from '@vacps/contracts';
+import { createTaskSchema, schedulePolicySchema, withBackendId } from '@vacps/contracts';
 
 import { AppError } from '../lib/http.js';
 import type { BackendClient } from '../registry/backend-client.js';
@@ -33,7 +34,7 @@ interface ScheduleRow {
 const DEFAULT_POLICY: SchedulePolicy = {
   concurrency: 'forbid',
   misfire: 'run_once',
-  maxCatchupRuns: 1,
+  max_catchup_runs: 1,
 };
 
 type ScheduleRecord = Schedule & { requestHash?: string };
@@ -94,11 +95,12 @@ export class ScheduleService {
   async create(
     input: CreateScheduleInput,
   ): Promise<ScheduleRecord & { reused?: boolean; requestHash?: string }> {
-    const backend = await this.backends.get(input.backendId);
+    const backend = await this.backends.get(input.backend_id);
     const requestHash = await hashScheduleRequest(input);
+    const task = withBackendId(input.task, input.backend_id);
 
-    if (input.idempotencyKey) {
-      const existing = await this.findByIdempotency(input.backendId, input.idempotencyKey);
+    if (input.idempotency_key) {
+      const existing = await this.findByIdempotency(input.backend_id, input.idempotency_key);
       if (existing) {
         if (existing.requestHash && existing.requestHash !== requestHash) {
           throw new AppError(
@@ -117,7 +119,12 @@ export class ScheduleService {
 
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
-    const policy = input.policy ?? DEFAULT_POLICY;
+    const policy = schedulePolicySchema.parse(input.policy ?? DEFAULT_POLICY);
+    const trigger = {
+      type: 'cron' as const,
+      expression: input.trigger.expression,
+      timezone: input.trigger.timezone ?? 'UTC',
+    };
     try {
       await this.db
         .prepare(
@@ -127,22 +134,22 @@ export class ScheduleService {
         )
         .bind(
           id,
-          input.backendId,
+          input.backend_id,
           input.name,
-          input.cron,
-          input.timezone,
-          JSON.stringify(input.taskTemplate),
-          Number(input.enabled),
+          trigger.expression,
+          trigger.timezone,
+          JSON.stringify(task),
+          Number(input.enabled ?? true),
           JSON.stringify(policy),
-          input.idempotencyKey ?? null,
+          input.idempotency_key ?? null,
           requestHash,
           now,
           now,
         )
         .run();
     } catch {
-      if (input.idempotencyKey) {
-        const raced = await this.findByIdempotency(input.backendId, input.idempotencyKey);
+      if (input.idempotency_key) {
+        const raced = await this.findByIdempotency(input.backend_id, input.idempotency_key);
         if (raced) {
           if (raced.requestHash && raced.requestHash !== requestHash) {
             throw new AppError(
@@ -174,24 +181,23 @@ export class ScheduleService {
     const current = await this.get(id);
     return this.applyUpdate(current, {
       ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.cron !== undefined ? { cron: input.cron } : {}),
-      ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
+      ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
       ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
-      ...(input.taskTemplate !== undefined ? { taskTemplate: input.taskTemplate } : {}),
-      ...(input.policy !== undefined ? { policy: input.policy } : {}),
+      ...(input.task !== undefined ? { task: withBackendId(input.task, current.backend_id) } : {}),
+      ...(input.policy !== undefined ? { policy: schedulePolicySchema.parse(input.policy) } : {}),
     });
   }
 
-  /** Schema v2 patch with optional expected_revision optimistic concurrency. */
+  /** Schema v3 patch with optional expected_revision optimistic concurrency. */
   async patch(id: string, input: PatchScheduleInput): Promise<ScheduleRecord> {
     const current = await this.get(id);
     if (
-      input.expectedRevision !== undefined &&
-      input.expectedRevision !== current.revision
+      input.expected_revision !== undefined &&
+      input.expected_revision !== current.revision
     ) {
       throw new AppError(
         'schedule_revision_conflict',
-        `Schedule revision mismatch: expected ${input.expectedRevision}, current ${current.revision}.`,
+        `Schedule revision mismatch: expected ${input.expected_revision}, current ${current.revision}.`,
         409,
       );
     }
@@ -200,12 +206,21 @@ export class ScheduleService {
       changes.policy !== undefined
         ? schedulePolicySchema.parse({ ...current.policy, ...changes.policy })
         : undefined;
+    const nextTrigger =
+      changes.trigger !== undefined
+        ? {
+            type: 'cron' as const,
+            expression: changes.trigger.expression ?? current.trigger.expression,
+            timezone: changes.trigger.timezone ?? current.trigger.timezone,
+          }
+        : undefined;
     return this.applyUpdate(current, {
       ...(changes.name !== undefined ? { name: changes.name } : {}),
-      ...(changes.cron !== undefined ? { cron: changes.cron } : {}),
-      ...(changes.timezone !== undefined ? { timezone: changes.timezone } : {}),
+      ...(nextTrigger ? { trigger: nextTrigger } : {}),
       ...(changes.enabled !== undefined ? { enabled: changes.enabled } : {}),
-      ...(changes.taskTemplate !== undefined ? { taskTemplate: changes.taskTemplate } : {}),
+      ...(changes.task !== undefined
+        ? { task: withBackendId(changes.task, current.backend_id) }
+        : {}),
       ...(nextPolicy ? { policy: nextPolicy } : {}),
     });
   }
@@ -214,29 +229,22 @@ export class ScheduleService {
     current: ScheduleRecord,
     patch: {
       name?: string;
-      cron?: string;
-      timezone?: string;
+      trigger?: Schedule['trigger'];
       enabled?: boolean;
-      taskTemplate?: Schedule['taskTemplate'];
+      task?: CreateTaskInput;
       policy?: SchedulePolicy;
     },
   ): Promise<ScheduleRecord> {
-    // Ensure task template backend always matches schedule.
-    let taskTemplate = patch.taskTemplate ?? current.taskTemplate;
-    if (taskTemplate.backendId !== current.backendId) {
-      taskTemplate = { ...taskTemplate, backendId: current.backendId };
-    }
-
+    const task = patch.task ?? current.task;
     const next: Schedule = {
       ...current,
       ...(patch.name !== undefined ? { name: patch.name } : {}),
-      ...(patch.cron !== undefined ? { cron: patch.cron } : {}),
-      ...(patch.timezone !== undefined ? { timezone: patch.timezone } : {}),
+      ...(patch.trigger !== undefined ? { trigger: patch.trigger } : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
-      taskTemplate,
+      task: createTaskSchema.parse({ ...task, backend_id: current.backend_id }),
       ...(patch.policy !== undefined ? { policy: patch.policy } : {}),
       revision: current.revision + 1,
-      updatedAt: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
 
     const result = await this.db
@@ -247,13 +255,13 @@ export class ScheduleService {
       )
       .bind(
         next.name,
-        next.cron,
-        next.timezone,
-        JSON.stringify(next.taskTemplate),
+        next.trigger.expression,
+        next.trigger.timezone,
+        JSON.stringify(next.task),
         Number(next.enabled),
         next.revision,
         JSON.stringify(next.policy),
-        next.updatedAt,
+        next.updated_at,
         current.id,
         current.revision,
       )
@@ -267,7 +275,7 @@ export class ScheduleService {
       );
     }
 
-    await this.sync(next, await this.backends.get(next.backendId));
+    await this.sync(next, await this.backends.get(next.backend_id));
     return this.get(current.id);
   }
 
@@ -394,18 +402,15 @@ export class ScheduleService {
     options: { idempotencyKey?: string } = {},
   ): Promise<{ scheduleId: string; task: Awaited<ReturnType<TaskService['create']>>; queued: true }> {
     const schedule = await this.get(id);
-    // Ensure template targets this schedule's backend.
-    const template =
-      schedule.taskTemplate.backendId === schedule.backendId
-        ? schedule.taskTemplate
-        : { ...schedule.taskTemplate, backendId: schedule.backendId };
+    const template = createTaskSchema.parse({
+      ...schedule.task,
+      backend_id: schedule.backend_id,
+      ...(options.idempotencyKey && !schedule.task.idempotency_key
+        ? { idempotency_key: options.idempotencyKey }
+        : {}),
+    });
 
-    const taskInput =
-      options.idempotencyKey && !template.idempotencyKey
-        ? { ...template, idempotencyKey: options.idempotencyKey }
-        : template;
-
-    const task = await this.tasks.create(taskInput, 'schedule', schedule.id);
+    const task = await this.tasks.create(template, 'schedule', schedule.id);
     await this.db
       .prepare('UPDATE schedules SET last_run_at = ?, updated_at = ? WHERE id = ?')
       .bind(new Date().toISOString(), new Date().toISOString(), id)
@@ -418,7 +423,7 @@ export class ScheduleService {
     const result = { reconciled: 0, failed: [] as Array<{ id: string; error: string }> };
     for (const schedule of schedules) {
       try {
-        await this.sync(schedule, await this.backends.get(schedule.backendId));
+        await this.sync(schedule, await this.backends.get(schedule.backend_id));
         result.reconciled += 1;
       } catch (error) {
         result.failed.push({
@@ -447,11 +452,12 @@ export class ScheduleService {
     schedule: ScheduleRecord,
     backend: Awaited<ReturnType<BackendRepository['get']>>,
   ): Promise<void> {
+    // Agent wire: cron/timezone columns + V3 task body (not taskTemplate).
     await this.client.upsertScheduler(backend, schedule.id, {
-      cron: schedule.cron,
-      timezone: schedule.timezone,
+      cron: schedule.trigger.expression,
+      timezone: schedule.trigger.timezone,
       enabled: schedule.enabled,
-      taskTemplate: schedule.taskTemplate,
+      task: schedule.task,
       policy: schedule.policy,
       revision: schedule.revision,
     });
@@ -462,42 +468,51 @@ function toSchedule(row: ScheduleRow): ScheduleRecord {
   let policy: SchedulePolicy = DEFAULT_POLICY;
   if (row.policy_json) {
     try {
-      policy = schedulePolicySchema.parse(JSON.parse(row.policy_json));
+      const parsed = JSON.parse(row.policy_json) as Record<string, unknown>;
+      // Accept both V3 snake_case and legacy camelCase policy JSON.
+      policy = schedulePolicySchema.parse({
+        concurrency: parsed.concurrency,
+        misfire: parsed.misfire,
+        max_catchup_runs: parsed.max_catchup_runs ?? parsed.maxCatchupRuns ?? 1,
+      });
     } catch {
       policy = DEFAULT_POLICY;
     }
   }
+  const rawTask = JSON.parse(row.task_template_json) as unknown;
+  const task = createTaskSchema.parse(
+    withBackendId(
+      // stored task may already include backend_id
+      (rawTask && typeof rawTask === 'object' ? rawTask : {}) as CreateTaskInput,
+      row.backend_id,
+    ),
+  );
   return {
     id: row.id,
-    backendId: row.backend_id,
+    backend_id: row.backend_id,
     name: row.name,
-    cron: row.cron,
-    timezone: row.timezone,
+    trigger: {
+      type: 'cron',
+      expression: row.cron,
+      timezone: row.timezone,
+    },
     enabled: Boolean(row.enabled),
     revision: row.revision && row.revision > 0 ? row.revision : 1,
     policy,
-    taskTemplate: JSON.parse(row.task_template_json) as Schedule['taskTemplate'],
-    ...(row.idempotency_key ? { idempotencyKey: row.idempotency_key } : {}),
+    task,
+    ...(row.idempotency_key ? { idempotency_key: row.idempotency_key } : {}),
     ...(row.request_hash ? { requestHash: row.request_hash } : {}),
-    ...(row.last_run_at ? { lastRunAt: row.last_run_at } : {}),
-    ...(row.next_run_at ? { nextRunAt: row.next_run_at } : {}),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    ...(row.last_run_at ? { last_run_at: row.last_run_at } : {}),
+    ...(row.next_run_at ? { next_run_at: row.next_run_at } : {}),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
 /** Canonical hash of schedule create payload for idempotency_conflict. */
 export async function hashScheduleRequest(input: CreateScheduleInput): Promise<string> {
-  const canonical = {
-    backendId: input.backendId,
-    name: input.name,
-    cron: input.cron,
-    timezone: input.timezone ?? 'UTC',
-    enabled: input.enabled ?? true,
-    policy: input.policy ?? DEFAULT_POLICY,
-    taskTemplate: input.taskTemplate,
-  };
-  const data = new TextEncoder().encode(stableStringify(canonical));
+  const { idempotency_key: _drop, ...rest } = input;
+  const data = new TextEncoder().encode(stableStringify(rest));
   const digest = await crypto.subtle.digest('SHA-256', data);
   const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
   return `sha256:${hex}`;

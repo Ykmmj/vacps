@@ -64,9 +64,10 @@ export class TaskStore {
          ON CONFLICT(id) DO NOTHING`,
       )
       .run({
-        id: task.taskId,
-        bullJobId: task.taskId,
-        type: task.type,
+        id: task.task_id,
+        bullJobId: task.task_id,
+        // type column stores Schema v3 kind (command|shell|agent).
+        type: task.kind,
         profile: task.profile,
         inputJson: JSON.stringify(task),
         status,

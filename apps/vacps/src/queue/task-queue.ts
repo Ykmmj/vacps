@@ -9,9 +9,10 @@ import type { TaskGraphRunner } from '../graph/task-graph.js';
 import type { TaskStore } from '../storage/task-store.js';
 
 export interface ScheduleTrigger {
-  kind: 'schedule-trigger';
-  scheduleId: string;
-  taskTemplate: CreateTaskInput;
+  /** Discriminator for BullMQ schedule jobs (not a task kind). */
+  trigger_kind: 'schedule-trigger';
+  schedule_id: string;
+  task: CreateTaskInput;
 }
 
 type QueueData = TaskDispatch | ScheduleTrigger;
@@ -51,10 +52,10 @@ export class TaskQueue {
   async enqueue(task: TaskDispatch): Promise<void> {
     this.store.createTask(task, 'queued');
     await this.queue.add('task', task, {
-      jobId: task.taskId,
+      jobId: task.task_id,
       attempts: task.retry?.attempts ?? 1,
       ...(task.retry
-        ? { backoff: { type: 'fixed' as const, delay: task.retry.backoffSeconds * 1000 } }
+        ? { backoff: { type: 'fixed' as const, delay: task.retry.backoff_seconds * 1000 } }
         : {}),
       removeOnComplete: { age: 86_400, count: 200 },
       removeOnFail: { age: 604_800, count: 500 },
@@ -114,7 +115,7 @@ export class TaskQueue {
     cron: string;
     timezone: string;
     enabled: boolean;
-    taskTemplate: CreateTaskInput;
+    task: CreateTaskInput;
   }): Promise<void> {
     if (!input.enabled) {
       await this.queue.removeJobScheduler(input.id);
@@ -125,7 +126,11 @@ export class TaskQueue {
       { pattern: input.cron, tz: input.timezone },
       {
         name: 'schedule-trigger',
-        data: { kind: 'schedule-trigger', scheduleId: input.id, taskTemplate: input.taskTemplate },
+        data: {
+          trigger_kind: 'schedule-trigger',
+          schedule_id: input.id,
+          task: input.task,
+        },
         opts: {
           removeOnComplete: { age: 86_400, count: 200 },
           removeOnFail: { age: 604_800, count: 500 },
@@ -138,9 +143,14 @@ export class TaskQueue {
     return this.queue.getJobSchedulers();
   }
 
-  async runScheduleNow(input: { id: string; taskTemplate: CreateTaskInput }): Promise<string> {
+  async runScheduleNow(input: { id: string; task: CreateTaskInput }): Promise<string> {
     const taskId = randomUUID();
-    await this.enqueue({ ...input.taskTemplate, taskId, source: 'schedule', scheduleId: input.id });
+    await this.enqueue({
+      ...input.task,
+      task_id: taskId,
+      source: 'schedule',
+      schedule_id: input.id,
+    });
     return taskId;
   }
 
@@ -152,10 +162,10 @@ export class TaskQueue {
   private async process(job: Job<QueueData>): Promise<unknown> {
     const task = isScheduleTrigger(job.data)
       ? {
-          ...job.data.taskTemplate,
-          taskId: randomUUID(),
+          ...job.data.task,
+          task_id: randomUUID(),
           source: 'schedule' as const,
-          scheduleId: job.data.scheduleId,
+          schedule_id: job.data.schedule_id,
         }
       : job.data;
     this.store.createTask(task, 'queued');
@@ -164,5 +174,10 @@ export class TaskQueue {
 }
 
 function isScheduleTrigger(data: QueueData): data is ScheduleTrigger {
-  return 'kind' in data && data.kind === 'schedule-trigger';
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'trigger_kind' in data &&
+    (data as ScheduleTrigger).trigger_kind === 'schedule-trigger'
+  );
 }

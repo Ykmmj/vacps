@@ -361,16 +361,11 @@ export function createMcpServer(env: Env): McpServer {
     wrap(async (args) => {
       const parsed = tasksListInputSchema.parse(args);
       const offset = parsed.cursor ? decodeOffsetCursor(parsed.cursor) : 0;
-      // kind "command" is shell exec tasks — stored as type shell.
-      const type =
-        parsed.kind === 'agent' ? 'agent' : parsed.kind === 'shell' || parsed.kind === 'command'
-          ? 'shell'
-          : undefined;
       const page = await tasks.listPage({
         limit: parsed.limit ?? 50,
         offset,
         ...(parsed.backend_id ? { backendId: parsed.backend_id } : {}),
-        ...(type ? { type } : {}),
+        ...(parsed.kind ? { kind: parsed.kind } : {}),
         ...(parsed.status ? { status: parsed.status } : {}),
         ...(parsed.created_after ? { createdAfter: parsed.created_after } : {}),
       });
@@ -426,7 +421,7 @@ export function createMcpServer(env: Env): McpServer {
       return {
         schedule: snakeSchedule(created),
         idempotency: {
-          key: parsed.idempotency_key ?? created.idempotencyKey ?? null,
+          key: parsed.idempotency_key ?? created.idempotency_key ?? null,
           replayed: Boolean(created.reused),
           request_hash: created.requestHash ?? null,
         },
@@ -484,7 +479,7 @@ export function createMcpServer(env: Env): McpServer {
     wrap(async (args) => {
       const parsed = schedulesUpdateInputSchema.parse(args);
       const current = await schedules.get(parsed.schedule_id);
-      const patch = parseSchedulePatch(parsed, current.backendId);
+      const patch = parseSchedulePatch(parsed, current.backend_id);
       return { schedule: snakeSchedule(await schedules.patch(parsed.schedule_id, patch)) };
     }),
   );
@@ -1207,7 +1202,6 @@ function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unk
 function snakeTask(task: {
   id: string;
   backendId: string;
-  type: string;
   kind?: string | undefined;
   source?: string | undefined;
   profile?: string | undefined;
@@ -1226,8 +1220,7 @@ function snakeTask(task: {
   return {
     id: task.id,
     backend_id: task.backendId,
-    // Public kind only (command | shell | agent). Internal storage type is not exposed.
-    kind: task.kind ?? task.type,
+    kind: task.kind ?? 'command',
     ...(task.source ? { source: task.source } : {}),
     ...(task.profile ? { profile: task.profile } : {}),
     ...(task.name ? { name: task.name } : {}),
@@ -1246,145 +1239,38 @@ function snakeTask(task: {
   };
 }
 
+/** Schedule is already Schema v3 wire shape (snake_case); strip internal-only fields. */
 function snakeSchedule(schedule: {
   id: string;
-  backendId: string;
+  backend_id: string;
   name: string;
-  cron: string;
-  timezone: string;
+  trigger: { type: 'cron'; expression: string; timezone: string };
+  policy: { concurrency: string; misfire: string; max_catchup_runs: number };
   enabled: boolean;
-  revision?: number;
-  policy?: {
-    concurrency: string;
-    misfire: string;
-    maxCatchupRuns: number;
-  };
-  taskTemplate: unknown;
-  idempotencyKey?: string | undefined;
+  revision: number;
+  task: unknown;
+  idempotency_key?: string | undefined;
   requestHash?: string | undefined;
-  lastRunAt?: string | undefined;
-  nextRunAt?: string | undefined;
-  createdAt: string;
-  updatedAt: string;
-  reused?: boolean;
+  last_run_at?: string | undefined;
+  next_run_at?: string | undefined;
+  created_at: string;
+  updated_at: string;
 }) {
   return {
     id: schedule.id,
-    revision: schedule.revision ?? 1,
-    backend_id: schedule.backendId,
+    revision: schedule.revision,
+    backend_id: schedule.backend_id,
     name: schedule.name,
     enabled: schedule.enabled,
-    trigger: {
-      type: 'cron' as const,
-      expression: schedule.cron,
-      timezone: schedule.timezone,
-    },
-    policy: {
-      concurrency: schedule.policy?.concurrency ?? 'forbid',
-      misfire: schedule.policy?.misfire ?? 'run_once',
-      max_catchup_runs: schedule.policy?.maxCatchupRuns ?? 1,
-    },
-    task: publicScheduleTask(schedule.taskTemplate),
-    ...(schedule.idempotencyKey ? { idempotency_key: schedule.idempotencyKey } : {}),
+    trigger: schedule.trigger,
+    policy: schedule.policy,
+    task: schedule.task,
+    ...(schedule.idempotency_key ? { idempotency_key: schedule.idempotency_key } : {}),
     ...(schedule.requestHash ? { request_hash: schedule.requestHash } : {}),
-    ...(schedule.lastRunAt ? { last_run_at: schedule.lastRunAt } : {}),
-    ...(schedule.nextRunAt ? { next_run_at: schedule.nextRunAt } : {}),
-    created_at: schedule.createdAt,
-    updated_at: schedule.updatedAt,
-  };
-}
-
-/** Map internal CreateTaskInput → Schema v3 public task (kind command|shell|agent). */
-function publicScheduleTask(template: unknown): Record<string, unknown> {
-  if (!template || typeof template !== 'object') {
-    return { kind: 'unknown' };
-  }
-  const t = template as {
-    type?: string;
-    name?: string;
-    cwd?: string;
-    timeoutSeconds?: number;
-    environment?: Record<string, string>;
-    labels?: Record<string, string>;
-    shell?: {
-      mode?: string;
-      program?: string;
-      arguments?: string[];
-      interpreter?: string;
-      content?: string;
-    };
-    agent?: {
-      prompt?: string;
-      profile?: string;
-      maxSteps?: number;
-      permissions?: { shell?: boolean; network?: boolean; fileWrite?: boolean };
-    };
-    output?: {
-      previewMaxBytes?: number;
-      hardMaxBytes?: number;
-      retentionSeconds?: number;
-    };
-  };
-
-  const output =
-    t.output !== undefined
-      ? {
-          preview_max_bytes: t.output.previewMaxBytes,
-          hard_max_bytes: t.output.hardMaxBytes,
-          retention_seconds: t.output.retentionSeconds,
-        }
-      : undefined;
-
-  if (t.type === 'agent' && t.agent) {
-    return {
-      kind: 'agent',
-      ...(t.name ? { name: t.name } : {}),
-      prompt: t.agent.prompt,
-      ...(t.agent.profile ? { profile: t.agent.profile } : {}),
-      ...(t.agent.maxSteps !== undefined ? { max_steps: t.agent.maxSteps } : {}),
-      permissions: {
-        shell: Boolean(t.agent.permissions?.shell),
-        network: Boolean(t.agent.permissions?.network),
-        file_write: Boolean(t.agent.permissions?.fileWrite),
-      },
-      ...(t.cwd ? { working_directory: t.cwd } : {}),
-      ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
-      ...(t.environment ? { environment: t.environment } : {}),
-      ...(output ? { output } : {}),
-    };
-  }
-
-  if (t.shell?.mode === 'exec') {
-    return {
-      kind: 'command',
-      ...(t.name ? { name: t.name } : {}),
-      program: t.shell.program,
-      arguments: t.shell.arguments ?? [],
-      ...(t.cwd ? { working_directory: t.cwd } : {}),
-      ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
-      ...(t.environment ? { environment: t.environment } : {}),
-      ...(output ? { output } : {}),
-    };
-  }
-
-  if (t.shell?.mode === 'script') {
-    return {
-      kind: 'shell',
-      ...(t.name ? { name: t.name } : {}),
-      command: t.shell.content ?? '',
-      shell: t.shell.interpreter ?? '/bin/bash',
-      ...(t.cwd ? { working_directory: t.cwd } : {}),
-      ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
-      ...(t.environment ? { environment: t.environment } : {}),
-      ...(output ? { output } : {}),
-    };
-  }
-
-  return {
-    kind: t.type === 'agent' ? 'agent' : 'shell',
-    ...(t.name ? { name: t.name } : {}),
-    ...(t.cwd ? { working_directory: t.cwd } : {}),
-    ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
+    ...(schedule.last_run_at ? { last_run_at: schedule.last_run_at } : {}),
+    ...(schedule.next_run_at ? { next_run_at: schedule.next_run_at } : {}),
+    created_at: schedule.created_at,
+    updated_at: schedule.updated_at,
   };
 }
 

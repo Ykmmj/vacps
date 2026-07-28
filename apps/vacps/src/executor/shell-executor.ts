@@ -3,8 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 
-export interface ShellExecutionInput {
-  command: string;
+export type ShellExecutionInput = {
   cwd: string;
   environment?: NodeJS.ProcessEnv;
   timeoutSeconds: number;
@@ -13,7 +12,24 @@ export interface ShellExecutionInput {
   signal?: AbortSignal;
   /** In-memory capture cap; full output still streams to log files. */
   hardMaxBytes?: number;
-}
+} & (
+  | {
+      /** Schema v3 kind=command: argv spawn without shell. */
+      program: string;
+      arguments?: string[];
+      command?: never;
+      shell?: never;
+      loadUserEnvironment?: never;
+    }
+  | {
+      /** Schema v3 kind=shell (or agent tool steps): shell -lc/-c. */
+      command: string;
+      shell?: string;
+      loadUserEnvironment?: boolean;
+      program?: never;
+      arguments?: never;
+    }
+);
 
 export interface ShellExecutionResult {
   status: 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
@@ -32,12 +48,16 @@ export class ShellExecutor {
     ]);
     const stdoutFile = createWriteStream(input.stdoutPath, { flags: 'a' });
     const stderrFile = createWriteStream(input.stderrPath, { flags: 'a' });
-    const child = spawn('/bin/bash', ['-lc', input.command], {
-      cwd: input.cwd,
-      env: { ...process.env, ...input.environment },
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+
+    const child =
+      typeof input.program === 'string'
+        ? spawn(input.program, input.arguments ?? [], {
+            cwd: input.cwd,
+            env: { ...process.env, ...input.environment },
+            detached: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          })
+        : spawnShell(input);
 
     let stdout = '';
     let stderr = '';
@@ -61,11 +81,11 @@ export class ShellExecutor {
     };
     const timer = setTimeout(() => terminate('timed_out'), input.timeoutSeconds * 1000);
     input.signal?.addEventListener('abort', () => terminate('cancelled'), { once: true });
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout?.on('data', (chunk: Buffer) => {
       stdoutFile.write(chunk);
       stdout = append(stdout, chunk);
     });
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr?.on('data', (chunk: Buffer) => {
       stderrFile.write(chunk);
       stderr = append(stderr, chunk);
     });
@@ -92,4 +112,19 @@ export class ShellExecutor {
       stderr,
     };
   }
+}
+
+function spawnShell(
+  input: Extract<ShellExecutionInput, { command: string }>,
+): ReturnType<typeof spawn> {
+  const shell = input.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
+  const loadUser = shell === '/bin/sh' ? false : input.loadUserEnvironment !== false;
+  // bash -lc loads login + rc; bash -c / sh -c do not.
+  const shellArgs = shell === '/bin/bash' ? (loadUser ? ['-lc'] : ['-c']) : ['-c'];
+  return spawn(shell, [...shellArgs, input.command], {
+    cwd: input.cwd,
+    env: { ...process.env, ...input.environment },
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }

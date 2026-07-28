@@ -82,15 +82,18 @@ export async function createServer(input: {
       return reply
         .code(400)
         .send({ error: { code: 'invalid_task', message: parsed.error.message } });
-    if (parsed.data.backendId !== input.config.BACKEND_ID) {
+    if (parsed.data.backend_id !== input.config.BACKEND_ID) {
       return reply
         .code(409)
         .send({ error: { code: 'backend_mismatch', message: 'Task targets another backend.' } });
     }
     await input.queue.enqueue(parsed.data);
-    return reply
-      .code(202)
-      .send({ taskId: parsed.data.taskId, status: 'queued', backendId: parsed.data.backendId });
+    return reply.code(202).send({
+      task_id: parsed.data.task_id,
+      status: 'queued',
+      backend_id: parsed.data.backend_id,
+      kind: parsed.data.kind,
+    });
   });
 
   app.get('/tasks/:id', async (request, reply) => {
@@ -776,9 +779,13 @@ export async function createServer(input: {
       cron?: unknown;
       timezone?: unknown;
       enabled?: unknown;
+      /** Schema v3: task (not taskTemplate). */
+      task?: unknown;
       taskTemplate?: unknown;
     };
-    const template = createTaskSchema.safeParse(body.taskTemplate);
+    // Prefer V3 `task`; reject if only legacy taskTemplate is sent without task.
+    const rawTask = body.task ?? body.taskTemplate;
+    const template = createTaskSchema.safeParse(rawTask);
     if (
       !template.success ||
       typeof body.cron !== 'string' ||
@@ -794,7 +801,7 @@ export async function createServer(input: {
       cron: body.cron,
       timezone: body.timezone,
       enabled: body.enabled,
-      taskTemplate: template.data,
+      task: template.data,
     });
     return reply.code(204).send();
   });
@@ -807,21 +814,14 @@ export async function createServer(input: {
         cron: '0 0 1 1 *',
         timezone: 'UTC',
         enabled: false,
-        taskTemplate: {
-          type: 'shell',
-          backendId: input.config.BACKEND_ID,
-          cwd: '/tmp',
-          timeoutSeconds: 1,
-          profile: 'full',
-          shell: { mode: 'exec', program: 'true', arguments: [] },
-          output: {
-            captureStdout: true,
-            captureStderr: true,
-            previewMaxBytes: 8192,
-            retentionSeconds: 86_400,
-            hardMaxBytes: 10_485_760,
-          },
-        },
+        task: createTaskSchema.parse({
+          kind: 'command',
+          backend_id: input.config.BACKEND_ID,
+          program: 'true',
+          arguments: [],
+          working_directory: '/tmp',
+          timeout_seconds: 1,
+        }),
       });
     } catch (error) {
       // Best-effort: control plane still deletes its row even if Redis/scheduler is gone.
@@ -830,12 +830,12 @@ export async function createServer(input: {
     return reply.code(204).send();
   });
   app.post('/schedulers/:id/run', async (request) => {
-    const body = request.body as { taskTemplate: unknown };
-    const template = createTaskSchema.parse(body.taskTemplate);
+    const body = request.body as { task?: unknown; taskTemplate?: unknown };
+    const template = createTaskSchema.parse(body.task ?? body.taskTemplate);
     return {
-      taskId: await input.queue.runScheduleNow({
+      task_id: await input.queue.runScheduleNow({
         id: (request.params as { id: string }).id,
-        taskTemplate: template,
+        task: template,
       }),
     };
   });

@@ -1,73 +1,65 @@
 /**
- * Map Schema v3 MCP task/schedule tool inputs → internal CreateTaskInput / CreateScheduleInput.
- * Split create tools (create_command / create_shell / create_agent) — no legacy combined schema.
+ * Schema v3 MCP task/schedule inputs — same wire shape as @vacps/contracts.
+ * No type/mode translation; only page/list helpers and thin result builders.
  */
 import {
   createScheduleSchema,
   createTaskSchema,
-  schedulePolicySchema,
+  patchScheduleSchema,
+  scheduleTaskSchema,
+  withBackendId,
   type CreateScheduleInput,
   type CreateTaskInput,
   type PatchScheduleInput,
-  type SchedulePolicy,
 } from '@vacps/contracts';
 import { z } from 'zod';
 
 import {
-  argumentsSchema,
   backendIdSchema,
-  commandSchema,
   cursorSchema,
-  environmentSchema,
   idempotencyKeySchema,
-  labelsSchema,
   pageLimitSchema,
-  pathSchema,
-  programSchema,
   scheduleIdSchema,
   sha256Schema,
   taskIdSchema,
 } from './schema/defs.js';
 
-const outputOptionsMcp = z
-  .strictObject({
-    capture_stdout: z.boolean().optional(),
-    capture_stderr: z.boolean().optional(),
-    preview_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
-    retention_seconds: z.number().int().min(60).max(2_592_000).optional(),
-    hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
-  })
-  .optional();
+// ── Task create tools (identical to contracts createTaskSchema branches) ─
 
-const taskSharedFields = {
+const taskCreateShared = {
   backend_id: backendIdSchema,
   name: z.string().min(1).max(200).optional(),
-  working_directory: pathSchema.optional(),
+  working_directory: z.string().startsWith('/').max(4096).optional(),
   timeout_seconds: z.number().int().min(1).max(86_400),
-  environment: environmentSchema.optional(),
-  labels: labelsSchema.optional(),
-  output: outputOptionsMcp,
+  environment: z.record(z.string(), z.string().max(32_768)).optional(),
+  labels: z.record(z.string(), z.string().max(500)).optional(),
+  output: z
+    .strictObject({
+      capture_stdout: z.boolean().optional(),
+      capture_stderr: z.boolean().optional(),
+      preview_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
+      retention_seconds: z.number().int().min(60).max(2_592_000).optional(),
+      hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
+    })
+    .optional(),
   idempotency_key: idempotencyKeySchema.optional(),
 };
 
-/** Flat argv program task (maps to shell mode=exec). */
 export const tasksCreateCommandInputSchema = z.strictObject({
-  ...taskSharedFields,
-  program: programSchema,
-  arguments: argumentsSchema.optional(),
+  ...taskCreateShared,
+  program: z.string().min(1).max(4096),
+  arguments: z.array(z.string().max(100_000)).max(1000).optional(),
 });
 
-/** Shell string task (maps to shell mode=script with bash -lc by default). */
 export const tasksCreateShellInputSchema = z.strictObject({
-  ...taskSharedFields,
-  command: commandSchema,
+  ...taskCreateShared,
+  command: z.string().min(1).max(1_048_576),
   shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
   load_user_environment: z.boolean().optional(),
 });
 
-/** Agent prompt task. */
 export const tasksCreateAgentInputSchema = z.strictObject({
-  ...taskSharedFields,
+  ...taskCreateShared,
   prompt: z.string().min(1).max(1_048_576),
   profile: z.enum(['restricted', 'diagnostic', 'standard', 'privileged']).optional(),
   max_steps: z.number().int().min(1).max(1000).optional(),
@@ -104,62 +96,12 @@ export const tasksOutputReadInputSchema = z.strictObject({
   expected_stream_version: sha256Schema.optional(),
 });
 
-/** Mutating task ops (cancel/retry) may carry idempotency_key. */
 export const tasksIdInputSchema = z.strictObject({
   task_id: taskIdSchema,
   idempotency_key: idempotencyKeySchema.optional(),
 });
 
-const scheduleTaskCommand = z.strictObject({
-  kind: z.literal('command'),
-  name: z.string().min(1).max(200).optional(),
-  program: programSchema,
-  arguments: argumentsSchema.optional(),
-  working_directory: pathSchema.optional(),
-  environment: environmentSchema.optional(),
-  timeout_seconds: z.number().int().min(1).max(86_400),
-  output: outputOptionsMcp,
-  labels: labelsSchema.optional(),
-});
-
-const scheduleTaskShell = z.strictObject({
-  kind: z.literal('shell'),
-  name: z.string().min(1).max(200).optional(),
-  command: commandSchema,
-  shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
-  load_user_environment: z.boolean().optional(),
-  working_directory: pathSchema.optional(),
-  environment: environmentSchema.optional(),
-  timeout_seconds: z.number().int().min(1).max(86_400),
-  output: outputOptionsMcp,
-  labels: labelsSchema.optional(),
-});
-
-const scheduleTaskAgent = z.strictObject({
-  kind: z.literal('agent'),
-  name: z.string().min(1).max(200).optional(),
-  prompt: z.string().min(1).max(1_048_576),
-  profile: z.enum(['restricted', 'diagnostic', 'standard', 'privileged']).optional(),
-  max_steps: z.number().int().min(1).max(1000).optional(),
-  permissions: z
-    .strictObject({
-      shell: z.boolean().optional(),
-      network: z.boolean().optional(),
-      file_write: z.boolean().optional(),
-    })
-    .optional(),
-  working_directory: pathSchema.optional(),
-  environment: environmentSchema.optional(),
-  timeout_seconds: z.number().int().min(1).max(86_400),
-  output: outputOptionsMcp,
-  labels: labelsSchema.optional(),
-});
-
-const scheduleTaskSchema = z.discriminatedUnion('kind', [
-  scheduleTaskCommand,
-  scheduleTaskShell,
-  scheduleTaskAgent,
-]);
+// ── Schedules (same as createScheduleSchema / patchScheduleSchema) ──────
 
 export const schedulesCreateInputSchema = z.strictObject({
   backend_id: backendIdSchema,
@@ -177,7 +119,6 @@ export const schedulesCreateInputSchema = z.strictObject({
     })
     .optional(),
   enabled: z.boolean().optional(),
-  /** Task template — must NOT include backend_id (inherits schedule.backend_id). */
   task: scheduleTaskSchema,
   idempotency_key: idempotencyKeySchema.optional(),
 });
@@ -211,12 +152,10 @@ export const schedulesUpdateInputSchema = z.strictObject({
   idempotency_key: idempotencyKeySchema.optional(),
 });
 
-/** Read-only get — no idempotency_key. */
 export const schedulesGetInputSchema = z.strictObject({
   schedule_id: scheduleIdSchema,
 });
 
-/** Delete / run_now — may carry idempotency_key. */
 export const schedulesIdInputSchema = z.strictObject({
   schedule_id: scheduleIdSchema,
   idempotency_key: idempotencyKeySchema.optional(),
@@ -229,218 +168,151 @@ export const schedulesListInputSchema = z.strictObject({
   cursor: cursorSchema.optional(),
 });
 
-function mapOutput(output: z.infer<typeof outputOptionsMcp>) {
-  if (!output) return undefined;
-  return {
-    ...(typeof output.capture_stdout === 'boolean' ? { captureStdout: output.capture_stdout } : {}),
-    ...(typeof output.capture_stderr === 'boolean' ? { captureStderr: output.capture_stderr } : {}),
-    ...(typeof output.preview_max_bytes === 'number'
-      ? { previewMaxBytes: output.preview_max_bytes }
-      : {}),
-    ...(typeof output.retention_seconds === 'number'
-      ? { retentionSeconds: output.retention_seconds }
-      : {}),
-    ...(typeof output.hard_max_bytes === 'number' ? { hardMaxBytes: output.hard_max_bytes } : {}),
-  };
-}
-
-function baseTaskFields(input: {
-  backend_id: string;
-  name?: string | undefined;
-  working_directory?: string | undefined;
-  timeout_seconds: number;
-  environment?: Record<string, string> | undefined;
-  labels?: Record<string, string> | undefined;
-  output?: z.infer<typeof outputOptionsMcp>;
-  idempotency_key?: string | undefined;
-  profile?: string | undefined;
-}) {
-  return {
-    backendId: input.backend_id,
-    ...(input.name ? { name: input.name } : {}),
-    cwd: input.working_directory ?? '/tmp',
-    timeoutSeconds: input.timeout_seconds,
-    ...(input.profile ? { profile: input.profile } : {}),
-    ...(input.idempotency_key ? { idempotencyKey: input.idempotency_key } : {}),
-    ...(input.labels ? { labels: input.labels } : {}),
-    ...(input.environment ? { environment: input.environment } : {}),
-    ...(input.output ? { output: mapOutput(input.output) } : {}),
-  };
-}
-
+/** MCP create_command → contracts CreateTaskInput (kind already V3). */
 export function toCreateCommandTask(
   input: z.infer<typeof tasksCreateCommandInputSchema>,
 ): CreateTaskInput {
   return createTaskSchema.parse({
-    ...baseTaskFields(input),
-    type: 'shell',
-    shell: {
-      mode: 'exec',
-      program: input.program,
-      arguments: input.arguments ?? [],
-    },
+    kind: 'command',
+    backend_id: input.backend_id,
+    program: input.program,
+    arguments: input.arguments ?? [],
+    ...(input.name ? { name: input.name } : {}),
+    ...(input.working_directory ? { working_directory: input.working_directory } : {}),
+    timeout_seconds: input.timeout_seconds,
+    ...(input.environment ? { environment: input.environment } : {}),
+    ...(input.labels ? { labels: input.labels } : {}),
+    ...(input.output ? { output: input.output } : {}),
+    ...(input.idempotency_key ? { idempotency_key: input.idempotency_key } : {}),
   });
 }
 
 export function toCreateShellTask(
   input: z.infer<typeof tasksCreateShellInputSchema>,
 ): CreateTaskInput {
-  const shell = input.shell ?? '/bin/bash';
-  const loadUser = input.load_user_environment !== false;
-  // bash -lc loads login + rc; sh -c does not.
-  const interpreterArguments =
-    shell === '/bin/bash' ? (loadUser ? ['-lc'] : ['-c']) : loadUser ? ['-lc'] : ['-c'];
   return createTaskSchema.parse({
-    ...baseTaskFields(input),
-    type: 'shell',
-    shell: {
-      mode: 'script',
-      interpreter: shell,
-      interpreterArguments,
-      content: input.command,
-    },
+    kind: 'shell',
+    backend_id: input.backend_id,
+    command: input.command,
+    ...(input.shell ? { shell: input.shell } : {}),
+    ...(typeof input.load_user_environment === 'boolean'
+      ? { load_user_environment: input.load_user_environment }
+      : {}),
+    ...(input.name ? { name: input.name } : {}),
+    ...(input.working_directory ? { working_directory: input.working_directory } : {}),
+    timeout_seconds: input.timeout_seconds,
+    ...(input.environment ? { environment: input.environment } : {}),
+    ...(input.labels ? { labels: input.labels } : {}),
+    ...(input.output ? { output: input.output } : {}),
+    ...(input.idempotency_key ? { idempotency_key: input.idempotency_key } : {}),
   });
 }
 
 export function toCreateAgentTask(
   input: z.infer<typeof tasksCreateAgentInputSchema>,
 ): CreateTaskInput {
-  const permissions = input.permissions ?? {};
   return createTaskSchema.parse({
-    ...baseTaskFields({
-      ...input,
-      profile: input.profile ?? 'standard',
-    }),
-    type: 'agent',
-    agent: {
-      prompt: input.prompt,
-      ...(input.profile ? { profile: input.profile } : {}),
-      ...(input.max_steps !== undefined ? { maxSteps: input.max_steps } : {}),
-      permissions: {
-        shell: Boolean(permissions.shell),
-        network: Boolean(permissions.network),
-        fileWrite: Boolean(permissions.file_write),
-      },
-    },
+    kind: 'agent',
+    backend_id: input.backend_id,
+    prompt: input.prompt,
+    ...(input.profile ? { profile: input.profile } : {}),
+    ...(input.max_steps !== undefined ? { max_steps: input.max_steps } : {}),
+    ...(input.permissions
+      ? {
+          permissions: {
+            shell: Boolean(input.permissions.shell),
+            network: Boolean(input.permissions.network),
+            file_write: Boolean(input.permissions.file_write),
+          },
+        }
+      : {}),
+    ...(input.name ? { name: input.name } : {}),
+    ...(input.working_directory ? { working_directory: input.working_directory } : {}),
+    timeout_seconds: input.timeout_seconds,
+    ...(input.environment ? { environment: input.environment } : {}),
+    ...(input.labels ? { labels: input.labels } : {}),
+    ...(input.output ? { output: input.output } : {}),
+    ...(input.idempotency_key ? { idempotency_key: input.idempotency_key } : {}),
   });
 }
 
-function scheduleTaskToCreateTask(
-  backendId: string,
-  task: z.infer<typeof scheduleTaskSchema>,
-): CreateTaskInput {
-  if (task.kind === 'command') {
-    return toCreateCommandTask({
-      backend_id: backendId,
-      name: task.name,
-      program: task.program,
-      arguments: task.arguments,
-      working_directory: task.working_directory,
-      environment: task.environment,
-      timeout_seconds: task.timeout_seconds,
-      output: task.output,
-      labels: task.labels,
-    });
-  }
-  if (task.kind === 'shell') {
-    return toCreateShellTask({
-      backend_id: backendId,
-      name: task.name,
-      command: task.command,
-      shell: task.shell,
-      load_user_environment: task.load_user_environment,
-      working_directory: task.working_directory,
-      environment: task.environment,
-      timeout_seconds: task.timeout_seconds,
-      output: task.output,
-      labels: task.labels,
-    });
-  }
-  return toCreateAgentTask({
-    backend_id: backendId,
-    name: task.name,
-    prompt: task.prompt,
-    profile: task.profile,
-    max_steps: task.max_steps,
-    permissions: task.permissions,
-    working_directory: task.working_directory,
-    environment: task.environment,
-    timeout_seconds: task.timeout_seconds,
-    output: task.output,
-    labels: task.labels,
-  });
-}
-
-function mapPolicy(
-  policy?: {
-    concurrency?: 'allow' | 'forbid' | 'replace' | 'queue' | undefined;
-    misfire?: 'skip' | 'run_once' | 'catch_up' | undefined;
-    max_catchup_runs?: number | undefined;
-  },
-): SchedulePolicy {
-  return schedulePolicySchema.parse({
-    concurrency: policy?.concurrency ?? 'forbid',
-    misfire: policy?.misfire ?? 'run_once',
-    maxCatchupRuns: policy?.max_catchup_runs ?? 1,
-  });
-}
-
-/** Map Schema v3 schedules.create input → internal CreateScheduleInput. */
+/** MCP schedules.create → contracts CreateScheduleInput (same shape). */
 export function parseScheduleCreate(
   input: z.infer<typeof schedulesCreateInputSchema>,
 ): CreateScheduleInput {
-  // Task template must not re-specify backend; inherit schedule.backend_id.
-  const taskTemplate = scheduleTaskToCreateTask(input.backend_id, input.task);
   return createScheduleSchema.parse({
-    backendId: input.backend_id,
+    backend_id: input.backend_id,
     name: input.name,
-    cron: input.trigger.expression,
-    timezone: input.trigger.timezone ?? 'UTC',
+    trigger: {
+      type: 'cron' as const,
+      expression: input.trigger.expression,
+      timezone: input.trigger.timezone ?? 'UTC',
+    },
+    ...(input.policy
+      ? {
+          policy: {
+            ...(input.policy.concurrency ? { concurrency: input.policy.concurrency } : {}),
+            ...(input.policy.misfire ? { misfire: input.policy.misfire } : {}),
+            ...(input.policy.max_catchup_runs !== undefined
+              ? { max_catchup_runs: input.policy.max_catchup_runs }
+              : {}),
+          },
+        }
+      : {}),
     enabled: input.enabled ?? true,
-    policy: mapPolicy(input.policy ?? undefined),
-    taskTemplate,
-    ...(input.idempotency_key ? { idempotencyKey: input.idempotency_key } : {}),
+    task: input.task,
+    ...(input.idempotency_key ? { idempotency_key: input.idempotency_key } : {}),
   });
 }
 
-/** Map Schema v3 schedules.update input → internal PatchScheduleInput. */
+/** MCP schedules.update → contracts PatchScheduleInput. */
 export function parseSchedulePatch(
   input: z.infer<typeof schedulesUpdateInputSchema>,
-  backendId: string,
+  _backendId: string,
 ): PatchScheduleInput {
-  const changes: PatchScheduleInput['changes'] = {};
-  if (input.changes.name !== undefined) changes.name = input.changes.name;
-  if (input.changes.enabled !== undefined) changes.enabled = input.changes.enabled;
-  if (input.changes.trigger?.expression) changes.cron = input.changes.trigger.expression;
-  if (input.changes.trigger?.timezone) changes.timezone = input.changes.trigger.timezone;
-  if (input.changes.policy) {
-    changes.policy = {
-      ...(input.changes.policy.concurrency
-        ? { concurrency: input.changes.policy.concurrency }
-        : {}),
-      ...(input.changes.policy.misfire ? { misfire: input.changes.policy.misfire } : {}),
-      ...(input.changes.policy.max_catchup_runs !== undefined
-        ? { maxCatchupRuns: input.changes.policy.max_catchup_runs }
-        : {}),
-    };
-  }
-  if (input.changes.task) {
-    changes.taskTemplate = scheduleTaskToCreateTask(backendId, input.changes.task);
-  }
-  return {
+  return patchScheduleSchema.parse({
     ...(input.expected_revision !== undefined
-      ? { expectedRevision: input.expected_revision }
+      ? { expected_revision: input.expected_revision }
       : {}),
-    changes,
-    ...(input.idempotency_key ? { idempotencyKey: input.idempotency_key } : {}),
-  };
+    changes: {
+      ...(input.changes.name !== undefined ? { name: input.changes.name } : {}),
+      ...(input.changes.enabled !== undefined ? { enabled: input.changes.enabled } : {}),
+      ...(input.changes.trigger
+        ? {
+            trigger: {
+              ...(input.changes.trigger.type ? { type: input.changes.trigger.type } : {}),
+              ...(input.changes.trigger.expression
+                ? { expression: input.changes.trigger.expression }
+                : {}),
+              ...(input.changes.trigger.timezone
+                ? { timezone: input.changes.trigger.timezone }
+                : {}),
+            },
+          }
+        : {}),
+      ...(input.changes.policy
+        ? {
+            policy: {
+              ...(input.changes.policy.concurrency
+                ? { concurrency: input.changes.policy.concurrency }
+                : {}),
+              ...(input.changes.policy.misfire ? { misfire: input.changes.policy.misfire } : {}),
+              ...(input.changes.policy.max_catchup_runs !== undefined
+                ? { max_catchup_runs: input.changes.policy.max_catchup_runs }
+                : {}),
+            },
+          }
+        : {}),
+      ...(input.changes.task ? { task: input.changes.task } : {}),
+    },
+    ...(input.idempotency_key ? { idempotency_key: input.idempotency_key } : {}),
+  });
 }
 
 export function taskCreateResult(
   created: {
     id: string;
     backendId: string;
-    type: string;
     kind?: string;
     status: string;
     createdAt: string;
@@ -451,10 +323,9 @@ export function taskCreateResult(
     requestHash?: string;
   },
   inputKey?: string | null,
-  /** Public kind override (command | shell | agent). */
   publicKind?: 'command' | 'shell' | 'agent',
 ) {
-  const kind = publicKind ?? created.kind ?? created.type;
+  const kind = publicKind ?? created.kind ?? 'command';
   return {
     task: {
       id: created.id,
@@ -480,3 +351,5 @@ export function taskCreateResult(
     },
   };
 }
+
+export { withBackendId, createTaskSchema };
