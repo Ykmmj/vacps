@@ -576,110 +576,31 @@ export async function createServer(input: {
     }
   });
 
-  // Compatibility alias for older control planes.
-  app.post('/exec/bash', async (request, reply) => {
+  // Schema v3: flat process start tools (no mode oneOf, no /process/start, no /exec/bash).
+  app.post('/process/start_command', async (request, reply) => {
     const body = request.body as Record<string, unknown>;
-    if (typeof body.command !== 'string' || !body.command.trim())
+    if (typeof body.program !== 'string' || !body.program) {
       return reply
         .code(400)
-        .send({ error: { code: 'validation_error', message: 'command is required.' } });
+        .send({ error: { code: 'validation_error', message: 'program is required.' } });
+    }
+    if (typeof body.command === 'string' || body.command !== undefined) {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'command is not allowed on start_command.' },
+      });
+    }
+    if (body.mode !== undefined) {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'mode is not accepted; use start_command/start_shell.' },
+      });
+    }
+    const hardErr = validateHardMaxBytes(body);
+    if (hardErr) return reply.code(400).send({ error: hardErr });
     try {
       const result = await processes.exec({
-        toolName: 'shell.exec',
-        command: body.command,
-        workingDirectory: typeof body.cwd === 'string' ? body.cwd : undefined,
-        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
-        yieldTimeMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
-        stdoutMaxBytes: 30_000,
-        stderrMaxBytes: 30_000,
-        closeStdin: true,
-      });
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        status: result.status,
-        exit_code: result.exit_code,
-        signal: result.signal,
-        timed_out: result.timed_out,
-        stdout_preview: result.stdout.preview,
-        stderr_preview: result.stderr.preview,
-        stdout_truncated: result.stdout.truncated,
-        stderr_truncated: result.stderr.truncated,
-        stdout_bytes: result.stdout.bytes,
-        stderr_bytes: result.stderr.bytes,
-        process_id: result.process_id,
-        shell_id: null,
-      };
-    } catch (error) {
-      return runtimeError(reply, error);
-    }
-  });
-
-  app.post('/process/start', async (request, reply) => {
-    const body = request.body as Record<string, unknown>;
-    // Schema v2: mode is required (exec | shell). Legacy program-only form is rejected.
-    const mode = body.mode === 'exec' || body.mode === 'shell' ? body.mode : undefined;
-    if (!mode) {
-      return reply.code(400).send({
-        error: {
-          code: 'validation_error',
-          message: 'mode is required and must be "exec" or "shell".',
-        },
-      });
-    }
-    const hasProgram = typeof body.program === 'string' && body.program.length > 0;
-    const hasCommand = typeof body.command === 'string' && body.command.length > 0;
-    if (mode === 'exec') {
-      if (!hasProgram || hasCommand) {
-        return reply.code(400).send({
-          error: {
-            code: 'validation_error',
-            message: 'mode=exec requires program and forbids command.',
-          },
-        });
-      }
-    } else {
-      if (!hasCommand || hasProgram || Array.isArray(body.arguments)) {
-        return reply.code(400).send({
-          error: {
-            code: 'validation_error',
-            message: 'mode=shell requires command and forbids program/arguments.',
-          },
-        });
-      }
-    }
-    if (
-      body.stdout_hard_max_bytes !== undefined &&
-      (typeof body.stdout_hard_max_bytes !== 'number' ||
-        body.stdout_hard_max_bytes < 0 ||
-        body.stdout_hard_max_bytes > 1_073_741_824)
-    ) {
-      return reply.code(400).send({
-        error: {
-          code: 'validation_error',
-          message: 'stdout_hard_max_bytes must be 0..1073741824.',
-        },
-      });
-    }
-    if (
-      body.stderr_hard_max_bytes !== undefined &&
-      (typeof body.stderr_hard_max_bytes !== 'number' ||
-        body.stderr_hard_max_bytes < 0 ||
-        body.stderr_hard_max_bytes > 1_073_741_824)
-    ) {
-      return reply.code(400).send({
-        error: {
-          code: 'validation_error',
-          message: 'stderr_hard_max_bytes must be 0..1073741824.',
-        },
-      });
-    }
-    try {
-      const result = await processes.exec({
-        toolName: 'process.start',
-        program: hasProgram ? String(body.program) : undefined,
+        toolName: 'process.start_command',
+        program: body.program,
         arguments: Array.isArray(body.arguments) ? body.arguments.map(String) : undefined,
-        command: hasCommand ? String(body.command) : undefined,
         workingDirectory:
           typeof body.working_directory === 'string' ? body.working_directory : undefined,
         environment:
@@ -697,13 +618,78 @@ export async function createServer(input: {
             ? body.stderr_hard_max_bytes
             : 100 * 1024 * 1024,
         tty: body.tty === true,
-        // Shell mode defaults to agent login env; exec mode never uses a shell.
-        loadUserEnvironment: hasCommand ? body.load_user_environment !== false : false,
-        shell: hasCommand ? (body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash') : undefined,
+        loadUserEnvironment: false,
         idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
         closeStdin: body.tty === true ? false : true,
       });
-      // Full Process Snapshot — same shape as command.exec / shell.exec.
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/start_shell', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.command !== 'string' || !body.command.trim()) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'command is required.' } });
+    }
+    if (typeof body.program === 'string' || body.program !== undefined) {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'program is not allowed on start_shell.' },
+      });
+    }
+    if (Array.isArray(body.arguments)) {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'arguments is not allowed on start_shell.' },
+      });
+    }
+    if (body.mode !== undefined) {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'mode is not accepted; use start_command/start_shell.' },
+      });
+    }
+    const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
+    const loadUserEnvironment =
+      shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    if (shell === '/bin/sh' && body.load_user_environment === true) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message:
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or omit/false.',
+        },
+      });
+    }
+    const hardErr = validateHardMaxBytes(body);
+    if (hardErr) return reply.code(400).send({ error: hardErr });
+    try {
+      const result = await processes.exec({
+        toolName: 'process.start_shell',
+        command: body.command,
+        shell,
+        workingDirectory:
+          typeof body.working_directory === 'string' ? body.working_directory : undefined,
+        environment:
+          body.environment && typeof body.environment === 'object'
+            ? (body.environment as Record<string, string>)
+            : undefined,
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
+        yieldTimeMs: 50,
+        hardMaxStdout:
+          typeof body.stdout_hard_max_bytes === 'number'
+            ? body.stdout_hard_max_bytes
+            : 100 * 1024 * 1024,
+        hardMaxStderr:
+          typeof body.stderr_hard_max_bytes === 'number'
+            ? body.stderr_hard_max_bytes
+            : 100 * 1024 * 1024,
+        tty: body.tty === true,
+        loadUserEnvironment,
+        idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
+        closeStdin: body.tty === true ? false : true,
+      });
       return { ok: true, ...result };
     } catch (error) {
       return runtimeError(reply, error);
@@ -1051,6 +1037,22 @@ async function probeAgentEnvironment(): Promise<{
     bashrc_path: bashrc,
     notes,
   };
+}
+
+function validateHardMaxBytes(
+  body: Record<string, unknown>,
+): { code: string; message: string } | null {
+  for (const key of ['stdout_hard_max_bytes', 'stderr_hard_max_bytes'] as const) {
+    const value = body[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || value < 0 || value > 1_073_741_824) {
+      return {
+        code: 'validation_error',
+        message: `${key} must be 0..1073741824.`,
+      };
+    }
+  }
+  return null;
 }
 
 function runtimeError(

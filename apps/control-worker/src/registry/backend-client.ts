@@ -183,11 +183,22 @@ export class BackendClient {
     });
   }
 
-  async processStart(
+  async processStartCommand(
     backend: Pick<Backend, 'baseUrl'>,
     body: Record<string, unknown>,
   ): Promise<unknown> {
-    return this.request(backend, '/process/start', {
+    return this.request(backend, '/process/start_command', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeoutMs: 30_000,
+    });
+  }
+
+  async processStartShell(
+    backend: Pick<Backend, 'baseUrl'>,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request(backend, '/process/start_shell', {
       method: 'POST',
       body: JSON.stringify(body),
       timeoutMs: 30_000,
@@ -220,27 +231,6 @@ export class BackendClient {
     return this.request(backend, '/process/terminate', {
       method: 'POST',
       body: JSON.stringify(body),
-    });
-  }
-
-  async bash(
-    backend: Pick<Backend, 'baseUrl'>,
-    input: {
-      command: string;
-      timeoutMs?: number;
-      cwd?: string;
-      description?: string;
-    },
-  ): Promise<unknown> {
-    return this.request(backend, '/exec/bash', {
-      method: 'POST',
-      body: JSON.stringify({
-        command: input.command,
-        ...(input.timeoutMs !== undefined ? { timeout_ms: input.timeoutMs } : {}),
-        ...(input.cwd ? { cwd: input.cwd } : {}),
-        ...(input.description ? { description: input.description } : {}),
-      }),
-      timeoutMs: Math.min((input.timeoutMs ?? 120_000) + 5_000, 130_000),
     });
   }
 
