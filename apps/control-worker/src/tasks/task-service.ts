@@ -110,12 +110,65 @@ export class TaskService {
     return this.get(taskId);
   }
 
-  async list(limit = 50): Promise<TaskIndex[]> {
+  async list(
+    query:
+      | number
+      | {
+          limit?: number;
+          offset?: number;
+          backendId?: string;
+          type?: 'shell' | 'agent';
+          status?: string;
+          createdAfter?: string;
+        } = 50,
+  ): Promise<TaskIndex[]> {
+    // Back-compat: list(50)
+    const opts = typeof query === 'number' ? { limit: query } : query;
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const clauses: string[] = [];
+    const binds: unknown[] = [];
+    if (opts.backendId) {
+      clauses.push('backend_id = ?');
+      binds.push(opts.backendId);
+    }
+    if (opts.type) {
+      clauses.push('type = ?');
+      binds.push(opts.type);
+    }
+    if (opts.status) {
+      clauses.push('status = ?');
+      binds.push(opts.status);
+    }
+    if (opts.createdAfter) {
+      clauses.push('created_at >= ?');
+      binds.push(opts.createdAfter);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = await this.db
-      .prepare('SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?')
-      .bind(Math.min(Math.max(limit, 1), 200))
+      .prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .bind(...binds, limit, offset)
       .all<TaskRow>();
     return rows.results.map(toTaskIndex);
+  }
+
+  async listPage(query: {
+    limit?: number;
+    offset?: number;
+    backendId?: string;
+    type?: 'shell' | 'agent';
+    status?: string;
+    createdAfter?: string;
+  } = {}): Promise<{ tasks: TaskIndex[]; returned_count: number; next_offset: number | null }> {
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = Math.max(query.offset ?? 0, 0);
+    const tasks = await this.list({ ...query, limit: limit + 1, offset });
+    const page = tasks.slice(0, limit);
+    return {
+      tasks: page,
+      returned_count: page.length,
+      next_offset: tasks.length > limit ? offset + page.length : null,
+    };
   }
 
   async get(id: string): Promise<TaskIndex> {

@@ -133,6 +133,30 @@ describe('MCP server tools', () => {
     expect(caps, 'vacps.capabilities.get must be advertised in tools/list').toBeTruthy();
     expect(caps?.annotations?.readOnlyHint).toBe(true);
 
+    // P2 split task create tools
+    for (const name of [
+      'vacps.tasks.create_command',
+      'vacps.tasks.create_shell',
+      'vacps.tasks.create_agent',
+    ]) {
+      const tool = tools.find((item) => item.name === name);
+      expect(tool, `${name} must be advertised`).toBeTruthy();
+      expect(tool?.annotations?.destructiveHint).toBe(true);
+    }
+    const legacyCreate = tools.find((tool) => tool.name === 'vacps.tasks.create');
+    expect(legacyCreate?.description?.toLowerCase()).toContain('deprecated');
+
+    const scheduleCreate = tools.find((tool) => tool.name === 'vacps.schedules.create');
+    const scheduleSchema = scheduleCreate?.inputSchema as {
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(scheduleSchema.properties?.trigger).toBeTruthy();
+    expect(scheduleSchema.properties?.task).toBeTruthy();
+    expect(scheduleSchema.required).toEqual(
+      expect.arrayContaining(['backend_id', 'name', 'trigger', 'task']),
+    );
+
     const { publicToolJsonSchemas, MCP_PROTOCOL_VERSION } = await import(
       '../src/mcp/tool-schemas.js'
     );
