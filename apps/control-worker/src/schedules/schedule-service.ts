@@ -19,7 +19,7 @@ interface ScheduleRow {
   name: string;
   cron: string;
   timezone: string;
-  task_template_json: string;
+  task_json: string;
   enabled: number;
   revision?: number | null;
   policy_json?: string | null;
@@ -129,7 +129,7 @@ export class ScheduleService {
       await this.db
         .prepare(
           `INSERT INTO schedules
-            (id, backend_id, name, cron, timezone, task_template_json, enabled, revision, policy_json, idempotency_key, request_hash, created_at, updated_at)
+            (id, backend_id, name, cron, timezone, task_json, enabled, revision, policy_json, idempotency_key, request_hash, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
         )
         .bind(
@@ -249,7 +249,7 @@ export class ScheduleService {
 
     const result = await this.db
       .prepare(
-        `UPDATE schedules SET name = ?, cron = ?, timezone = ?, task_template_json = ?, enabled = ?,
+        `UPDATE schedules SET name = ?, cron = ?, timezone = ?, task_json = ?, enabled = ?,
            revision = ?, policy_json = ?, updated_at = ?
          WHERE id = ? AND revision = ?`,
       )
@@ -479,7 +479,7 @@ function toSchedule(row: ScheduleRow): ScheduleRecord {
       policy = DEFAULT_POLICY;
     }
   }
-  const rawTask = JSON.parse(row.task_template_json) as unknown;
+  const rawTask = JSON.parse(row.task_json) as unknown;
   const task = createTaskSchema.parse(
     withBackendId(
       // stored task may already include backend_id
