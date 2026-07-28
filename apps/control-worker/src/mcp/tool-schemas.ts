@@ -28,11 +28,12 @@ import {
 } from './schema/defs.js';
 
 /**
- * Canonical tool input schemas (MCP Schema v2).
- * Used for MCP registerTool (tools/list) and runtime parse.
+ * Canonical tool input schemas (MCP Schema v3).
+ * Single source for MCP registerTool (tools/list) and runtime parse.
+ * No dual host/runtime schemas; no legacy tool inputs.
  */
-export const MCP_PROTOCOL_VERSION = '0.4.6';
-export const TOOL_SCHEMA_REVISION = '2026-07-28-schema-v2-stream-details';
+export const MCP_PROTOCOL_VERSION = '0.5.0';
+export const TOOL_SCHEMA_REVISION = '2026-07-29-schema-v3';
 
 // ── Backends ──────────────────────────────────────────────────────────
 
@@ -98,117 +99,34 @@ const processStartShared = {
   stdout_hard_max_bytes: hardMaxBytesSchema.optional(),
   stderr_hard_max_bytes: hardMaxBytesSchema.optional(),
   idempotency_key: idempotencyKeySchema.optional(),
-  load_user_environment: z.boolean().optional(),
-  shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
 };
 
-/**
- * Runtime + CallTool validation.
- * mode is required: exec | shell only (legacy XOR without mode removed).
- */
-export const processStartInputSchema = z
+/** Flat argv process start (Schema v3 — no mode oneOf). */
+export const processStartCommandInputSchema = z.strictObject({
+  ...processStartShared,
+  program: programSchema,
+  arguments: argumentsSchema.optional(),
+});
+
+/** Shell-string process start (Schema v3 — no mode oneOf). */
+export const processStartShellInputSchema = z
   .object({
     ...processStartShared,
-    mode: z.enum(['exec', 'shell']),
-    program: programSchema.optional(),
-    arguments: argumentsSchema.optional(),
-    command: commandSchema.optional(),
+    command: commandSchema,
+    shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
+    load_user_environment: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.mode === 'exec') {
-      if (!value.program) {
-        context.addIssue({
-          code: 'custom',
-          message: 'mode=exec requires program.',
-          path: ['program'],
-        });
-      }
-      if (value.command !== undefined) {
-        context.addIssue({
-          code: 'custom',
-          message: 'mode=exec forbids command.',
-          path: ['command'],
-        });
-      }
-      return;
-    }
-    // mode === 'shell'
-    if (!value.command) {
-      context.addIssue({
-        code: 'custom',
-        message: 'mode=shell requires command.',
-        path: ['command'],
-      });
-    }
-    if (value.program !== undefined) {
-      context.addIssue({
-        code: 'custom',
-        message: 'mode=shell forbids program.',
-        path: ['program'],
-      });
-    }
-    if (value.arguments !== undefined) {
-      context.addIssue({
-        code: 'custom',
-        message: 'mode=shell forbids arguments.',
-        path: ['arguments'],
-      });
-    }
     if (value.shell === '/bin/sh' && value.load_user_environment === true) {
       context.addIssue({
         code: 'custom',
-        message: 'load_user_environment=true is not supported with shell=/bin/sh.',
+        message:
+          'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or set false.',
         path: ['load_user_environment'],
       });
     }
   });
-
-/**
- * Advertised JSON Schema for tools/list — mode=exec|shell only (no legacy branches).
- * MCP SDK cannot emit this oneOf from Zod superRefine; tools/list is patched.
- */
-export const processStartListJsonSchema: Record<string, unknown> = {
-  $schema: 'https://json-schema.org/draft/2020-12/schema',
-  type: 'object',
-  properties: {
-    backend_id: { type: 'string', minLength: 1, maxLength: 128 },
-    mode: { type: 'string', enum: ['exec', 'shell'] },
-    program: { type: 'string', minLength: 1, maxLength: 4096 },
-    arguments: {
-      type: 'array',
-      maxItems: 1000,
-      items: { type: 'string', maxLength: 100_000 },
-    },
-    command: { type: 'string', minLength: 1, maxLength: 262_144 },
-    shell: { type: 'string', enum: ['/bin/bash', '/bin/sh'] },
-    load_user_environment: { type: 'boolean' },
-    working_directory: { type: 'string', minLength: 1, maxLength: 4096 },
-    environment: {
-      type: 'object',
-      additionalProperties: { type: 'string', maxLength: 65_536 },
-    },
-    tty: { type: 'boolean' },
-    timeout_ms: { type: 'integer', minimum: 1, maximum: 3_600_000 },
-    stdout_hard_max_bytes: { type: 'integer', minimum: 0, maximum: 1_073_741_824 },
-    stderr_hard_max_bytes: { type: 'integer', minimum: 0, maximum: 1_073_741_824 },
-    idempotency_key: { type: 'string', minLength: 1, maxLength: 128 },
-  },
-  required: ['backend_id', 'mode'],
-  oneOf: [
-    {
-      properties: { mode: { const: 'exec' } },
-      required: ['mode', 'program'],
-      not: { required: ['command'] },
-    },
-    {
-      properties: { mode: { const: 'shell' } },
-      required: ['mode', 'command'],
-      not: { anyOf: [{ required: ['program'] }, { required: ['arguments'] }] },
-    },
-  ],
-  additionalProperties: false,
-};
 
 export const processReadInputSchema = z.strictObject({
   backend_id: backendIdSchema,
@@ -380,19 +298,36 @@ export const gitApplyInputSchema = z.strictObject({
 export function publicToolJsonSchemas(): Record<string, unknown> {
   return {
     tool_schema_revision: TOOL_SCHEMA_REVISION,
-    tool_schema_version: '2.0',
+    tool_schema_version: '3.0',
     mcp_server_version: MCP_PROTOCOL_VERSION,
-    schema_version: '2.0',
+    schema_version: '3.0',
     $schema: 'https://json-schema.org/draft/2020-12/schema',
     $defs: publicDefsJson(),
     tools: {
       'vacps.backends.list': z.toJSONSchema(backendsListInputSchema),
+      'vacps.backends.get_status': z.toJSONSchema(backendsGetStatusInputSchema),
+      'vacps.capabilities.get': z.toJSONSchema(capabilitiesGetInputSchema),
       'vacps.command.exec': z.toJSONSchema(commandExecInputSchema),
       'vacps.shell.exec': z.toJSONSchema(shellExecInputSchema),
-      'vacps.process.start': processStartListJsonSchema,
-      'vacps.files.write': z.toJSONSchema(filesWriteInputSchema),
+      'vacps.process.start_command': z.toJSONSchema(processStartCommandInputSchema),
+      'vacps.process.start_shell': z.toJSONSchema(processStartShellInputSchema),
+      'vacps.process.read': z.toJSONSchema(processReadInputSchema),
+      'vacps.process.write': z.toJSONSchema(processWriteInputSchema),
+      'vacps.process.terminate': z.toJSONSchema(processTerminateInputSchema),
+      'vacps.files.stat': z.toJSONSchema(filesStatInputSchema),
+      'vacps.files.read': z.toJSONSchema(filesReadInputSchema),
+      'vacps.files.list': z.toJSONSchema(filesListInputSchema),
+      'vacps.files.glob': z.toJSONSchema(filesGlobInputSchema),
       'vacps.files.grep': z.toJSONSchema(filesGrepInputSchema),
-      'vacps.capabilities.get': z.toJSONSchema(capabilitiesGetInputSchema),
+      'vacps.files.mkdir': z.toJSONSchema(filesMkdirInputSchema),
+      'vacps.files.write': z.toJSONSchema(filesWriteInputSchema),
+      'vacps.files.edit': z.toJSONSchema(filesEditInputSchema),
+      'vacps.files.move': z.toJSONSchema(filesMoveInputSchema),
+      'vacps.files.delete': z.toJSONSchema(filesDeleteInputSchema),
+      'vacps.files.apply_patch': z.toJSONSchema(filesApplyPatchInputSchema),
+      'vacps.git.status': z.toJSONSchema(gitStatusInputSchema),
+      'vacps.git.diff': z.toJSONSchema(gitDiffInputSchema),
+      'vacps.git.apply': z.toJSONSchema(gitApplyInputSchema),
     },
   };
 }

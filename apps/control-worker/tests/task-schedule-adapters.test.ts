@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  parseScheduleCreateV2,
+  parseScheduleCreate,
   parseSchedulePatch,
   toCreateAgentTask,
   toCreateCommandTask,
@@ -11,6 +11,7 @@ import {
   tasksCreateAgentInputSchema,
   schedulesCreateInputSchema,
   schedulesUpdateInputSchema,
+  schedulesGetInputSchema,
 } from '../src/mcp/task-schedule-adapters.js';
 
 describe('task create adapters', () => {
@@ -81,7 +82,7 @@ describe('schedule adapters', () => {
       },
       idempotency_key: 'schedule-001',
     });
-    const created = parseScheduleCreateV2(parsed);
+    const created = parseScheduleCreate(parsed);
     expect(created.backendId).toBe('backend-01');
     expect(created.cron).toBe('0 2 * * *');
     expect(created.taskTemplate.backendId).toBe('backend-01');
@@ -102,5 +103,43 @@ describe('schedule adapters', () => {
     expect(patch.expectedRevision).toBe(3);
     expect(patch.changes.enabled).toBe(false);
     expect(patch.changes.cron).toBe('0 3 * * *');
+  });
+
+  it('rejects legacy schedule create fields', () => {
+    expect(() =>
+      schedulesCreateInputSchema.parse({
+        backend_id: 'backend-01',
+        name: 'legacy',
+        cron: '0 2 * * *',
+        task_template: { type: 'shell', timeout_seconds: 60 },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects legacy schedule update change fields', () => {
+    expect(() =>
+      schedulesUpdateInputSchema.parse({
+        schedule_id: '00000000-0000-4000-8000-000000000001',
+        changes: {
+          cron: '0 3 * * *',
+          task_template: { type: 'shell' },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('schedules.get has no idempotency_key', () => {
+    const parsed = schedulesGetInputSchema.parse({
+      schedule_id: '00000000-0000-4000-8000-000000000001',
+    });
+    expect(parsed).toEqual({
+      schedule_id: '00000000-0000-4000-8000-000000000001',
+    });
+    expect(() =>
+      schedulesGetInputSchema.parse({
+        schedule_id: '00000000-0000-4000-8000-000000000001',
+        idempotency_key: 'should-fail',
+      }),
+    ).toThrow();
   });
 });

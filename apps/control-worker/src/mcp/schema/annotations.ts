@@ -1,6 +1,6 @@
 /**
  * Tool annotation matrix (MCP hints only — not a security boundary).
- * Side-effect tools stay idempotentHint=false even when idempotency_key is optional.
+ * Schema v3: every tool has explicit four-hint config.
  */
 
 export type ToolAnnotationHints = {
@@ -34,11 +34,18 @@ const MUTATING_OPEN: ToolAnnotationHints = {
 const CREATE_DIR: ToolAnnotationHints = {
   readOnlyHint: false,
   destructiveHint: false,
-  idempotentHint: false,
+  idempotentHint: true,
   openWorldHint: false,
 };
 
-/** Per-tool annotation lookup for Schema v2. */
+const IDEMPOTENT_DESTRUCTIVE: ToolAnnotationHints = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+/** Per-tool annotation lookup for Schema v3. */
 export const TOOL_ANNOTATIONS: Record<string, ToolAnnotationHints> = {
   'vacps.backends.list': READ_ONLY,
   'vacps.backends.get_status': READ_ONLY,
@@ -46,10 +53,11 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotationHints> = {
 
   'vacps.command.exec': MUTATING_OPEN,
   'vacps.shell.exec': MUTATING_OPEN,
-  'vacps.process.start': MUTATING_OPEN,
+  'vacps.process.start_command': MUTATING_OPEN,
+  'vacps.process.start_shell': MUTATING_OPEN,
   'vacps.process.read': READ_ONLY,
-  'vacps.process.write': MUTATING_OPEN,
-  'vacps.process.terminate': MUTATING_OPEN,
+  'vacps.process.write': MUTATING_LOCAL,
+  'vacps.process.terminate': IDEMPOTENT_DESTRUCTIVE,
 
   'vacps.files.stat': READ_ONLY,
   'vacps.files.read': READ_ONLY,
@@ -67,21 +75,20 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotationHints> = {
   'vacps.git.diff': READ_ONLY,
   'vacps.git.apply': MUTATING_LOCAL,
 
-  'vacps.tasks.create': MUTATING_OPEN,
   'vacps.tasks.create_command': MUTATING_OPEN,
   'vacps.tasks.create_shell': MUTATING_OPEN,
   'vacps.tasks.create_agent': MUTATING_OPEN,
   'vacps.tasks.get': READ_ONLY,
   'vacps.tasks.list': READ_ONLY,
   'vacps.tasks.output.read': READ_ONLY,
-  'vacps.tasks.cancel': MUTATING_OPEN,
+  'vacps.tasks.cancel': IDEMPOTENT_DESTRUCTIVE,
   'vacps.tasks.retry': MUTATING_OPEN,
 
-  'vacps.schedules.create': MUTATING_OPEN,
+  'vacps.schedules.create': MUTATING_LOCAL,
   'vacps.schedules.get': READ_ONLY,
   'vacps.schedules.list': READ_ONLY,
-  'vacps.schedules.update': MUTATING_OPEN,
-  'vacps.schedules.delete': MUTATING_OPEN,
+  'vacps.schedules.update': MUTATING_LOCAL,
+  'vacps.schedules.delete': IDEMPOTENT_DESTRUCTIVE,
   'vacps.schedules.run_now': MUTATING_OPEN,
 };
 

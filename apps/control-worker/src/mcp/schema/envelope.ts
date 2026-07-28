@@ -1,9 +1,9 @@
 /**
- * Unified MCP Tool result envelope (Schema v2).
+ * Unified MCP Tool result envelope (Schema v3).
  * structuredContent is the machine-authoritative result; content[0].text mirrors it as compact JSON.
  */
 
-export const SCHEMA_VERSION = '2.0';
+export const SCHEMA_VERSION = '3.0';
 
 export type ErrorCategory =
   | 'validation'
