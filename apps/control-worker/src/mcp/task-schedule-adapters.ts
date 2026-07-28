@@ -139,7 +139,11 @@ export const tasksOutputReadInputSchema = z.strictObject({
   stream: z.enum(['stdout', 'stderr']).optional(),
   offset: z.number().int().min(0).optional(),
   max_bytes: z.number().int().min(1).max(1_048_576).optional(),
-  expected_stream_version: z.string().min(1).max(128).optional(),
+  // Opaque stream identity token (sha256:<64 hex>).
+  expected_stream_version: z
+    .string()
+    .regex(/^sha256:[a-fA-F0-9]{64}$/, 'expected_stream_version must be sha256:<64 hex chars>')
+    .optional(),
 });
 
 export const tasksIdInputSchema = z.strictObject({
