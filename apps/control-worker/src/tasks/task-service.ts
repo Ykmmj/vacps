@@ -317,28 +317,42 @@ export class TaskService {
 
   async readOutput(
     id: string,
-    input: { stream: 'stdout' | 'stderr'; offset?: number; maxBytes?: number },
+    input: {
+      stream: 'stdout' | 'stderr';
+      offset?: number;
+      maxBytes?: number;
+      expectedStreamVersion?: string;
+    },
   ): Promise<unknown> {
     const task = await this.get(id);
     const backend = await this.backends.get(task.backendId);
-    const payload = (await this.client.getLogs(backend, id, {
-      stream: input.stream,
-      offset: input.offset ?? 0,
-      maxBytes: input.maxBytes ?? 65_536,
-    })) as Record<string, unknown>;
-    // Schema v2: only `content` (never both data and content).
-    const body =
-      payload.content !== undefined
-        ? payload.content
-        : payload.data !== undefined
-          ? payload.data
-          : undefined;
-    const { data: _dropData, content: _dropContent, ...rest } = payload;
-    return {
-      ...rest,
-      ...(body !== undefined ? { content: body } : {}),
-      encoding: (payload.encoding as string | undefined) ?? 'utf-8',
-    };
+    try {
+      const payload = (await this.client.getLogs(backend, id, {
+        stream: input.stream,
+        offset: input.offset ?? 0,
+        maxBytes: input.maxBytes ?? 65_536,
+        ...(input.expectedStreamVersion
+          ? { expectedStreamVersion: input.expectedStreamVersion }
+          : {}),
+      })) as Record<string, unknown>;
+      // Schema v2: only `content` (never both data and content).
+      const body =
+        payload.content !== undefined
+          ? payload.content
+          : payload.data !== undefined
+            ? payload.data
+            : undefined;
+      const { data: _dropData, content: _dropContent, ...rest } = payload;
+      return {
+        ...rest,
+        ...(body !== undefined ? { content: body } : {}),
+        encoding: (payload.encoding as string | undefined) ?? 'utf-8',
+      };
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'stream_version_conflict') throw error;
+      // Backend may return current_stream_version in details/message body.
+      throw error;
+    }
   }
 
   async logs(id: string): Promise<unknown> {

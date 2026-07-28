@@ -108,6 +108,7 @@ export async function createServer(input: {
       offset?: string;
       max_bytes?: string;
       preview_max_bytes?: string;
+      expected_stream_version?: string;
     };
     const task = await input.queue.getTask(id);
     if (!task.task)
@@ -125,6 +126,20 @@ export async function createServer(input: {
         Math.max(Number(query.max_bytes ?? 65_536) || 65_536, 1),
         1_048_576,
       );
+      const streamVersion = await streamVersionForPath(path);
+      const expected = typeof query.expected_stream_version === 'string'
+        ? query.expected_stream_version
+        : undefined;
+      if (expected && expected !== streamVersion) {
+        return reply.code(409).send({
+          error: {
+            code: 'stream_version_conflict',
+            message:
+              'Stream version changed (log rotated, rebuilt, or replaced). Restart from offset 0 with the new stream_version.',
+            current_stream_version: streamVersion,
+          },
+        });
+      }
       const slice = await readFileSlice(path, offset, maxBytes);
       return {
         task_id: id,
@@ -136,7 +151,8 @@ export async function createServer(input: {
         truncated: false,
         expired: false,
         encoding: 'utf-8',
-        data: slice.data,
+        content: slice.data,
+        stream_version: streamVersion,
       };
     }
 
@@ -885,6 +901,18 @@ async function readFileSlice(
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Stable identity for an append-only log file (path + device + inode).
+ * Changes when the log is rotated/replaced; does not change as content is appended.
+ */
+async function streamVersionForPath(filePath: string): Promise<string> {
+  const { createHash } = await import('node:crypto');
+  const { stat } = await import('node:fs/promises');
+  const info = await stat(filePath);
+  const material = `${filePath}\0${info.dev}\0${info.ino}\0${info.birthtimeMs || info.ctimeMs}`;
+  return `sha256:${createHash('sha256').update(material).digest('hex')}`;
 }
 
 function numberOr(value: string | undefined, fallback: number): number;

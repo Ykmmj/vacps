@@ -494,8 +494,8 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
         );
       }
       if (id && !action && request.method === 'DELETE') {
-        await services.schedules.delete(id);
-        return new Response(null, { status: 204 });
+        const result = await services.schedules.delete(id);
+        return json(result);
       }
       if (id && action === 'run' && request.method === 'POST') {
         const body = (await readJson(request).catch(() => ({}))) as {
