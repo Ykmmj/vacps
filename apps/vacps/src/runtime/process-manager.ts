@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { userInfo } from 'node:os';
 
 import { describeOutput, type OutputDescriptor } from './output.js';
 import { assertSafeAbsolutePath } from './path-guard.js';
@@ -11,6 +12,10 @@ export interface ProcessChunk {
   stream: 'stdout' | 'stderr';
   data: string;
   observed_at: string;
+  /** Inclusive byte offset within the original stream buffer (UTF-8). */
+  offset_start?: number;
+  /** Exclusive byte offset within the original stream buffer (UTF-8). */
+  offset_end?: number;
 }
 
 export interface ProcessSnapshot {
@@ -27,7 +32,12 @@ export interface ProcessSnapshot {
   tty: boolean;
   stdout: OutputDescriptor;
   stderr: OutputDescriptor;
-  idempotency?: { key: string; replayed: boolean };
+  idempotency?: { key: string; replayed: boolean; request_hash: string };
+}
+
+interface IdempotencyRecord {
+  processId: string;
+  requestHash: string;
 }
 
 interface ManagedProcess {
@@ -52,38 +62,72 @@ interface ManagedProcess {
   waiters: Array<() => void>;
 }
 
+export type ExecInput = {
+  toolName?: string | undefined;
+  program?: string | undefined;
+  arguments?: string[] | undefined;
+  command?: string | undefined;
+  shell?: string | undefined;
+  workingDirectory?: string | undefined;
+  environment?: Record<string, string> | undefined;
+  timeoutMs?: number | undefined;
+  yieldTimeMs?: number | undefined;
+  stdoutMaxBytes?: number | undefined;
+  stderrMaxBytes?: number | undefined;
+  hardMaxStdout?: number | undefined;
+  hardMaxStderr?: number | undefined;
+  tty?: boolean | undefined;
+  idempotencyKey?: string | undefined;
+  closeStdin?: boolean | undefined;
+};
+
 export class ProcessManager {
   private readonly processes = new Map<string, ManagedProcess>();
-  private readonly idempotency = new Map<string, string>();
+  /** key = `${toolName}\0${idempotencyKey}` → process + request hash */
+  private readonly idempotency = new Map<string, IdempotencyRecord>();
 
   constructor(private readonly backendId: string) {}
 
-  async exec(input: {
-    program?: string | undefined;
-    arguments?: string[] | undefined;
-    command?: string | undefined;
-    shell?: string | undefined;
-    workingDirectory?: string | undefined;
-    environment?: Record<string, string> | undefined;
-    timeoutMs?: number | undefined;
-    yieldTimeMs?: number | undefined;
-    stdoutMaxBytes?: number | undefined;
-    stderrMaxBytes?: number | undefined;
-    hardMaxStdout?: number | undefined;
-    hardMaxStderr?: number | undefined;
-    tty?: boolean | undefined;
-    idempotencyKey?: string | undefined;
-    closeStdin?: boolean | undefined;
-  }): Promise<ProcessSnapshot> {
+  async exec(input: ExecInput): Promise<ProcessSnapshot> {
+    const toolName = input.toolName ?? (input.command ? 'shell.exec' : 'command.exec');
+    const requestHash = canonicalRequestHash(this.backendId, toolName, input);
+
     if (input.idempotencyKey) {
-      const existingId = this.idempotency.get(input.idempotencyKey);
-      if (existingId) {
-        const snap = this.snapshot(existingId, {
+      const storeKey = idempotencyStoreKey(toolName, input.idempotencyKey);
+      const existing = this.idempotency.get(storeKey);
+      if (existing) {
+        if (existing.requestHash !== requestHash) {
+          throw Object.assign(
+            new Error('The idempotency key was previously used with different arguments.'),
+            { code: 'idempotency_conflict', statusCode: 409 },
+          );
+        }
+        const snap = this.snapshot(existing.processId, {
           stdoutMax: input.stdoutMaxBytes ?? 16_384,
           stderrMax: input.stderrMaxBytes ?? 16_384,
         });
-        return { ...snap, idempotency: { key: input.idempotencyKey, replayed: true } };
+        return {
+          ...snap,
+          idempotency: {
+            key: input.idempotencyKey,
+            replayed: true,
+            request_hash: requestHash,
+          },
+        };
       }
+    }
+
+    if (input.program && input.command) {
+      throw Object.assign(new Error('Provide either program or command, not both.'), {
+        code: 'validation_error',
+        statusCode: 400,
+      });
+    }
+    if (!input.program && !input.command) {
+      throw Object.assign(new Error('program or command is required.'), {
+        code: 'validation_error',
+        statusCode: 400,
+      });
     }
 
     const timeoutMs = clamp(input.timeoutMs ?? 120_000, 1, 3_600_000);
@@ -91,28 +135,24 @@ export class ProcessManager {
     const cwd = input.workingDirectory
       ? assertSafeAbsolutePath(input.workingDirectory)
       : process.cwd();
-    const env = { ...process.env, ...input.environment };
-    const hardMaxStdout = clamp(input.hardMaxStdout ?? 8 * 1024 * 1024, 1024, 64 * 1024 * 1024);
-    const hardMaxStderr = clamp(input.hardMaxStderr ?? 8 * 1024 * 1024, 1024, 64 * 1024 * 1024);
+    const env = buildExecEnvironment(input.environment);
+    const hardMaxStdout = clamp(input.hardMaxStdout ?? 100 * 1024 * 1024, 0, 1024 * 1024 * 1024);
+    const hardMaxStderr = clamp(input.hardMaxStderr ?? 100 * 1024 * 1024, 0, 1024 * 1024 * 1024);
 
     let child: ChildProcessWithoutNullStreams;
     if (input.command) {
+      // Non-login shell: avoid .bash_profile / .profile noise on stderr.
       const shell = input.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
-      child = spawn(shell, ['-lc', input.command], {
-        cwd,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } else if (input.program) {
-      child = spawn(input.program, input.arguments ?? [], {
+      child = spawn(shell, ['-c', input.command], {
         cwd,
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } else {
-      throw Object.assign(new Error('program or command is required.'), {
-        code: 'validation_error',
-        statusCode: 400,
+      child = spawn(input.program!, input.arguments ?? [], {
+        cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
     }
 
@@ -128,8 +168,8 @@ export class ProcessManager {
       finishedAt: null,
       stdout: '',
       stderr: '',
-      hardMaxStdout,
-      hardMaxStderr,
+      hardMaxStdout: Math.max(hardMaxStdout, 1024),
+      hardMaxStderr: Math.max(hardMaxStderr, 1024),
       child,
       stdinOpen: true,
       tty: Boolean(input.tty),
@@ -138,7 +178,12 @@ export class ProcessManager {
       waiters: [],
     };
     this.processes.set(id, managed);
-    if (input.idempotencyKey) this.idempotency.set(input.idempotencyKey, id);
+    if (input.idempotencyKey) {
+      this.idempotency.set(idempotencyStoreKey(toolName, input.idempotencyKey), {
+        processId: id,
+        requestHash,
+      });
+    }
 
     if (input.closeStdin !== false && !input.tty) {
       child.stdin.end();
@@ -174,7 +219,14 @@ export class ProcessManager {
       stderrMax: input.stderrMaxBytes ?? 16_384,
     });
     if (input.idempotencyKey) {
-      return { ...snap, idempotency: { key: input.idempotencyKey, replayed: false } };
+      return {
+        ...snap,
+        idempotency: {
+          key: input.idempotencyKey,
+          replayed: false,
+          request_hash: requestHash,
+        },
+      };
     }
     return snap;
   }
@@ -194,41 +246,75 @@ export class ProcessManager {
     eof: boolean;
     exit_code: number | null;
     signal: string | null;
+    returned_bytes: number;
   } {
     const managed = this.require(processId);
     const maxBytes = clamp(input.maxBytes ?? 65_536, 1, 1_048_576);
-    const startSequence = input.cursor ? Number(input.cursor) || 0 : 0;
+    const cursor = parseCursor(input.cursor);
 
-    const collect = () => {
-      const chunks: ProcessChunk[] = [];
-      let bytes = 0;
-      for (const chunk of managed.chunks) {
-        if (chunk.sequence <= startSequence) continue;
-        const size = Buffer.byteLength(chunk.data, 'utf8');
-        if (bytes + size > maxBytes && chunks.length > 0) break;
-        chunks.push(chunk);
-        bytes += size;
-        if (bytes >= maxBytes) break;
+    const chunks: ProcessChunk[] = [];
+    let bytes = 0;
+    let nextSeq = cursor.sequence;
+    let nextOffset = cursor.byteOffset;
+
+    for (const chunk of managed.chunks) {
+      if (chunk.sequence < cursor.sequence) continue;
+      const buffer = Buffer.from(chunk.data, 'utf8');
+      let start = 0;
+      if (chunk.sequence === cursor.sequence) {
+        start = cursor.byteOffset;
+        if (start >= buffer.length) continue;
       }
-      const last = chunks[chunks.length - 1]?.sequence ?? startSequence;
-      return {
-        process_id: managed.id,
-        status: managed.status,
-        chunks,
-        next_cursor: chunks.length > 0 ? String(last) : String(startSequence),
-        eof: managed.status !== 'running' && last >= (managed.chunks.at(-1)?.sequence ?? 0),
-        exit_code: managed.exitCode,
-        signal: managed.signal,
-      };
-    };
+      if (bytes >= maxBytes) break;
 
-    // Synchronous path when data already available or process finished.
-    const immediate = collect();
-    if (immediate.chunks.length > 0 || managed.status !== 'running' || !input.waitMs) {
-      return immediate;
+      const remaining = maxBytes - bytes;
+      const end = Math.min(buffer.length, start + remaining);
+      if (end <= start) break;
+
+      const slice = buffer.subarray(start, end);
+      chunks.push({
+        sequence: chunk.sequence,
+        stream: chunk.stream,
+        data: slice.toString('utf8'),
+        observed_at: chunk.observed_at,
+        offset_start: start,
+        offset_end: end,
+      });
+      bytes += end - start;
+
+      if (end < buffer.length) {
+        nextSeq = chunk.sequence;
+        nextOffset = end;
+      } else {
+        nextSeq = chunk.sequence + 1;
+        nextOffset = 0;
+      }
+
+      if (bytes >= maxBytes) break;
     }
-    // waitMs is handled by the HTTP layer via async wait helper.
-    return immediate;
+
+    // eof only when process finished and no unread bytes remain after the next cursor.
+    let unread = false;
+    for (const chunk of managed.chunks) {
+      if (chunk.sequence < nextSeq) continue;
+      const buffer = Buffer.from(chunk.data, 'utf8');
+      const start = chunk.sequence === nextSeq ? nextOffset : 0;
+      if (start < buffer.length) {
+        unread = true;
+        break;
+      }
+    }
+
+    return {
+      process_id: managed.id,
+      status: managed.status,
+      chunks,
+      next_cursor: encodeCursor(nextSeq, nextOffset),
+      eof: managed.status !== 'running' && !unread,
+      exit_code: managed.exitCode,
+      signal: managed.signal,
+      returned_bytes: bytes,
+    };
   }
 
   async readWait(
@@ -242,9 +328,8 @@ export class ProcessManager {
     const managed = this.require(processId);
     const waitMs = clamp(input.waitMs ?? 0, 0, 60_000);
     if (waitMs > 0 && managed.status === 'running') {
-      const startSequence = input.cursor ? Number(input.cursor) || 0 : 0;
-      const hasNew = managed.chunks.some((chunk) => chunk.sequence > startSequence);
-      if (!hasNew) await waitFor(managed, waitMs);
+      const before = this.read(processId, { ...input, waitMs: 0 });
+      if (before.chunks.length === 0) await waitFor(managed, waitMs);
     }
     return this.read(processId, input);
   }
@@ -289,7 +374,6 @@ export class ProcessManager {
     } else {
       this.finish(managed, 'cancelled', null, 'SIGKILL', false);
     }
-    // Give a brief moment for close event when kill is immediate.
     return this.snapshot(processId);
   }
 
@@ -337,7 +421,6 @@ export class ProcessManager {
       data: chunk,
       observed_at: new Date().toISOString(),
     });
-    // Cap chunk history to last ~2000 entries.
     if (managed.chunks.length > 2000) managed.chunks.splice(0, managed.chunks.length - 2000);
     for (const wake of managed.waiters.splice(0)) wake();
   }
@@ -370,6 +453,82 @@ export class ProcessManager {
     }
     return managed;
   }
+}
+
+export function canonicalRequestHash(
+  backendId: string,
+  toolName: string,
+  input: ExecInput,
+): string {
+  // Exclude yield/preview limits from the identity of the work — they affect
+  // response packaging, not which process is replayed.
+  const payload = {
+    backend_id: backendId,
+    tool: toolName,
+    program: input.program ?? null,
+    arguments: input.arguments ?? null,
+    command: input.command ?? null,
+    shell: input.shell ?? null,
+    working_directory: input.workingDirectory ?? null,
+    environment: input.environment ?? null,
+    timeout_ms: input.timeoutMs ?? null,
+    hard_max_stdout: input.hardMaxStdout ?? null,
+    hard_max_stderr: input.hardMaxStderr ?? null,
+    tty: input.tty ?? null,
+    close_stdin: input.closeStdin ?? null,
+  };
+  return createHash('sha256').update(stableStringify(payload)).digest('hex');
+}
+
+function idempotencyStoreKey(toolName: string, key: string): string {
+  return `${toolName}\0${key}`;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+}
+
+function parseCursor(cursor: string | undefined): { sequence: number; byteOffset: number } {
+  if (!cursor) return { sequence: 1, byteOffset: 0 };
+  // Formats: "seq" (legacy) or "seq:byteOffset" or base64url JSON
+  if (cursor.includes(':')) {
+    const [seq, off] = cursor.split(':');
+    return {
+      sequence: Math.max(1, Number(seq) || 1),
+      byteOffset: Math.max(0, Number(off) || 0),
+    };
+  }
+  // Legacy: cursor was "last returned sequence" meaning "start after this sequence"
+  const legacy = Number(cursor) || 0;
+  return { sequence: legacy + 1, byteOffset: 0 };
+}
+
+function encodeCursor(sequence: number, byteOffset: number): string {
+  return `${sequence}:${byteOffset}`;
+}
+
+function buildExecEnvironment(overrides: Record<string, string> | undefined): NodeJS.ProcessEnv {
+  let home = process.env.HOME || '/';
+  let username = process.env.USER || 'agent';
+  try {
+    const user = userInfo();
+    if (typeof user.homedir === 'string' && user.homedir) home = user.homedir;
+    if (typeof user.username === 'string' && user.username) username = user.username;
+  } catch {
+    /* keep env defaults */
+  }
+  const base: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    USER: username,
+    LOGNAME: process.env.LOGNAME || username,
+    SHELL: process.env.SHELL || '/bin/bash',
+  };
+  return { ...base, ...overrides };
 }
 
 function waitFor(managed: ManagedProcess, ms: number): Promise<void> {

@@ -300,10 +300,18 @@ export async function createServer(input: {
       return reply
         .code(400)
         .send({ error: { code: 'validation_error', message: 'path and content are required.' } });
-    const mode =
-      body.mode === 'create' || body.mode === 'overwrite' || body.mode === 'create_or_overwrite'
-        ? body.mode
-        : 'create_or_overwrite';
+    if (
+      body.mode !== 'create' &&
+      body.mode !== 'overwrite' &&
+      body.mode !== 'create_or_overwrite'
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'mode is required: create | overwrite | create_or_overwrite.',
+        },
+      });
+    }
     try {
       return {
         ok: true,
@@ -311,7 +319,7 @@ export async function createServer(input: {
         ...(await files.filesWrite({
           path: body.path,
           content: body.content,
-          mode,
+          mode: body.mode,
           expectedSha256:
             typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
           createParentDirectories: body.create_parent_directories !== false,
@@ -358,6 +366,8 @@ export async function createServer(input: {
           from: body.from,
           to: body.to,
           overwrite: body.overwrite === true,
+          expectedSha256:
+            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
         })),
       };
     } catch (error) {
@@ -375,7 +385,17 @@ export async function createServer(input: {
       return {
         ok: true,
         backend_id: input.config.BACKEND_ID,
-        ...(await files.filesDelete({ path: body.path, recursive: body.recursive === true })),
+        ...(await files.filesDelete({
+          path: body.path,
+          recursive: body.recursive === true,
+          expectedSha256:
+            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+          expectedType:
+            body.expected_type === 'file' || body.expected_type === 'directory'
+              ? body.expected_type
+              : undefined,
+          dryRun: body.dry_run === true,
+        })),
       };
     } catch (error) {
       return runtimeError(reply, error);
@@ -399,6 +419,12 @@ export async function createServer(input: {
     }
   });
 
+  app.get('/capabilities', async () => ({
+    ok: true,
+    backend_id: input.config.BACKEND_ID,
+    ...(await files.detectCapabilities()),
+  }));
+
   // ── Command / shell / process ──────────────────────────────────────
   app.post('/exec/command', async (request, reply) => {
     const body = request.body as Record<string, unknown>;
@@ -408,6 +434,7 @@ export async function createServer(input: {
         .send({ error: { code: 'validation_error', message: 'program is required.' } });
     try {
       const result = await processes.exec({
+        toolName: 'command.exec',
         program: body.program,
         arguments: Array.isArray(body.arguments) ? body.arguments.map(String) : undefined,
         workingDirectory:
@@ -437,6 +464,7 @@ export async function createServer(input: {
         .send({ error: { code: 'validation_error', message: 'command is required.' } });
     try {
       const result = await processes.exec({
+        toolName: 'shell.exec',
         command: body.command,
         shell: body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash',
         workingDirectory:
@@ -467,6 +495,7 @@ export async function createServer(input: {
         .send({ error: { code: 'validation_error', message: 'command is required.' } });
     try {
       const result = await processes.exec({
+        toolName: 'shell.exec',
         command: body.command,
         workingDirectory: typeof body.cwd === 'string' ? body.cwd : undefined,
         timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
@@ -498,11 +527,48 @@ export async function createServer(input: {
 
   app.post('/process/start', async (request, reply) => {
     const body = request.body as Record<string, unknown>;
+    const hasProgram = typeof body.program === 'string' && body.program.length > 0;
+    const hasCommand = typeof body.command === 'string' && body.command.length > 0;
+    if (hasProgram === hasCommand) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'Provide exactly one of program or command.',
+        },
+      });
+    }
+    if (
+      body.stdout_hard_max_bytes !== undefined &&
+      (typeof body.stdout_hard_max_bytes !== 'number' ||
+        body.stdout_hard_max_bytes < 0 ||
+        body.stdout_hard_max_bytes > 1_073_741_824)
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'stdout_hard_max_bytes must be 0..1073741824.',
+        },
+      });
+    }
+    if (
+      body.stderr_hard_max_bytes !== undefined &&
+      (typeof body.stderr_hard_max_bytes !== 'number' ||
+        body.stderr_hard_max_bytes < 0 ||
+        body.stderr_hard_max_bytes > 1_073_741_824)
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'stderr_hard_max_bytes must be 0..1073741824.',
+        },
+      });
+    }
     try {
       const result = await processes.exec({
-        program: typeof body.program === 'string' ? body.program : undefined,
+        toolName: 'process.start',
+        program: hasProgram ? String(body.program) : undefined,
         arguments: Array.isArray(body.arguments) ? body.arguments.map(String) : undefined,
-        command: typeof body.command === 'string' ? body.command : undefined,
+        command: hasCommand ? String(body.command) : undefined,
         workingDirectory:
           typeof body.working_directory === 'string' ? body.working_directory : undefined,
         environment:
@@ -512,9 +578,13 @@ export async function createServer(input: {
         timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
         yieldTimeMs: 50,
         hardMaxStdout:
-          typeof body.stdout_hard_max_bytes === 'number' ? body.stdout_hard_max_bytes : undefined,
+          typeof body.stdout_hard_max_bytes === 'number'
+            ? body.stdout_hard_max_bytes
+            : 100 * 1024 * 1024,
         hardMaxStderr:
-          typeof body.stderr_hard_max_bytes === 'number' ? body.stderr_hard_max_bytes : undefined,
+          typeof body.stderr_hard_max_bytes === 'number'
+            ? body.stderr_hard_max_bytes
+            : 100 * 1024 * 1024,
         tty: body.tty === true,
         idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
         closeStdin: body.tty === true ? false : true,
@@ -525,7 +595,7 @@ export async function createServer(input: {
         status: result.status,
         stdin_available: result.stdin_available,
         tty: result.tty,
-        output_cursor: '0',
+        output_cursor: '1:0',
       };
     } catch (error) {
       return runtimeError(reply, error);
@@ -553,11 +623,9 @@ export async function createServer(input: {
   app.post('/process/write', async (request, reply) => {
     const body = request.body as Record<string, unknown>;
     if (typeof body.process_id !== 'string' || typeof body.data !== 'string')
-      return reply
-        .code(400)
-        .send({
-          error: { code: 'validation_error', message: 'process_id and data are required.' },
-        });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'process_id and data are required.' },
+      });
     try {
       return {
         ok: true,

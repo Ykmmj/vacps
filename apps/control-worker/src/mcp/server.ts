@@ -436,7 +436,8 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.process.start',
     {
-      description: 'Start a long-running or interactive process on a backend.',
+      description:
+        'Start a long-running or interactive process on a backend. Provide exactly one of program or command.',
       inputSchema: {
         backend_id: z.string(),
         program: z.string().optional(),
@@ -446,8 +447,8 @@ export function createMcpServer(env: Env): McpServer {
         environment: z.record(z.string(), z.string()).optional(),
         tty: z.boolean().optional(),
         timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
-        stdout_hard_max_bytes: z.number().int().optional(),
-        stderr_hard_max_bytes: z.number().int().optional(),
+        stdout_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).default(104_857_600),
+        stderr_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).default(104_857_600),
         idempotency_key: z.string().optional(),
       },
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
@@ -455,6 +456,11 @@ export function createMcpServer(env: Env): McpServer {
     wrap(
       (value) => `started ${String(value.process_id)}`,
       async (args) => {
+        const hasProgram = typeof args.program === 'string' && args.program.length > 0;
+        const hasCommand = typeof args.command === 'string' && args.command.length > 0;
+        if (hasProgram === hasCommand) {
+          throw new AppError('validation_error', 'Provide exactly one of program or command.', 400);
+        }
         const backend = await requireBackend(args.backend_id);
         return (await client.processStart(backend, args)) as Record<string, unknown>;
       },
@@ -600,7 +606,8 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.files.glob',
     {
-      description: 'Glob files on a backend (ripgrep --files when available).',
+      description:
+        'Glob files on a backend. Dialect is bash-like globstar: * is one segment, ** matches zero or more segments (so **/*.txt matches example.txt at the root). Uses rg when available.',
       inputSchema: {
         backend_id: z.string(),
         pattern: z.string(),
@@ -676,12 +683,13 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.files.write',
     {
-      description: 'Write a file on a backend (atomic temp+rename).',
+      description:
+        'Write a file on a backend (atomic temp+rename). mode is required: create (fail if exists), overwrite (fail if missing), or create_or_overwrite.',
       inputSchema: {
         backend_id: z.string(),
         path: z.string(),
         content: z.string(),
-        mode: z.enum(['create', 'overwrite', 'create_or_overwrite']).default('create_or_overwrite'),
+        mode: z.enum(['create', 'overwrite', 'create_or_overwrite']),
         expected_sha256: z.string().optional(),
         create_parent_directories: z.boolean().optional(),
         idempotency_key: z.string().optional(),
@@ -723,12 +731,15 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.files.move',
     {
-      description: 'Move/rename a file on a backend.',
+      description:
+        'Move/rename a file on a backend. Optional expected_sha256 for optimistic concurrency.',
       inputSchema: {
         backend_id: z.string(),
         from: z.string(),
         to: z.string(),
         overwrite: z.boolean().optional(),
+        expected_sha256: z.string().optional(),
+        idempotency_key: z.string().optional(),
       },
       outputSchema: okEnvelope.extend({ from: z.string(), to: z.string() }).shape,
     },
@@ -744,11 +755,16 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.files.delete',
     {
-      description: 'Delete a file or directory on a backend.',
+      description:
+        'Delete a file or directory on a backend. Use dry_run to preview size/count; expected_sha256 / expected_type for safety.',
       inputSchema: {
         backend_id: z.string(),
         path: z.string(),
         recursive: z.boolean().optional(),
+        expected_sha256: z.string().optional(),
+        expected_type: z.enum(['file', 'directory']).optional(),
+        dry_run: z.boolean().optional(),
+        idempotency_key: z.string().optional(),
       },
       outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
     },
@@ -757,6 +773,23 @@ export function createMcpServer(env: Env): McpServer {
       async (args) => {
         const backend = await requireBackend(args.backend_id);
         return (await client.deleteFile(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.capabilities.get',
+    {
+      description:
+        'Report backend tool capabilities (e.g. whether ripgrep is installed, grep engine, glob dialect).',
+      inputSchema: { backend_id: z.string() },
+      outputSchema: okEnvelope.extend({ features: z.unknown(), executables: z.unknown() }).shape,
+    },
+    wrap(
+      () => 'capabilities',
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.getCapabilities(backend)) as Record<string, unknown>;
       },
     ),
   );

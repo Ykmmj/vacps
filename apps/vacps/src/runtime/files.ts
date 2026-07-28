@@ -66,6 +66,7 @@ export async function filesRead(input: {
 
   if (encoding === 'base64') {
     const slice = buffer.subarray(0, maxBytes);
+    const truncated = slice.length < totalBytes;
     return {
       path,
       kind: 'binary' as const,
@@ -76,8 +77,12 @@ export async function filesRead(input: {
       total_lines: null,
       total_bytes: totalBytes,
       returned_bytes: slice.length,
-      truncated: slice.length < totalBytes,
+      // truncated only when max_bytes forced an incomplete read of the file.
+      truncated,
+      truncation_reason: truncated ? 'max_bytes' : null,
       next_start_line: null,
+      range: null,
+      file: { total_bytes: totalBytes, total_lines: null },
       sha256: digest,
       modified_at: info.mtime.toISOString(),
     };
@@ -85,43 +90,58 @@ export async function filesRead(input: {
 
   const text = buffer.toString('utf8');
   const lines = text.split('\n');
-  const start = clamp(input.startLine ?? 1, 1, Math.max(1, lines.length));
-  let end = input.endLine ?? lines.length;
-  end = clamp(end, start, lines.length);
+  // Empty file → one empty line for line-oriented tools.
+  const lineCount = lines.length;
+  const requestedStart = input.startLine ?? 1;
+  const requestedEnd = input.endLine ?? lineCount;
+  const start = clamp(requestedStart, 1, Math.max(1, lineCount));
+  let end = clamp(requestedEnd, start, Math.max(start, lineCount));
 
   let selected = lines.slice(start - 1, end);
   let content = selected.join('\n');
   let truncated = false;
+  let truncationReason: 'max_bytes' | null = null;
   let nextStart: number | null = null;
 
   while (Buffer.byteLength(content, 'utf8') > maxBytes && selected.length > 1) {
     selected = selected.slice(0, -1);
     content = selected.join('\n');
     truncated = true;
+    truncationReason = 'max_bytes';
     nextStart = start + selected.length;
   }
   if (Buffer.byteLength(content, 'utf8') > maxBytes) {
     content = Buffer.from(content, 'utf8').subarray(0, maxBytes).toString('utf8');
     truncated = true;
-    nextStart = start + 1;
+    truncationReason = 'max_bytes';
+    nextStart = start;
   }
-  if (!truncated && end < lines.length) {
-    truncated = true;
-    nextStart = end + 1;
-  }
+
+  const returnedStart = start;
+  const returnedEnd = selected.length === 0 ? start - 1 : start + selected.length - 1;
+  const rangeComplete = !truncated && returnedEnd >= end;
 
   return {
     path,
     kind: 'text' as const,
     content,
     encoding: 'utf-8' as const,
-    start_line: start,
-    end_line: start + selected.length - 1,
-    total_lines: lines.length,
+    start_line: returnedStart,
+    end_line: Math.max(returnedStart, returnedEnd),
+    total_lines: lineCount,
     total_bytes: totalBytes,
     returned_bytes: Buffer.byteLength(content, 'utf8'),
     truncated,
+    truncation_reason: truncationReason,
     next_start_line: truncated ? nextStart : null,
+    range: {
+      requested_start_line: requestedStart,
+      requested_end_line: requestedEnd,
+      returned_start_line: returnedStart,
+      returned_end_line: Math.max(returnedStart, returnedEnd),
+      range_complete: rangeComplete,
+    },
+    file: { total_lines: lineCount, total_bytes: totalBytes },
     sha256: digest,
     modified_at: info.mtime.toISOString(),
   };
@@ -181,8 +201,12 @@ export async function filesGlob(input: {
   const pattern = input.pattern;
 
   // Prefer ripgrep file listing when available.
+  // Globstar dialect: **/foo also matches foo at the root (zero intermediate segments).
   try {
+    if (!(await commandAvailable('rg')))
+      throw Object.assign(new Error('rg missing'), { code: 'ENOENT' });
     const args = ['--files', '--glob', pattern];
+    if (pattern.startsWith('**/')) args.push('--glob', pattern.slice(3));
     if (!includeHidden) args.push('--glob', '!.*/**');
     if (!respectGitignore) args.push('--no-ignore');
     const listed = await runCapture('rg', args, root, 30_000);
@@ -251,6 +275,29 @@ export async function filesGrep(input: {
   const contextAfter = clamp(input.contextAfter ?? 0, 0, 10);
   const maxBytes = clamp(input.maxBytes ?? 64_000, 1, 256 * 1024);
 
+  if (await commandAvailable('rg')) {
+    try {
+      return await filesGrepWithRg(input, root, maxMatches, contextBefore, contextAfter, maxBytes);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return filesGrepFallback(input, root, maxMatches, maxBytes);
+}
+
+async function filesGrepWithRg(
+  input: {
+    pattern: string;
+    filePattern?: string | undefined;
+    caseSensitive?: boolean | undefined;
+    fixedString?: boolean | undefined;
+  },
+  root: string,
+  maxMatches: number,
+  contextBefore: number,
+  contextAfter: number,
+  maxBytes: number,
+) {
   const args = ['--json', '--line-number', '--column', `--max-count=${maxMatches}`];
   if (!input.caseSensitive) args.push('-i');
   if (input.fixedString) args.push('-F');
@@ -269,7 +316,6 @@ export async function filesGrep(input: {
       data?: {
         path?: { text?: string };
         line_number?: number;
-        absolute_offset?: number;
         submatches?: Array<{ start?: number }>;
         lines?: { text?: string };
       };
@@ -298,6 +344,84 @@ export async function filesGrep(input: {
     match_count: matches.length,
     truncated: matches.length >= maxMatches || bytes >= maxBytes,
     next_cursor: null,
+    engine: 'rg' as const,
+  };
+}
+
+async function filesGrepFallback(
+  input: {
+    pattern: string;
+    filePattern?: string | undefined;
+    caseSensitive?: boolean | undefined;
+    fixedString?: boolean | undefined;
+  },
+  root: string,
+  maxMatches: number,
+  maxBytes: number,
+) {
+  const flags = input.caseSensitive ? '' : 'i';
+  const regex = input.fixedString ? null : new RegExp(input.pattern, flags);
+  const needle = input.fixedString ? input.pattern : null;
+  const matches: Array<Record<string, unknown>> = [];
+  let bytes = 0;
+  let truncated = false;
+
+  await walk(root, root, false, async (full, info) => {
+    if (matches.length >= maxMatches || bytes >= maxBytes) {
+      truncated = true;
+      return;
+    }
+    if (!info.isFile()) return;
+    if (input.filePattern) {
+      const rel = relative(root, full).split(sep).join('/');
+      if (!globMatch(input.filePattern, basename(full)) && !globMatch(input.filePattern, rel)) {
+        return;
+      }
+    }
+    if (info.size > 2 * 1024 * 1024) return;
+    let text: string;
+    try {
+      text = await readFile(full, 'utf8');
+    } catch {
+      return;
+    }
+    const lines = text.split('\n');
+    for (let index = 0; index < lines.length; index += 1) {
+      if (matches.length >= maxMatches || bytes >= maxBytes) {
+        truncated = true;
+        break;
+      }
+      const line = lines[index] ?? '';
+      let column = 0;
+      if (needle !== null) {
+        const found = input.caseSensitive
+          ? line.indexOf(needle)
+          : line.toLowerCase().indexOf(needle.toLowerCase());
+        if (found < 0) continue;
+        column = found + 1;
+      } else if (regex) {
+        const match = regex.exec(line);
+        if (!match) continue;
+        column = (match.index ?? 0) + 1;
+      } else continue;
+      bytes += Buffer.byteLength(line, 'utf8');
+      matches.push({
+        path: full,
+        line_number: index + 1,
+        column_number: column,
+        line,
+        before: [],
+        after: [],
+      });
+    }
+  });
+
+  return {
+    matches,
+    match_count: matches.length,
+    truncated: truncated || matches.length >= maxMatches || bytes >= maxBytes,
+    next_cursor: null,
+    engine: 'node_fallback' as const,
   };
 }
 
@@ -399,9 +523,21 @@ export async function filesMove(input: {
   from: string;
   to: string;
   overwrite?: boolean | undefined;
+  expectedSha256?: string | undefined;
 }) {
   const from = assertSafeAbsolutePath(input.from);
   const to = assertSafeAbsolutePath(input.to);
+  const fromInfo = await stat(from);
+  if (fromInfo.isFile() && input.expectedSha256) {
+    const current = sha256Hex(await readFile(from));
+    if (normalizeHash(input.expectedSha256) !== current) {
+      throw Object.assign(new Error('The file changed after it was read.'), {
+        code: 'file_version_conflict',
+        statusCode: 409,
+        current_sha256: current,
+      });
+    }
+  }
   if (!input.overwrite) {
     try {
       await stat(to);
@@ -418,10 +554,64 @@ export async function filesMove(input: {
   return { from, to, operation: 'moved' };
 }
 
-export async function filesDelete(input: { path: string; recursive?: boolean | undefined }) {
+export async function filesDelete(input: {
+  path: string;
+  recursive?: boolean | undefined;
+  expectedSha256?: string | undefined;
+  expectedType?: 'file' | 'directory' | undefined;
+  dryRun?: boolean | undefined;
+}) {
   const path = assertSafeAbsolutePath(input.path);
-  await rm(path, { recursive: Boolean(input.recursive), force: false });
-  return { path, operation: 'deleted' };
+  const info = await stat(path);
+  const type = info.isDirectory() ? 'directory' : 'file';
+  if (input.expectedType && input.expectedType !== type) {
+    throw Object.assign(new Error(`Expected ${input.expectedType} but found ${type}.`), {
+      code: 'type_mismatch',
+      statusCode: 409,
+    });
+  }
+  if (type === 'file' && input.expectedSha256) {
+    const current = sha256Hex(await readFile(path));
+    if (normalizeHash(input.expectedSha256) !== current) {
+      throw Object.assign(new Error('The file changed after it was read.'), {
+        code: 'file_version_conflict',
+        statusCode: 409,
+        current_sha256: current,
+      });
+    }
+  }
+
+  if (input.dryRun) {
+    if (type === 'file') {
+      return {
+        path,
+        operation: 'delete_preview',
+        dry_run: true,
+        type,
+        file_count: 1,
+        total_bytes: info.size,
+      };
+    }
+    let fileCount = 0;
+    let totalBytes = 0;
+    await walk(path, path, true, async (_full, child) => {
+      if (child.isFile()) {
+        fileCount += 1;
+        totalBytes += child.size;
+      }
+    });
+    return {
+      path,
+      operation: 'delete_preview',
+      dry_run: true,
+      type,
+      file_count: fileCount,
+      total_bytes: totalBytes,
+    };
+  }
+
+  await rm(path, { recursive: Boolean(input.recursive) || type === 'directory', force: false });
+  return { path, operation: 'deleted', dry_run: false, type };
 }
 
 export async function filesMkdir(input: { path: string; recursive?: boolean | undefined }) {
@@ -681,15 +871,85 @@ async function walk(
   }
 }
 
+// Globstar dialect (bash-like):
+// - * matches within a single path segment
+// - ** matches across segments, including zero segments
+// - **/ plus *.txt therefore matches both root example.txt and dir/a.txt
 function globMatch(pattern: string, value: string): boolean {
-  // Minimal glob: * ** and ?
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '::DOUBLE::')
-    .replace(/\*/g, '[^/]*')
-    .replace(/::DOUBLE::/g, '.*')
-    .replace(/\?/g, '.');
-  return new RegExp(`^${escaped}$`).test(value);
+  const normalizedPattern = pattern.replace(/\\/g, '/');
+  const normalizedValue = value.replace(/\\/g, '/');
+  const regex = globToRegExp(normalizedPattern);
+  return regex.test(normalizedValue);
+}
+
+function globToRegExp(pattern: string): RegExp {
+  let source = '^';
+  for (let index = 0; index < pattern.length;) {
+    const char = pattern[index]!;
+    if (char === '*') {
+      if (pattern[index + 1] === '*') {
+        // ** optionally followed by /
+        if (pattern[index + 2] === '/') {
+          source += '(?:.*/)?';
+          index += 3;
+        } else {
+          source += '.*';
+          index += 2;
+        }
+      } else {
+        source += '[^/]*';
+        index += 1;
+      }
+      continue;
+    }
+    if (char === '?') {
+      source += '[^/]';
+      index += 1;
+      continue;
+    }
+    if ('+.^${}()|[]\\'.includes(char)) source += `\\${char}`;
+    else source += char;
+    index += 1;
+  }
+  source += '$';
+  return new RegExp(source);
+}
+
+export async function commandAvailable(name: string): Promise<boolean> {
+  try {
+    const result = await runCapture(name, ['--version'], process.cwd(), 3_000);
+    return result.exitCode === 0 || result.stdout.length > 0 || result.stderr.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function detectCapabilities() {
+  const rgAvailable = await commandAvailable('rg');
+  let rgVersion: string | null = null;
+  if (rgAvailable) {
+    try {
+      const result = await runCapture('rg', ['--version'], process.cwd(), 3_000);
+      rgVersion =
+        (result.stdout.split('\n')[0] ?? result.stderr.split('\n')[0] ?? '').trim() || null;
+    } catch {
+      rgVersion = null;
+    }
+  }
+  return {
+    executables: {
+      rg: { available: rgAvailable, version: rgVersion },
+    },
+    features: {
+      'files.grep': true,
+      'files.glob': true,
+      'files.grep.engine': rgAvailable ? 'rg' : 'node_fallback',
+      'files.glob.dialect': 'globstar',
+      'command.exec': true,
+      'shell.exec': true,
+      'process.start': true,
+    },
+  };
 }
 
 function countOccurrences(haystack: string, needle: string): number {
