@@ -246,6 +246,7 @@ export async function createServer(input: {
           includeHidden: Boolean(body.include_hidden),
           respectGitignore: body.respect_gitignore !== false,
           limit: typeof body.limit === 'number' ? body.limit : 200,
+          cursor: typeof body.cursor === 'string' ? body.cursor : undefined,
         })),
       };
     } catch (error) {
@@ -595,9 +596,18 @@ export async function createServer(input: {
 
   app.post('/process/start', async (request, reply) => {
     const body = request.body as Record<string, unknown>;
+    // Schema v2: mode is required (exec | shell). Legacy program-only form is rejected.
     const mode = body.mode === 'exec' || body.mode === 'shell' ? body.mode : undefined;
-    let hasProgram = typeof body.program === 'string' && body.program.length > 0;
-    let hasCommand = typeof body.command === 'string' && body.command.length > 0;
+    if (!mode) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'mode is required and must be "exec" or "shell".',
+        },
+      });
+    }
+    const hasProgram = typeof body.program === 'string' && body.program.length > 0;
+    const hasCommand = typeof body.command === 'string' && body.command.length > 0;
     if (mode === 'exec') {
       if (!hasProgram || hasCommand) {
         return reply.code(400).send({
@@ -607,8 +617,8 @@ export async function createServer(input: {
           },
         });
       }
-    } else if (mode === 'shell') {
-      if (!hasCommand || hasProgram) {
+    } else {
+      if (!hasCommand || hasProgram || Array.isArray(body.arguments)) {
         return reply.code(400).send({
           error: {
             code: 'validation_error',
@@ -616,13 +626,6 @@ export async function createServer(input: {
           },
         });
       }
-    } else if (hasProgram === hasCommand) {
-      return reply.code(400).send({
-        error: {
-          code: 'validation_error',
-          message: 'Provide exactly one of program or command (or set mode=exec|shell).',
-        },
-      });
     }
     if (
       body.stdout_hard_max_bytes !== undefined &&

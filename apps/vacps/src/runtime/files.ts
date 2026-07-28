@@ -203,9 +203,7 @@ export async function filesList(input: {
   const nextOffset = offset + matches.length;
   return {
     path,
-    // Schema v2 primary field is entries; matches kept as alias during migration.
     entries: matches,
-    matches,
     returned_count: matches.length,
     truncated: nextOffset < visible.length,
     next_cursor: nextOffset < visible.length ? encodeOffsetCursor(nextOffset) : null,
@@ -237,12 +235,14 @@ export async function filesGlob(input: {
   includeHidden?: boolean | undefined;
   respectGitignore?: boolean | undefined;
   limit?: number | undefined;
+  cursor?: string | undefined;
 }) {
   const root = assertSafeAbsolutePath(input.path ?? process.cwd());
   const limit = clamp(input.limit ?? 200, 1, 2000);
   const includeHidden = Boolean(input.includeHidden);
   const respectGitignore = input.respectGitignore !== false;
   const pattern = input.pattern;
+  const offset = decodeOffsetCursor(input.cursor);
 
   // Prefer ripgrep file listing when available.
   // Globstar dialect: **/foo also matches foo at the root (zero intermediate segments).
@@ -255,14 +255,13 @@ export async function filesGlob(input: {
     if (!respectGitignore) args.push('--no-ignore');
     const listed = await runCapture('rg', args, root, 30_000);
     if (listed.exitCode === 0 || listed.stdout) {
-      const lines = listed.stdout
+      const allLines = listed.stdout
         .split('\n')
         .map((line) => line.trim())
-        .filter(Boolean)
-        .slice(0, limit + 1);
-      const truncated = lines.length > limit;
+        .filter(Boolean);
+      const page = allLines.slice(offset, offset + limit);
       const matches = [];
-      for (const rel of lines.slice(0, limit)) {
+      for (const rel of page) {
         const full = join(root, rel);
         try {
           const info = await stat(full);
@@ -276,29 +275,38 @@ export async function filesGlob(input: {
           matches.push({ path: full, type: 'file', size_bytes: 0, modified_at: null });
         }
       }
-      return { matches, returned_count: matches.length, truncated, next_cursor: null };
+      const nextOffset = offset + matches.length;
+      const truncated = nextOffset < allLines.length;
+      return {
+        matches,
+        returned_count: matches.length,
+        truncated,
+        next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
+      };
     }
   } catch {
     /* fallback */
   }
 
-  const matches: Array<Record<string, unknown>> = [];
+  const all: Array<Record<string, unknown>> = [];
   await walk(root, root, includeHidden, async (full, info: Stats) => {
     const rel = relative(root, full).split(sep).join('/');
     if (!globMatch(pattern, rel) && !globMatch(pattern, basename(full))) return;
-    matches.push({
+    all.push({
       path: full,
       type: info.isDirectory() ? 'directory' : 'file',
       size_bytes: info.size,
       modified_at: info.mtime.toISOString(),
     });
   });
-  const truncated = matches.length > limit;
+  const page = all.slice(offset, offset + limit);
+  const nextOffset = offset + page.length;
+  const truncated = nextOffset < all.length;
   return {
-    matches: matches.slice(0, limit),
-    returned_count: Math.min(matches.length, limit),
+    matches: page,
+    returned_count: page.length,
     truncated,
-    next_cursor: null,
+    next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
   };
 }
 
