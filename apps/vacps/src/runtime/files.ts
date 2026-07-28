@@ -269,20 +269,82 @@ export async function filesGrep(input: {
   maxMatches?: number | undefined;
   maxBytes?: number | undefined;
 }) {
-  const root = assertSafeAbsolutePath(input.path ?? process.cwd());
+  const target = assertSafeAbsolutePath(input.path ?? process.cwd());
   const maxMatches = clamp(input.maxMatches ?? 100, 1, 500);
   const contextBefore = clamp(input.contextBefore ?? 0, 0, 10);
   const contextAfter = clamp(input.contextAfter ?? 0, 0, 10);
   const maxBytes = clamp(input.maxBytes ?? 64_000, 1, 256 * 1024);
 
+  let info: Stats;
+  try {
+    info = await stat(target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      throw Object.assign(new Error(`path not found: ${target}`), {
+        code: 'path_not_found',
+        statusCode: 400,
+      });
+    }
+    if (code === 'ENOTDIR') {
+      // Parent component is not a directory — treat as bad path input.
+      throw Object.assign(new Error(`path is not a file or directory: ${target}`), {
+        code: 'invalid_path',
+        statusCode: 400,
+      });
+    }
+    throw error;
+  }
+
+  if (!info.isFile() && !info.isDirectory()) {
+    throw Object.assign(new Error(`path must be a file or directory: ${target}`), {
+      code: 'invalid_path',
+      statusCode: 400,
+    });
+  }
+
+  const pathKind = info.isFile() ? ('file' as const) : ('directory' as const);
+
   if (await commandAvailable('rg')) {
     try {
-      return await filesGrepWithRg(input, root, maxMatches, contextBefore, contextAfter, maxBytes);
+      return await filesGrepWithRg(
+        input,
+        target,
+        pathKind,
+        maxMatches,
+        contextBefore,
+        contextAfter,
+        maxBytes,
+      );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const err = error as NodeJS.ErrnoException & { statusCode?: number };
+      // Missing rg binary → fallback. Validation errors must not fall through as internal.
+      if (err.code === 'ENOENT' && !err.statusCode) {
+        /* use node fallback */
+      } else {
+        throw mapGrepSpawnError(error, target);
+      }
     }
   }
-  return filesGrepFallback(input, root, maxMatches, maxBytes);
+  return filesGrepFallback(input, target, pathKind, maxMatches, maxBytes);
+}
+
+function mapGrepSpawnError(error: unknown, target: string): Error {
+  const err = error as NodeJS.ErrnoException & { statusCode?: number; code?: string };
+  if (err.statusCode) return err as Error;
+  if (err.code === 'ENOTDIR') {
+    return Object.assign(new Error(`path is not a file or directory: ${target}`), {
+      code: 'invalid_path',
+      statusCode: 400,
+    });
+  }
+  if (err.code === 'ENOENT') {
+    return Object.assign(new Error(`path not found: ${target}`), {
+      code: 'path_not_found',
+      statusCode: 400,
+    });
+  }
+  return err as Error;
 }
 
 async function filesGrepWithRg(
@@ -292,7 +354,8 @@ async function filesGrepWithRg(
     caseSensitive?: boolean | undefined;
     fixedString?: boolean | undefined;
   },
-  root: string,
+  target: string,
+  pathKind: 'file' | 'directory',
   maxMatches: number,
   contextBefore: number,
   contextAfter: number,
@@ -303,10 +366,13 @@ async function filesGrepWithRg(
   if (input.fixedString) args.push('-F');
   if (contextBefore) args.push(`-B${contextBefore}`);
   if (contextAfter) args.push(`-A${contextAfter}`);
-  if (input.filePattern) args.push('--glob', input.filePattern);
-  args.push('--', input.pattern, root);
+  // file_pattern only applies when searching a directory tree.
+  if (pathKind === 'directory' && input.filePattern) args.push('--glob', input.filePattern);
+  args.push('--', input.pattern, target);
 
-  const result = await runCapture('rg', args, root, 60_000);
+  // spawn cwd must be a directory. For a file path, use its parent.
+  const cwd = pathKind === 'file' ? dirname(target) : target;
+  const result = await runCapture('rg', args, cwd, 60_000);
   const matches: Array<Record<string, unknown>> = [];
   let bytes = 0;
   for (const line of result.stdout.split('\n')) {
@@ -329,8 +395,13 @@ async function filesGrepWithRg(
     const text = parsed.data.lines?.text ?? '';
     bytes += Buffer.byteLength(text, 'utf8');
     if (bytes > maxBytes) break;
+    const matchPath = parsed.data.path?.text;
     matches.push({
-      path: parsed.data.path?.text ?? root,
+      path: matchPath
+        ? matchPath.startsWith('/')
+          ? matchPath
+          : join(cwd, matchPath)
+        : target,
       line_number: parsed.data.line_number ?? 0,
       column_number: (parsed.data.submatches?.[0]?.start ?? 0) + 1,
       line: text.replace(/\n$/, ''),
@@ -355,7 +426,8 @@ async function filesGrepFallback(
     caseSensitive?: boolean | undefined;
     fixedString?: boolean | undefined;
   },
-  root: string,
+  target: string,
+  pathKind: 'file' | 'directory',
   maxMatches: number,
   maxBytes: number,
 ) {
@@ -366,19 +438,18 @@ async function filesGrepFallback(
   let bytes = 0;
   let truncated = false;
 
-  await walk(root, root, false, async (full, info) => {
+  const visitFile = async (full: string, size: number, rootForRel: string) => {
     if (matches.length >= maxMatches || bytes >= maxBytes) {
       truncated = true;
       return;
     }
-    if (!info.isFile()) return;
-    if (input.filePattern) {
-      const rel = relative(root, full).split(sep).join('/');
+    if (pathKind === 'directory' && input.filePattern) {
+      const rel = relative(rootForRel, full).split(sep).join('/');
       if (!globMatch(input.filePattern, basename(full)) && !globMatch(input.filePattern, rel)) {
         return;
       }
     }
-    if (info.size > 2 * 1024 * 1024) return;
+    if (size > 2 * 1024 * 1024) return;
     let text: string;
     try {
       text = await readFile(full, 'utf8');
@@ -414,7 +485,17 @@ async function filesGrepFallback(
         after: [],
       });
     }
-  });
+  };
+
+  if (pathKind === 'file') {
+    const info = await stat(target);
+    await visitFile(target, info.size, dirname(target));
+  } else {
+    await walk(target, target, false, async (full, info) => {
+      if (!info.isFile()) return;
+      await visitFile(full, info.size, target);
+    });
+  }
 
   return {
     matches,

@@ -20,6 +20,7 @@ import {
   filesWriteInputSchema,
   MCP_PROTOCOL_VERSION,
   processStartInputSchema,
+  processStartListJsonSchema,
   shellExecInputSchema,
   TOOL_SCHEMA_REVISION,
 } from './tool-schemas.js';
@@ -610,7 +611,8 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.files.grep',
     {
-      description: 'Search file contents on a backend with ripgrep.',
+      description:
+        'Search file contents on a backend (ripgrep when available). path may be a file or a directory; when a file is given, only that file is searched.',
       inputSchema: {
         backend_id: z.string(),
         pattern: z.string(),
@@ -882,7 +884,37 @@ export function createMcpServer(env: Env): McpServer {
     ),
   );
 
+  // MCP SDK only emits object schemas from Zod; inject process.start oneOf for discoverability.
+  patchProcessStartListSchema(server);
+
   return server;
+}
+
+/**
+ * Wrap tools/list so vacps.process.start advertises program XOR command via oneOf.
+ * CallTool still validates with processStartInputSchema (Zod superRefine).
+ */
+function patchProcessStartListSchema(server: McpServer): void {
+  const protocol = server.server as unknown as {
+    _requestHandlers: Map<
+      string,
+      (request: unknown, extra: unknown) => unknown | Promise<unknown>
+    >;
+  };
+  const previous = protocol._requestHandlers.get('tools/list');
+  if (!previous) return;
+
+  protocol._requestHandlers.set('tools/list', async (request, extra) => {
+    const result = (await previous(request, extra)) as {
+      tools?: Array<{ name?: string; inputSchema?: Record<string, unknown> }>;
+    };
+    for (const tool of result.tools ?? []) {
+      if (tool.name === 'vacps.process.start') {
+        tool.inputSchema = { ...processStartListJsonSchema };
+      }
+    }
+    return result;
+  });
 }
 
 // ── MCP snake_case input schemas ─────────────────────────────────────
@@ -1137,7 +1169,15 @@ function snakeStatus(status: unknown) {
 }
 
 function categoryFor(code: string): string {
-  if (code.includes('validation') || code === 'invalid_request') return 'validation';
+  if (
+    code.includes('validation') ||
+    code === 'invalid_request' ||
+    code.startsWith('invalid_') ||
+    code === 'path_not_allowed' ||
+    code === 'path_not_directory' ||
+    code === 'path_not_found'
+  )
+    return 'validation';
   if (code.includes('not_found')) return 'not_found';
   if (code.includes('disabled') || code.includes('conflict') || code.includes('mismatch'))
     return 'conflict';

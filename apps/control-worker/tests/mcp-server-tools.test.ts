@@ -66,6 +66,8 @@ describe('MCP server tools', () => {
     expect(start).toBeTruthy();
     const startSchema = start?.inputSchema as {
       properties?: Record<string, { minimum?: number; maximum?: number; default?: unknown }>;
+      required?: string[];
+      oneOf?: Array<{ required?: string[]; not?: { required?: string[] } }>;
     };
     const hard = startSchema.properties?.stdout_hard_max_bytes;
     expect(hard?.minimum).toBe(0);
@@ -74,6 +76,20 @@ describe('MCP server tools', () => {
     expect(hard?.minimum).not.toBeLessThan(0);
     // No bogus MIN_SAFE_INTEGER from raw-shape conversion.
     expect(hard?.minimum).not.toBe(Number.MIN_SAFE_INTEGER);
+    // program XOR command must be discoverable via oneOf (not only runtime superRefine).
+    expect(startSchema.required).toEqual(expect.arrayContaining(['backend_id']));
+    expect(startSchema.oneOf).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          required: ['program'],
+          not: { required: ['command'] },
+        }),
+        expect.objectContaining({
+          required: ['command'],
+          not: { required: ['program'] },
+        }),
+      ]),
+    );
 
     const caps = tools.find((tool) => tool.name === 'vacps.capabilities.get');
     expect(caps, 'vacps.capabilities.get must be advertised in tools/list').toBeTruthy();
@@ -81,13 +97,17 @@ describe('MCP server tools', () => {
     // Server version must bump when contracts change (forces client cache refresh).
     const { publicToolJsonSchemas } = await import('../src/mcp/tool-schemas.js');
     const published = publicToolJsonSchemas();
-    expect(published.mcp_server_version).toBe('0.3.0');
+    expect(published.mcp_server_version).toBe('0.3.1');
     const writePublished = (published.tools as Record<string, { required?: string[] }>)[
       'vacps.files.write'
     ];
     expect(writePublished.required).toEqual(
       expect.arrayContaining(['backend_id', 'path', 'content', 'mode']),
     );
+    const startPublished = (
+      published.tools as Record<string, { oneOf?: unknown[] }>
+    )['vacps.process.start'];
+    expect(startPublished.oneOf).toHaveLength(2);
 
     await client.close();
   });

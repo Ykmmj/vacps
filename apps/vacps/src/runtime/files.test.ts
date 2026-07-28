@@ -3,7 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { applyPatch, filesEdit, filesGlob, filesRead, filesWrite } from './files.js';
+import {
+  applyPatch,
+  filesEdit,
+  filesGlob,
+  filesGrep,
+  filesRead,
+  filesWrite,
+} from './files.js';
 
 describe('files runtime', () => {
   it('reads a line range without marking truncated when the range is complete', async () => {
@@ -64,5 +71,22 @@ describe('files runtime', () => {
     });
     expect(patched.applied).toBe(true);
     expect(await readFile(path, 'utf8')).toBe('world\n');
+  });
+
+  it('greps a file path directly (not only directories)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'vacps-files-'));
+    const path = join(dir, 'os-release-like.txt');
+    await writeFile(path, 'PRETTY_NAME="Ubuntu 24.04.4 LTS"\nNAME="Ubuntu"\n');
+    const result = await filesGrep({ pattern: 'Ubuntu', path, caseSensitive: true });
+    expect(result.match_count).toBeGreaterThanOrEqual(1);
+    expect(result.matches.some((m) => String((m as { line: string }).line).includes('Ubuntu'))).toBe(
+      true,
+    );
+  });
+
+  it('rejects missing grep paths with path_not_found (not internal)', async () => {
+    await expect(
+      filesGrep({ pattern: 'x', path: '/tmp/vacps-definitely-missing-' + Date.now() }),
+    ).rejects.toMatchObject({ code: 'path_not_found', statusCode: 400 });
   });
 });
