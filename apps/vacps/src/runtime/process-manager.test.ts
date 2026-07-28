@@ -3,6 +3,34 @@ import { describe, expect, it } from 'vitest';
 import { ProcessManager } from './process-manager.js';
 
 describe('ProcessManager', () => {
+  it('rejects /bin/sh with load_user_environment=true', async () => {
+    const manager = new ProcessManager('backend-test');
+    await expect(
+      manager.exec({
+        toolName: 'shell.exec',
+        command: 'echo hi',
+        shell: '/bin/sh',
+        loadUserEnvironment: true,
+      }),
+    ).rejects.toMatchObject({ code: 'validation_error', statusCode: 400 });
+  });
+
+  it('returns a full process snapshot with output_cursor', async () => {
+    const manager = new ProcessManager('backend-test');
+    const result = await manager.exec({
+      toolName: 'command.exec',
+      program: 'printf',
+      arguments: ['ok'],
+      yieldTimeMs: 2_000,
+    });
+    expect(result.process_id).toBeTruthy();
+    expect(result.backend_id).toBe('backend-test');
+    expect(result.output_cursor).toBeNull();
+    expect(result.stdout).toBeTruthy();
+    expect(result.stderr).toBeTruthy();
+    expect(typeof result.duration_ms).toBe('number');
+  });
+
   it('runs a short command to completion within yield time', async () => {
     const manager = new ProcessManager('vacps-test');
     const result = await manager.exec({

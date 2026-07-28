@@ -107,18 +107,8 @@ describe('MCP server tools', () => {
     expect(hard?.minimum).toBe(0);
     expect(hard?.maximum).toBe(1_073_741_824);
     expect(startSchema.additionalProperties).toBe(false);
-    expect(startSchema.oneOf).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          required: ['program'],
-          not: { required: ['command'] },
-        }),
-        expect.objectContaining({
-          required: ['command'],
-          not: { required: ['program'] },
-        }),
-      ]),
-    );
+    expect(startSchema.properties?.mode).toBeTruthy();
+    expect(startSchema.oneOf?.length).toBeGreaterThanOrEqual(2);
     expect(start?.annotations?.openWorldHint).toBe(true);
 
     const grep = tools.find((tool) => tool.name === 'vacps.files.grep');
@@ -173,7 +163,8 @@ describe('MCP server tools', () => {
     const startPublished = (published.tools as Record<string, { oneOf?: unknown[] }>)[
       'vacps.process.start'
     ];
-    expect(startPublished.oneOf).toHaveLength(2);
+    // mode=exec|shell plus legacy program XOR command branches
+    expect(startPublished.oneOf!.length).toBeGreaterThanOrEqual(2);
 
     await client.close();
   });

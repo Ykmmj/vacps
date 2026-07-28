@@ -31,8 +31,8 @@ import {
  * Canonical tool input schemas (MCP Schema v2).
  * Used for MCP registerTool (tools/list) and runtime parse.
  */
-export const MCP_PROTOCOL_VERSION = '0.4.1';
-export const TOOL_SCHEMA_REVISION = '2026-07-28-schema-v2-p2';
+export const MCP_PROTOCOL_VERSION = '0.4.2';
+export const TOOL_SCHEMA_REVISION = '2026-07-28-schema-v2-p1-finish';
 
 // ── Backends ──────────────────────────────────────────────────────────
 
@@ -63,19 +63,31 @@ export const commandExecInputSchema = z.strictObject({
   idempotency_key: idempotencyKeySchema.optional(),
 });
 
-export const shellExecInputSchema = z.strictObject({
-  backend_id: backendIdSchema,
-  command: commandSchema,
-  shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
-  working_directory: workingDirectorySchema.optional(),
-  environment: environmentSchema.optional(),
-  timeout_ms: timeoutMsSchema.optional(),
-  yield_time_ms: yieldTimeMsSchema.optional(),
-  stdout_max_bytes: stdoutMaxBytesSchema.optional(),
-  stderr_max_bytes: stderrMaxBytesSchema.optional(),
-  load_user_environment: z.boolean().optional(),
-  idempotency_key: idempotencyKeySchema.optional(),
-});
+export const shellExecInputSchema = z
+  .object({
+    backend_id: backendIdSchema,
+    command: commandSchema,
+    shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
+    working_directory: workingDirectorySchema.optional(),
+    environment: environmentSchema.optional(),
+    timeout_ms: timeoutMsSchema.optional(),
+    yield_time_ms: yieldTimeMsSchema.optional(),
+    stdout_max_bytes: stdoutMaxBytesSchema.optional(),
+    stderr_max_bytes: stderrMaxBytesSchema.optional(),
+    load_user_environment: z.boolean().optional(),
+    idempotency_key: idempotencyKeySchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.shell === '/bin/sh' && value.load_user_environment === true) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or set false.',
+        path: ['load_user_environment'],
+      });
+    }
+  });
 
 const processStartShared = {
   backend_id: backendIdSchema,
@@ -86,12 +98,18 @@ const processStartShared = {
   stdout_hard_max_bytes: hardMaxBytesSchema.optional(),
   stderr_hard_max_bytes: hardMaxBytesSchema.optional(),
   idempotency_key: idempotencyKeySchema.optional(),
+  load_user_environment: z.boolean().optional(),
+  shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
 };
 
-/** Runtime + CallTool validation (XOR program/command). */
+/**
+ * Runtime + CallTool validation.
+ * Prefer mode=exec|shell; legacy XOR program/command still accepted.
+ */
 export const processStartInputSchema = z
   .object({
     ...processStartShared,
+    mode: z.enum(['exec', 'shell']).optional(),
     program: programSchema.optional(),
     arguments: argumentsSchema.optional(),
     command: commandSchema.optional(),
@@ -100,25 +118,65 @@ export const processStartInputSchema = z
   .superRefine((value, context) => {
     const hasProgram = value.program !== undefined;
     const hasCommand = value.command !== undefined;
+    if (value.mode === 'exec') {
+      if (!hasProgram) {
+        context.addIssue({ code: 'custom', message: 'mode=exec requires program.', path: ['program'] });
+      }
+      if (hasCommand) {
+        context.addIssue({
+          code: 'custom',
+          message: 'mode=exec forbids command.',
+          path: ['command'],
+        });
+      }
+      return;
+    }
+    if (value.mode === 'shell') {
+      if (!hasCommand) {
+        context.addIssue({
+          code: 'custom',
+          message: 'mode=shell requires command.',
+          path: ['command'],
+        });
+      }
+      if (hasProgram) {
+        context.addIssue({
+          code: 'custom',
+          message: 'mode=shell forbids program.',
+          path: ['program'],
+        });
+      }
+      if (value.shell === '/bin/sh' && value.load_user_environment === true) {
+        context.addIssue({
+          code: 'custom',
+          message: 'load_user_environment=true is not supported with shell=/bin/sh.',
+          path: ['load_user_environment'],
+        });
+      }
+      return;
+    }
     if (hasProgram === hasCommand) {
       context.addIssue({
         code: 'custom',
-        message: 'Provide exactly one of program or command.',
+        message: 'Provide exactly one of program or command, or set mode=exec|shell.',
       });
     }
   });
 
 /**
- * Advertised JSON Schema for tools/list — oneOf expresses program XOR command.
+ * Advertised JSON Schema for tools/list — mode discriminant + legacy XOR.
  * MCP SDK only auto-converts plain object Zod schemas (superRefine is invisible).
  */
 export const processStartListJsonSchema: Record<string, unknown> = {
   type: 'object',
   properties: {
     backend_id: z.toJSONSchema(backendIdSchema),
+    mode: { type: 'string', enum: ['exec', 'shell'] },
     program: z.toJSONSchema(programSchema),
     arguments: z.toJSONSchema(argumentsSchema),
     command: z.toJSONSchema(commandSchema),
+    shell: { type: 'string', enum: ['/bin/bash', '/bin/sh'] },
+    load_user_environment: { type: 'boolean' },
     working_directory: z.toJSONSchema(workingDirectorySchema),
     environment: z.toJSONSchema(environmentSchema),
     tty: { type: 'boolean' },
@@ -130,12 +188,22 @@ export const processStartListJsonSchema: Record<string, unknown> = {
   required: ['backend_id'],
   oneOf: [
     {
-      required: ['program'],
+      properties: { mode: { const: 'exec' } },
+      required: ['mode', 'program'],
       not: { required: ['command'] },
     },
     {
-      required: ['command'],
+      properties: { mode: { const: 'shell' } },
+      required: ['mode', 'command'],
       not: { required: ['program'] },
+    },
+    {
+      required: ['program'],
+      not: { required: ['command', 'mode'] },
+    },
+    {
+      required: ['command'],
+      not: { required: ['program', 'mode'] },
     },
   ],
   additionalProperties: false,
@@ -165,14 +233,29 @@ export const processTerminateInputSchema = z.strictObject({
 
 // ── Files ─────────────────────────────────────────────────────────────
 
-export const filesReadInputSchema = z.strictObject({
-  backend_id: backendIdSchema,
-  path: pathSchema,
-  start_line: z.number().int().min(1).optional(),
-  end_line: z.number().int().min(1).optional(),
-  max_bytes: fileMaxBytesSchema.optional(),
-  encoding: z.enum(['utf-8', 'base64']).optional(),
-});
+export const filesReadInputSchema = z
+  .object({
+    backend_id: backendIdSchema,
+    path: pathSchema,
+    start_line: z.number().int().min(1).optional(),
+    end_line: z.number().int().min(1).optional(),
+    max_bytes: fileMaxBytesSchema.optional(),
+    encoding: z.enum(['utf-8', 'base64']).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.start_line !== undefined &&
+      value.end_line !== undefined &&
+      value.end_line < value.start_line
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'end_line must be >= start_line.',
+        path: ['end_line'],
+      });
+    }
+  });
 
 export const filesStatInputSchema = z.strictObject({
   backend_id: backendIdSchema,

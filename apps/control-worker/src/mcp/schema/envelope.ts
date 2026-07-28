@@ -70,7 +70,8 @@ export function categoryFor(code: string): ErrorCategory {
     code.startsWith('invalid_') ||
     code === 'path_not_allowed' ||
     code === 'path_not_directory' ||
-    code === 'path_not_found'
+    code === 'path_not_found' ||
+    code === 'invalid_line_range'
   ) {
     return 'validation';
   }

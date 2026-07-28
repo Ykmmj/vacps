@@ -581,7 +581,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.process.start',
     toolConfig('vacps.process.start', {
       description:
-        'Start a long-running or interactive process on a backend. Provide exactly one of program or command (not both, not neither). stdout/stderr_hard_max_bytes are 0..1073741824.',
+        'Start a long-running or interactive process. Prefer mode=exec|shell (or legacy XOR program/command). Returns a full Process Snapshot like command.exec. stdout/stderr_hard_max_bytes are 0..1073741824.',
       inputSchema: processStartInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
@@ -882,19 +882,26 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.git.apply',
     toolConfig('vacps.git.apply', {
-      description: 'Apply a unified diff with git apply on a backend.',
+      description:
+        'Apply a unified diff with git apply on a backend. Supports idempotency_key for safe retries.',
       inputSchema: gitApplyInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
     wrap(async (args) => {
       const parsed = gitApplyInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      const path = `/tmp/vacps-git-apply-${crypto.randomUUID()}.patch`;
+      // Stable temp path when idempotent so retries hit the same request hash on write+apply.
+      const path = parsed.idempotency_key
+        ? `/tmp/vacps-git-apply-${parsed.backend_id}-${parsed.idempotency_key.replace(/[^A-Za-z0-9._:-]/g, '_')}.patch`
+        : `/tmp/vacps-git-apply-${crypto.randomUUID()}.patch`;
       await client.writeFile(backend, {
         path,
         content: parsed.patch,
         mode: 'create_or_overwrite',
         create_parent_directories: true,
+        ...(parsed.idempotency_key
+          ? { idempotency_key: `git-apply-write:${parsed.idempotency_key}` }
+          : {}),
       });
       try {
         return (await client.execCommand(backend, {
@@ -903,9 +910,14 @@ export function createMcpServer(env: Env): McpServer {
           working_directory: parsed.working_directory,
           timeout_ms: 60_000,
           yield_time_ms: 30_000,
+          ...(parsed.idempotency_key
+            ? { idempotency_key: `git-apply:${parsed.idempotency_key}` }
+            : {}),
         })) as Record<string, unknown>;
       } finally {
-        await client.deleteFile(backend, { path }).catch(() => undefined);
+        if (!parsed.idempotency_key) {
+          await client.deleteFile(backend, { path }).catch(() => undefined);
+        }
       }
     }),
   );

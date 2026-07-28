@@ -49,7 +49,7 @@ export const labelsSchema = z
 export const workingDirectorySchema = pathSchema;
 
 export const programSchema = z.string().min(1).max(4096);
-export const commandSchema = z.string().min(1).max(100_000);
+export const commandSchema = z.string().min(1).max(262_144);
 export const processIdSchema = z.string().min(1).max(128);
 export const taskIdSchema = z.string().uuid();
 export const scheduleIdSchema = z.string().uuid();

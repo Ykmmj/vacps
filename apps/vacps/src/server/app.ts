@@ -516,11 +516,24 @@ export async function createServer(input: {
       return reply
         .code(400)
         .send({ error: { code: 'validation_error', message: 'command is required.' } });
+    const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
+    // Default true for bash; /bin/sh cannot claim login environment.
+    const loadUserEnvironment =
+      shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    if (shell === '/bin/sh' && body.load_user_environment === true) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message:
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or omit/false.',
+        },
+      });
+    }
     try {
       const result = await processes.exec({
         toolName: 'shell.exec',
         command: body.command,
-        shell: body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash',
+        shell,
         workingDirectory:
           typeof body.working_directory === 'string' ? body.working_directory : undefined,
         environment:
@@ -532,8 +545,7 @@ export async function createServer(input: {
         stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
         stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
         idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
-        // Default true: shell.exec loads the real agent login environment.
-        loadUserEnvironment: body.load_user_environment !== false,
+        loadUserEnvironment,
         closeStdin: true,
       });
       return { ok: true, ...result };
@@ -583,13 +595,32 @@ export async function createServer(input: {
 
   app.post('/process/start', async (request, reply) => {
     const body = request.body as Record<string, unknown>;
-    const hasProgram = typeof body.program === 'string' && body.program.length > 0;
-    const hasCommand = typeof body.command === 'string' && body.command.length > 0;
-    if (hasProgram === hasCommand) {
+    const mode = body.mode === 'exec' || body.mode === 'shell' ? body.mode : undefined;
+    let hasProgram = typeof body.program === 'string' && body.program.length > 0;
+    let hasCommand = typeof body.command === 'string' && body.command.length > 0;
+    if (mode === 'exec') {
+      if (!hasProgram || hasCommand) {
+        return reply.code(400).send({
+          error: {
+            code: 'validation_error',
+            message: 'mode=exec requires program and forbids command.',
+          },
+        });
+      }
+    } else if (mode === 'shell') {
+      if (!hasCommand || hasProgram) {
+        return reply.code(400).send({
+          error: {
+            code: 'validation_error',
+            message: 'mode=shell requires command and forbids program/arguments.',
+          },
+        });
+      }
+    } else if (hasProgram === hasCommand) {
       return reply.code(400).send({
         error: {
           code: 'validation_error',
-          message: 'Provide exactly one of program or command.',
+          message: 'Provide exactly one of program or command (or set mode=exec|shell).',
         },
       });
     }
@@ -642,17 +673,14 @@ export async function createServer(input: {
             ? body.stderr_hard_max_bytes
             : 100 * 1024 * 1024,
         tty: body.tty === true,
+        // Shell mode defaults to agent login env; exec mode never uses a shell.
+        loadUserEnvironment: hasCommand ? body.load_user_environment !== false : false,
+        shell: hasCommand ? (body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash') : undefined,
         idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
         closeStdin: body.tty === true ? false : true,
       });
-      return {
-        ok: true,
-        process_id: result.process_id,
-        status: result.status,
-        stdin_available: result.stdin_available,
-        tty: result.tty,
-        output_cursor: '1:0',
-      };
+      // Full Process Snapshot — same shape as command.exec / shell.exec.
+      return { ok: true, ...result };
     } catch (error) {
       return runtimeError(reply, error);
     }

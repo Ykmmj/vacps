@@ -59,32 +59,50 @@ export async function filesRead(input: {
   const path = assertSafeAbsolutePath(input.path);
   const encoding = input.encoding ?? 'utf-8';
   const maxBytes = clamp(input.maxBytes ?? 32_768, 1, 256 * 1024);
+
+  if (
+    input.startLine !== undefined &&
+    input.endLine !== undefined &&
+    input.endLine < input.startLine
+  ) {
+    throw Object.assign(
+      new Error(`end_line (${input.endLine}) must be >= start_line (${input.startLine}).`),
+      { code: 'invalid_line_range', statusCode: 400 },
+    );
+  }
+
   const buffer = await readFile(path);
   const totalBytes = buffer.length;
   const digest = sha256Hex(buffer);
   const info = await stat(path);
+  const modifiedAt = info.mtime.toISOString();
 
   if (encoding === 'base64') {
     const slice = buffer.subarray(0, maxBytes);
     const truncated = slice.length < totalBytes;
+    // Schema v2: no duplicated top-level total_* / sha256 fields.
     return {
       path,
-      kind: 'binary' as const,
       content: slice.toString('base64'),
-      encoding: 'base64' as const,
-      start_line: null,
-      end_line: null,
-      total_lines: null,
-      total_bytes: totalBytes,
-      returned_bytes: slice.length,
-      // truncated only when max_bytes forced an incomplete read of the file.
-      truncated,
-      truncation_reason: truncated ? 'max_bytes' : null,
-      next_start_line: null,
-      range: null,
-      file: { total_bytes: totalBytes, total_lines: null },
-      sha256: digest,
-      modified_at: info.mtime.toISOString(),
+      file: {
+        kind: 'binary' as const,
+        encoding: 'base64' as const,
+        size_bytes: totalBytes,
+        total_lines: null as number | null,
+        sha256: digest,
+        modified_at: modifiedAt,
+      },
+      range: {
+        requested_start_line: null as number | null,
+        requested_end_line: null as number | null,
+        returned_start_line: null as number | null,
+        returned_end_line: null as number | null,
+        returned_bytes: slice.length,
+        complete: !truncated,
+        truncated,
+        truncation_reason: truncated ? ('max_bytes' as const) : null,
+        next_start_line: null as number | null,
+      },
     };
   }
 
@@ -95,7 +113,7 @@ export async function filesRead(input: {
   const requestedStart = input.startLine ?? 1;
   const requestedEnd = input.endLine ?? lineCount;
   const start = clamp(requestedStart, 1, Math.max(1, lineCount));
-  let end = clamp(requestedEnd, start, Math.max(start, lineCount));
+  const end = clamp(requestedEnd, start, Math.max(start, lineCount));
 
   let selected = lines.slice(start - 1, end);
   let content = selected.join('\n');
@@ -120,30 +138,32 @@ export async function filesRead(input: {
   const returnedStart = start;
   const returnedEnd = selected.length === 0 ? start - 1 : start + selected.length - 1;
   const rangeComplete = !truncated && returnedEnd >= end;
+  const returnedBytes = Buffer.byteLength(content, 'utf8');
 
   return {
     path,
-    kind: 'text' as const,
     content,
-    encoding: 'utf-8' as const,
-    start_line: returnedStart,
-    end_line: Math.max(returnedStart, returnedEnd),
-    total_lines: lineCount,
-    total_bytes: totalBytes,
-    returned_bytes: Buffer.byteLength(content, 'utf8'),
-    truncated,
-    truncation_reason: truncationReason,
-    next_start_line: truncated ? nextStart : null,
+    file: {
+      kind: 'text' as const,
+      encoding: 'utf-8' as const,
+      size_bytes: totalBytes,
+      total_lines: lineCount,
+      sha256: digest,
+      modified_at: modifiedAt,
+    },
     range: {
       requested_start_line: requestedStart,
       requested_end_line: requestedEnd,
       returned_start_line: returnedStart,
       returned_end_line: Math.max(returnedStart, returnedEnd),
+      returned_bytes: returnedBytes,
+      complete: rangeComplete,
+      // Alias kept for older clients that checked range_complete.
       range_complete: rangeComplete,
+      truncated,
+      truncation_reason: truncationReason,
+      next_start_line: truncated ? nextStart : null,
     },
-    file: { total_lines: lineCount, total_bytes: totalBytes },
-    sha256: digest,
-    modified_at: info.mtime.toISOString(),
   };
 }
 
@@ -183,6 +203,8 @@ export async function filesList(input: {
   const nextOffset = offset + matches.length;
   return {
     path,
+    // Schema v2 primary field is entries; matches kept as alias during migration.
+    entries: matches,
     matches,
     returned_count: matches.length,
     truncated: nextOffset < visible.length,
