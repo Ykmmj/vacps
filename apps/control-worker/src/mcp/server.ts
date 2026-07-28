@@ -369,69 +369,503 @@ export function createMcpServer(env: Env): McpServer {
     ),
   );
 
-  // ── Layer A: minimal ───────────────────────────────────────────────
+  const requireBackend = async (backendId: unknown) => {
+    const backend = await backends.get(String(backendId));
+    if (!backend.enabled)
+      throw new AppError('backend_disabled', `Backend '${backend.id}' is disabled.`, 409);
+    return backend;
+  };
+
+  // ── Command / shell / process (sug.md P0+P1) ───────────────────────
   server.registerTool(
-    'vacps.read',
+    'vacps.command.exec',
     {
-      description: 'Read a file on a backend by absolute path (line offset/limit).',
+      description:
+        'Run a non-interactive program on a backend (argv form, no shell). Uses yield_time_ms for sync wait.',
       inputSchema: {
         backend_id: z.string(),
-        file_path: z.string(),
-        offset: z.number().int().min(1).default(1),
-        limit: z.number().int().min(1).max(5000).default(2000),
+        program: z.string(),
+        arguments: z.array(z.string()).optional(),
+        working_directory: z.string().optional(),
+        environment: z.record(z.string(), z.string()).optional(),
+        timeout_ms: z.number().int().min(1).max(3_600_000).default(120_000),
+        yield_time_ms: z.number().int().min(1).max(120_000).default(10_000),
+        stdout_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
+        stderr_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
+        idempotency_key: z.string().optional(),
       },
-      outputSchema: okEnvelope.extend({
-        file_path: z.string(),
-        content: z.string(),
-        truncated: z.boolean(),
-      }).shape,
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     },
     wrap(
-      (value) => `Read ${String(value.file_path)}`,
-      async ({ backend_id, file_path, offset, limit }) => {
-        const backend = await backends.get(String(backend_id));
-        if (!backend.enabled)
-          throw new AppError('backend_disabled', `Backend '${backend.id}' is disabled.`, 409);
+      (value) => `command ${String(value.status)} ${String(value.process_id)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.execCommand(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.shell.exec',
+    {
+      description:
+        'Run a shell command string on a backend when pipes/redirection are required. Prefer vacps.command.exec.',
+      inputSchema: {
+        backend_id: z.string(),
+        command: z.string(),
+        shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
+        working_directory: z.string().optional(),
+        environment: z.record(z.string(), z.string()).optional(),
+        timeout_ms: z.number().int().min(1).max(3_600_000).default(120_000),
+        yield_time_ms: z.number().int().min(1).max(120_000).default(10_000),
+        stdout_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
+        stderr_max_bytes: z.number().int().min(0).max(1_048_576).default(16_384),
+        idempotency_key: z.string().optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    },
+    wrap(
+      (value) => `shell ${String(value.status)} ${String(value.process_id)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.execShell(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.process.start',
+    {
+      description: 'Start a long-running or interactive process on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        program: z.string().optional(),
+        arguments: z.array(z.string()).optional(),
+        command: z.string().optional(),
+        working_directory: z.string().optional(),
+        environment: z.record(z.string(), z.string()).optional(),
+        tty: z.boolean().optional(),
+        timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
+        stdout_hard_max_bytes: z.number().int().optional(),
+        stderr_hard_max_bytes: z.number().int().optional(),
+        idempotency_key: z.string().optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    },
+    wrap(
+      (value) => `started ${String(value.process_id)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.processStart(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.process.read',
+    {
+      description: 'Read stdout/stderr chunks from a process started on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        process_id: z.string(),
+        cursor: z.string().optional(),
+        max_bytes: z.number().int().min(1).max(1_048_576).optional(),
+        wait_ms: z.number().int().min(0).max(60_000).optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    },
+    wrap(
+      (value) => `process ${String(value.process_id)} ${String(value.status)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.processRead(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.process.write',
+    {
+      description: 'Write to process stdin on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        process_id: z.string(),
+        data: z.string(),
+        close_stdin: z.boolean().optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string() }).shape,
+    },
+    wrap(
+      (value) => `wrote to ${String(value.process_id)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.processWrite(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.process.terminate',
+    {
+      description: 'Terminate a process on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        process_id: z.string(),
+        signal: z.enum(['sigterm', 'sigint', 'sigkill']).optional(),
+        grace_period_ms: z.number().int().min(0).max(60_000).optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    },
+    wrap(
+      (value) => `terminated ${String(value.process_id)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.processTerminate(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  // ── Files (sug.md P0+P1) ───────────────────────────────────────────
+  server.registerTool(
+    'vacps.files.read',
+    {
+      description: 'Read a file on a backend by absolute path with optional line range and byte cap.',
+      inputSchema: {
+        backend_id: z.string(),
+        path: z.string(),
+        start_line: z.number().int().min(1).optional(),
+        end_line: z.number().int().min(1).optional(),
+        max_bytes: z.number().int().min(1).max(262_144).default(32_768),
+        encoding: z.enum(['utf-8', 'base64']).optional(),
+      },
+      outputSchema: okEnvelope.extend({ path: z.string(), content: z.string() }).shape,
+    },
+    wrap(
+      (value) => `Read ${String(value.path)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
         return (await client.readFile(backend, {
-          filePath: String(file_path),
-          offset: typeof offset === 'number' ? offset : 1,
-          limit: typeof limit === 'number' ? limit : 2000,
+          path: String(args.path),
+          startLine: typeof args.start_line === 'number' ? args.start_line : undefined,
+          endLine: typeof args.end_line === 'number' ? args.end_line : undefined,
+          maxBytes: typeof args.max_bytes === 'number' ? args.max_bytes : 32_768,
+          encoding: args.encoding === 'base64' ? 'base64' : 'utf-8',
         })) as Record<string, unknown>;
       },
     ),
   );
 
   server.registerTool(
-    'vacps.bash',
+    'vacps.files.stat',
     {
-      description: 'Run a shell command on a backend (foreground; output previews capped).',
-      inputSchema: {
-        backend_id: z.string(),
-        command: z.string(),
-        description: z.string().optional(),
-        timeout_ms: z.number().int().min(1).max(600_000).default(120_000),
-        cwd: z.string().optional(),
-      },
-      outputSchema: okEnvelope.extend({
-        status: z.string(),
-        exit_code: z.number().nullable(),
-        stdout_preview: z.string(),
-        stderr_preview: z.string(),
-      }).shape,
+      description: 'Stat a file or directory on a backend.',
+      inputSchema: { backend_id: z.string(), path: z.string() },
+      outputSchema: okEnvelope.extend({ path: z.string(), type: z.string() }).shape,
     },
     wrap(
-      (value) => `bash ${String(value.status)} exit=${String(value.exit_code)}`,
-      async ({ backend_id, command, description, timeout_ms, cwd }) => {
-        const backend = await backends.get(String(backend_id));
-        if (!backend.enabled)
-          throw new AppError('backend_disabled', `Backend '${backend.id}' is disabled.`, 409);
-        // Process non-zero exits are not protocol errors.
-        return (await client.bash(backend, {
-          command: String(command),
-          timeoutMs: typeof timeout_ms === 'number' ? timeout_ms : 120_000,
-          ...(typeof cwd === 'string' ? { cwd } : {}),
-          ...(typeof description === 'string' ? { description } : {}),
+      (value) => `Stat ${String(value.path)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.statFile(backend, String(args.path))) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.list',
+    {
+      description: 'List directory entries on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        path: z.string(),
+        limit: z.number().int().min(1).max(2000).optional(),
+        include_hidden: z.boolean().optional(),
+      },
+      outputSchema: okEnvelope.extend({ matches: z.array(z.unknown()) }).shape,
+    },
+    wrap(
+      (value) => `Listed ${(value.matches as unknown[])?.length ?? 0} entries`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.listDir(backend, {
+          path: String(args.path),
+          limit: typeof args.limit === 'number' ? args.limit : 200,
+          includeHidden: args.include_hidden === true,
         })) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.glob',
+    {
+      description: 'Glob files on a backend (ripgrep --files when available).',
+      inputSchema: {
+        backend_id: z.string(),
+        pattern: z.string(),
+        path: z.string().optional(),
+        include_hidden: z.boolean().optional(),
+        respect_gitignore: z.boolean().optional(),
+        limit: z.number().int().min(1).max(2000).optional(),
+      },
+      outputSchema: okEnvelope.extend({ matches: z.array(z.unknown()) }).shape,
+    },
+    wrap(
+      (value) => `Glob ${(value.matches as unknown[])?.length ?? 0} matches`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.glob(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.grep',
+    {
+      description: 'Search file contents on a backend with ripgrep.',
+      inputSchema: {
+        backend_id: z.string(),
+        pattern: z.string(),
+        path: z.string().optional(),
+        file_pattern: z.string().optional(),
+        case_sensitive: z.boolean().optional(),
+        fixed_string: z.boolean().optional(),
+        context_before: z.number().int().min(0).max(10).optional(),
+        context_after: z.number().int().min(0).max(10).optional(),
+        max_matches: z.number().int().min(1).max(500).optional(),
+        max_bytes: z.number().int().min(1).max(262_144).optional(),
+      },
+      outputSchema: okEnvelope.extend({ matches: z.array(z.unknown()) }).shape,
+    },
+    wrap(
+      (value) => `Grep ${String(value.match_count ?? (value.matches as unknown[])?.length ?? 0)} hits`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.grep(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.edit',
+    {
+      description: 'Exact string replacement in a file on a backend (old_text must be unique unless replace_all).',
+      inputSchema: {
+        backend_id: z.string(),
+        path: z.string(),
+        old_text: z.string(),
+        new_text: z.string(),
+        replace_all: z.boolean().optional(),
+        expected_sha256: z.string().optional(),
+        idempotency_key: z.string().optional(),
+      },
+      outputSchema: okEnvelope.extend({ path: z.string(), replacement_count: z.number() }).shape,
+    },
+    wrap(
+      (value) => `Edited ${String(value.path)} ×${String(value.replacement_count)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.editFile(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.write',
+    {
+      description: 'Write a file on a backend (atomic temp+rename).',
+      inputSchema: {
+        backend_id: z.string(),
+        path: z.string(),
+        content: z.string(),
+        mode: z.enum(['create', 'overwrite', 'create_or_overwrite']).default('create_or_overwrite'),
+        expected_sha256: z.string().optional(),
+        create_parent_directories: z.boolean().optional(),
+        idempotency_key: z.string().optional(),
+      },
+      outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
+    },
+    wrap(
+      (value) => `Wrote ${String(value.path)} (${String(value.operation)})`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.writeFile(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.apply_patch',
+    {
+      description: 'Apply a Codex-style multi-file patch on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        patch: z.string(),
+        workspace_path: z.string().optional(),
+        dry_run: z.boolean().optional(),
+        atomic: z.boolean().optional(),
+        idempotency_key: z.string().optional(),
+      },
+      outputSchema: okEnvelope.extend({ files: z.array(z.unknown()) }).shape,
+    },
+    wrap(
+      (value) => `Patch ${(value.files as unknown[])?.length ?? 0} files`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.applyPatch(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.move',
+    {
+      description: 'Move/rename a file on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        from: z.string(),
+        to: z.string(),
+        overwrite: z.boolean().optional(),
+      },
+      outputSchema: okEnvelope.extend({ from: z.string(), to: z.string() }).shape,
+    },
+    wrap(
+      (value) => `Moved ${String(value.from)} → ${String(value.to)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.moveFile(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.delete',
+    {
+      description: 'Delete a file or directory on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        path: z.string(),
+        recursive: z.boolean().optional(),
+      },
+      outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
+    },
+    wrap(
+      (value) => `Deleted ${String(value.path)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.deleteFile(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.files.mkdir',
+    {
+      description: 'Create a directory on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        path: z.string(),
+        recursive: z.boolean().optional(),
+      },
+      outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
+    },
+    wrap(
+      (value) => `mkdir ${String(value.path)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.mkdir(backend, args)) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  // ── Git helpers (P1; thin shell wrappers) ───────────────────────────
+  server.registerTool(
+    'vacps.git.status',
+    {
+      description: 'git status --short on a backend working tree.',
+      inputSchema: {
+        backend_id: z.string(),
+        working_directory: z.string().optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    },
+    wrap(
+      (value) => `git status ${String(value.status)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        return (await client.execCommand(backend, {
+          program: 'git',
+          arguments: ['status', '--short'],
+          working_directory: args.working_directory,
+          timeout_ms: 60_000,
+          yield_time_ms: 30_000,
+        })) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.git.diff',
+    {
+      description: 'git diff on a backend working tree.',
+      inputSchema: {
+        backend_id: z.string(),
+        working_directory: z.string().optional(),
+        staged: z.boolean().optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    },
+    wrap(
+      (value) => `git diff ${String(value.status)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        const arguments_ = args.staged === true ? ['diff', '--cached'] : ['diff'];
+        return (await client.execCommand(backend, {
+          program: 'git',
+          arguments: arguments_,
+          working_directory: args.working_directory,
+          timeout_ms: 60_000,
+          yield_time_ms: 30_000,
+          stdout_max_bytes: 65_536,
+        })) as Record<string, unknown>;
+      },
+    ),
+  );
+
+  server.registerTool(
+    'vacps.git.apply',
+    {
+      description: 'Apply a unified diff with git apply on a backend.',
+      inputSchema: {
+        backend_id: z.string(),
+        patch: z.string(),
+        working_directory: z.string().optional(),
+        check: z.boolean().optional(),
+      },
+      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    },
+    wrap(
+      (value) => `git apply ${String(value.status)}`,
+      async (args) => {
+        const backend = await requireBackend(args.backend_id);
+        const path = `/tmp/vacps-git-apply-${crypto.randomUUID()}.patch`;
+        await client.writeFile(backend, {
+          path,
+          content: String(args.patch),
+          mode: 'create_or_overwrite',
+          create_parent_directories: true,
+        });
+        try {
+          return (await client.execCommand(backend, {
+            program: 'git',
+            arguments: args.check === true ? ['apply', '--check', path] : ['apply', path],
+            working_directory: args.working_directory,
+            timeout_ms: 60_000,
+            yield_time_ms: 30_000,
+          })) as Record<string, unknown>;
+        } finally {
+          await client.deleteFile(backend, { path }).catch(() => undefined);
+        }
       },
     ),
   );

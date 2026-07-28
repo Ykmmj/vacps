@@ -1,5 +1,4 @@
-import { open, readFile, stat } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { open, stat } from 'node:fs/promises';
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createTaskSchema, taskDispatchSchema } from '@vacps/contracts';
@@ -9,6 +8,8 @@ import type { TaskQueue } from '../queue/task-queue.js';
 import type { TaskStore } from '../storage/task-store.js';
 import type { NodeTelemetryCollector } from '../telemetry/node-telemetry.js';
 import { verifyControlPlaneRequest } from '../security/request-signatures.js';
+import { ProcessManager } from '../runtime/process-manager.js';
+import * as files from '../runtime/files.js';
 
 export async function createServer(input: {
   config: AgentConfig;
@@ -17,7 +18,8 @@ export async function createServer(input: {
   telemetry: NodeTelemetryCollector;
   store: TaskStore;
 }): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true, bodyLimit: 256 * 1024 });
+  const app = Fastify({ logger: true, bodyLimit: 2 * 1024 * 1024 });
+  const processes = new ProcessManager(input.config.BACKEND_ID);
   app.addHook('preValidation', async (request, reply) => {
     try {
       const body = request.body === undefined ? '' : JSON.stringify(request.body);
@@ -153,82 +155,431 @@ export async function createServer(input: {
     return { taskId: id, commands };
   });
 
-  // Layer A: vacps.read
+  // ── Files ──────────────────────────────────────────────────────────
   app.get('/fs/read', async (request, reply) => {
-    const query = request.query as { file_path?: string; offset?: string; limit?: string };
-    const filePath = query.file_path?.trim();
-    if (!filePath?.startsWith('/'))
+    const query = request.query as Record<string, string | undefined>;
+    const filePath = query.path?.trim() || query.file_path?.trim();
+    if (!filePath)
       return reply
         .code(400)
-        .send({ error: { code: 'validation_error', message: 'file_path must be absolute.' } });
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
     try {
-      const raw = await readFile(filePath, 'utf8');
-      const lines = raw.split('\n');
-      const offset = Math.max(1, Number(query.offset ?? 1) || 1);
-      const limit = Math.min(Math.max(Number(query.limit ?? 2000) || 2000, 1), 5000);
-      const slice = lines.slice(offset - 1, offset - 1 + limit);
-      const numbered = slice
-        .map((line, index) => {
-          const text = line.length > 2000 ? `${line.slice(0, 2000)}…` : line;
-          return `${String(offset + index).padStart(6, ' ')}	${text}`;
-        })
-        .join('\n');
-      const nextOffset = offset + slice.length;
-      const truncated = nextOffset <= lines.length;
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        file_path: filePath,
-        offset,
-        limit,
-        total_lines: lines.length,
-        truncated,
-        next_offset: truncated ? nextOffset : null,
-        content: numbered,
-      };
-    } catch (error) {
-      return reply.code(404).send({
-        error: {
-          code: 'not_found',
-          message: error instanceof Error ? error.message : 'File not found.',
-        },
+      const result = await files.filesRead({
+        path: filePath,
+        startLine: numberOr(query.start_line ?? query.offset, 1),
+        endLine: query.end_line
+          ? numberOr(query.end_line, undefined)
+          : query.limit
+            ? numberOr(query.offset ?? '1', 1) + numberOr(query.limit, 2000) - 1
+            : undefined,
+        maxBytes: numberOr(query.max_bytes, 32_768),
+        encoding: query.encoding === 'base64' ? 'base64' : 'utf-8',
       });
+      return { ok: true, backend_id: input.config.BACKEND_ID, ...result };
+    } catch (error) {
+      return runtimeError(reply, error, 404);
     }
   });
 
-  // Layer A: vacps.bash (foreground only for v1)
-  app.post('/exec/bash', async (request, reply) => {
-    const body = request.body as {
-      command?: unknown;
-      timeout_ms?: unknown;
-      cwd?: unknown;
-      description?: unknown;
-    };
+  app.get('/fs/stat', async (request, reply) => {
+    const path = (request.query as { path?: string }).path?.trim();
+    if (!path)
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+    try {
+      return { ok: true, backend_id: input.config.BACKEND_ID, ...(await files.filesStat(path)) };
+    } catch (error) {
+      return runtimeError(reply, error, 404);
+    }
+  });
+
+  app.get('/fs/list', async (request, reply) => {
+    const query = request.query as Record<string, string | undefined>;
+    const path = query.path?.trim();
+    if (!path)
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesList({
+          path,
+          limit: numberOr(query.limit, 200),
+          includeHidden: query.include_hidden === 'true',
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error, 404);
+    }
+  });
+
+  app.post('/fs/glob', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.pattern !== 'string' || !body.pattern)
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'pattern is required.' } });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesGlob({
+          pattern: body.pattern,
+          path: typeof body.path === 'string' ? body.path : undefined,
+          includeHidden: Boolean(body.include_hidden),
+          respectGitignore: body.respect_gitignore !== false,
+          limit: typeof body.limit === 'number' ? body.limit : 200,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/fs/grep', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.pattern !== 'string' || !body.pattern)
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'pattern is required.' } });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesGrep({
+          pattern: body.pattern,
+          path: typeof body.path === 'string' ? body.path : undefined,
+          filePattern: typeof body.file_pattern === 'string' ? body.file_pattern : undefined,
+          caseSensitive: body.case_sensitive === true,
+          fixedString: body.fixed_string === true,
+          contextBefore: typeof body.context_before === 'number' ? body.context_before : 0,
+          contextAfter: typeof body.context_after === 'number' ? body.context_after : 0,
+          maxMatches: typeof body.max_matches === 'number' ? body.max_matches : 100,
+          maxBytes: typeof body.max_bytes === 'number' ? body.max_bytes : 64_000,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/fs/edit', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.path !== 'string' || typeof body.old_text !== 'string' || typeof body.new_text !== 'string')
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'path, old_text, and new_text are required.' },
+      });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesEdit({
+          path: body.path,
+          oldText: body.old_text,
+          newText: body.new_text,
+          replaceAll: body.replace_all === true,
+          expectedSha256: typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/fs/write', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.path !== 'string' || typeof body.content !== 'string')
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'path and content are required.' } });
+    const mode =
+      body.mode === 'create' || body.mode === 'overwrite' || body.mode === 'create_or_overwrite'
+        ? body.mode
+        : 'create_or_overwrite';
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesWrite({
+          path: body.path,
+          content: body.content,
+          mode,
+          expectedSha256: typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+          createParentDirectories: body.create_parent_directories !== false,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/fs/apply_patch', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.patch !== 'string' || !body.patch)
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'patch is required.' } });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.applyPatch({
+          patch: body.patch,
+          workspacePath: typeof body.workspace_path === 'string' ? body.workspace_path : undefined,
+          dryRun: body.dry_run === true,
+          atomic: body.atomic !== false,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/fs/move', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.from !== 'string' || typeof body.to !== 'string')
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'from and to are required.' } });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesMove({
+          from: body.from,
+          to: body.to,
+          overwrite: body.overwrite === true,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/fs/delete', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.path !== 'string')
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesDelete({ path: body.path, recursive: body.recursive === true })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/fs/mkdir', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.path !== 'string')
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesMkdir({ path: body.path, recursive: body.recursive !== false })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  // ── Command / shell / process ──────────────────────────────────────
+  app.post('/exec/command', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.program !== 'string' || !body.program)
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'program is required.' } });
+    try {
+      const result = await processes.exec({
+        program: body.program,
+        arguments: Array.isArray(body.arguments)
+          ? body.arguments.map(String)
+          : undefined,
+        workingDirectory: typeof body.working_directory === 'string' ? body.working_directory : undefined,
+        environment:
+          body.environment && typeof body.environment === 'object'
+            ? (body.environment as Record<string, string>)
+            : undefined,
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
+        yieldTimeMs: typeof body.yield_time_ms === 'number' ? body.yield_time_ms : 10_000,
+        stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
+        stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
+        idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
+        closeStdin: true,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/exec/shell', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
     if (typeof body.command !== 'string' || !body.command.trim())
       return reply
         .code(400)
         .send({ error: { code: 'validation_error', message: 'command is required.' } });
-    const timeoutMs = Math.min(
-      Math.max(typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000, 1),
-      600_000,
-    );
-    const cwd = typeof body.cwd === 'string' && body.cwd.startsWith('/') ? body.cwd : process.cwd();
-    const result = await runBashCommand(body.command, cwd, timeoutMs);
-    return {
-      ok: true,
-      backend_id: input.config.BACKEND_ID,
-      status: result.timedOut ? 'timed_out' : 'exited',
-      exit_code: result.exitCode,
-      signal: null,
-      timed_out: result.timedOut,
-      stdout_preview: result.stdout.slice(0, 30_000),
-      stderr_preview: result.stderr.slice(0, 30_000),
-      stdout_truncated: result.stdout.length > 30_000,
-      stderr_truncated: result.stderr.length > 30_000,
-      stdout_bytes: Buffer.byteLength(result.stdout),
-      stderr_bytes: Buffer.byteLength(result.stderr),
-      shell_id: null,
-    };
+    try {
+      const result = await processes.exec({
+        command: body.command,
+        shell: body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash',
+        workingDirectory: typeof body.working_directory === 'string' ? body.working_directory : undefined,
+        environment:
+          body.environment && typeof body.environment === 'object'
+            ? (body.environment as Record<string, string>)
+            : undefined,
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
+        yieldTimeMs: typeof body.yield_time_ms === 'number' ? body.yield_time_ms : 10_000,
+        stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
+        stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
+        idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
+        closeStdin: true,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  // Compatibility alias for older control planes.
+  app.post('/exec/bash', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.command !== 'string' || !body.command.trim())
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'command is required.' } });
+    try {
+      const result = await processes.exec({
+        command: body.command,
+        workingDirectory: typeof body.cwd === 'string' ? body.cwd : undefined,
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
+        yieldTimeMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
+        stdoutMaxBytes: 30_000,
+        stderrMaxBytes: 30_000,
+        closeStdin: true,
+      });
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        status: result.status,
+        exit_code: result.exit_code,
+        signal: result.signal,
+        timed_out: result.timed_out,
+        stdout_preview: result.stdout.preview,
+        stderr_preview: result.stderr.preview,
+        stdout_truncated: result.stdout.truncated,
+        stderr_truncated: result.stderr.truncated,
+        stdout_bytes: result.stdout.bytes,
+        stderr_bytes: result.stderr.bytes,
+        process_id: result.process_id,
+        shell_id: null,
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/start', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    try {
+      const result = await processes.exec({
+        program: typeof body.program === 'string' ? body.program : undefined,
+        arguments: Array.isArray(body.arguments) ? body.arguments.map(String) : undefined,
+        command: typeof body.command === 'string' ? body.command : undefined,
+        workingDirectory: typeof body.working_directory === 'string' ? body.working_directory : undefined,
+        environment:
+          body.environment && typeof body.environment === 'object'
+            ? (body.environment as Record<string, string>)
+            : undefined,
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
+        yieldTimeMs: 50,
+        hardMaxStdout:
+          typeof body.stdout_hard_max_bytes === 'number' ? body.stdout_hard_max_bytes : undefined,
+        hardMaxStderr:
+          typeof body.stderr_hard_max_bytes === 'number' ? body.stderr_hard_max_bytes : undefined,
+        tty: body.tty === true,
+        idempotencyKey: typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined,
+        closeStdin: body.tty === true ? false : true,
+      });
+      return {
+        ok: true,
+        process_id: result.process_id,
+        status: result.status,
+        stdin_available: result.stdin_available,
+        tty: result.tty,
+        output_cursor: '0',
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/read', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.process_id !== 'string')
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+    try {
+      const result = await processes.readWait(body.process_id, {
+        cursor: typeof body.cursor === 'string' ? body.cursor : undefined,
+        maxBytes: typeof body.max_bytes === 'number' ? body.max_bytes : 65_536,
+        waitMs: typeof body.wait_ms === 'number' ? body.wait_ms : 0,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/write', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.process_id !== 'string' || typeof body.data !== 'string')
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'process_id and data are required.' } });
+    try {
+      return {
+        ok: true,
+        process_id: body.process_id,
+        ...processes.write(body.process_id, body.data, body.close_stdin === true),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/terminate', async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    if (typeof body.process_id !== 'string')
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+    try {
+      const signal =
+        body.signal === 'sigint' || body.signal === 'sigkill' || body.signal === 'sigterm'
+          ? body.signal
+          : 'sigterm';
+      const result = processes.terminate(
+        body.process_id,
+        signal,
+        typeof body.grace_period_ms === 'number' ? body.grace_period_ms : 3_000,
+      );
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
   });
 
   app.post('/tasks/:id/cancel', async (request) =>
@@ -358,41 +709,34 @@ async function readFileSlice(
   }
 }
 
-async function runBashCommand(
-  command: string,
-  cwd: string,
-  timeoutMs: number,
-): Promise<{ exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    const child = spawn('/bin/bash', ['-lc', command], {
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    const append = (current: string, chunk: Buffer) => {
-      const remaining = 1_048_576 - Buffer.byteLength(current);
-      return remaining > 0 ? current + chunk.subarray(0, remaining).toString('utf8') : current;
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-    }, timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout = append(stdout, chunk);
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr = append(stderr, chunk);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ exitCode: code, stdout, stderr, timedOut });
-    });
-    child.on('error', () => {
-      clearTimeout(timer);
-      resolve({ exitCode: 1, stdout, stderr, timedOut });
-    });
+function numberOr(value: string | undefined, fallback: number): number;
+function numberOr(value: string | undefined, fallback: undefined): number | undefined;
+function numberOr(value: string | undefined, fallback: number | undefined): number | undefined {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return parsed;
+}
+
+function runtimeError(
+  reply: { code: (status: number) => { send: (body: unknown) => unknown } },
+  error: unknown,
+  fallbackStatus = 400,
+) {
+  const err = error as {
+    code?: string;
+    message?: string;
+    statusCode?: number;
+    current_sha256?: string;
+    match_count?: number;
+  };
+  const status = err.statusCode ?? fallbackStatus;
+  return reply.code(status).send({
+    error: {
+      code: err.code ?? 'runtime_error',
+      message: err.message ?? (error instanceof Error ? error.message : String(error)),
+      ...(err.current_sha256 ? { current_sha256: err.current_sha256 } : {}),
+      ...(err.match_count !== undefined ? { match_count: err.match_count } : {}),
+    },
   });
 }

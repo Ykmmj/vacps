@@ -1,5 +1,4 @@
 <script lang="ts">
-  import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import * as Card from '$lib/components/ui/card/index.js';
@@ -25,6 +24,7 @@
   import XIcon from '@lucide/svelte/icons/x';
 
   import SystemIcon from './SystemIcon.svelte';
+  import { isActingOnNode } from './is-acting.js';
 
   type Filter = 'all' | 'online' | 'offline' | 'pending';
   type NodeRecord = Record<string, any>;
@@ -63,8 +63,6 @@
   let search = $state('');
   let inspectedNode = $state<NodeRecord | undefined>();
   let sheetOpen = $state(false);
-  let approvalNode = $state<NodeRecord | undefined>();
-  let approvalOpen = $state(false);
 
   const allNodes = $derived(dashboard?.nodes ?? []);
   const visibleNodes = $derived(
@@ -222,26 +220,12 @@
   }
 
   function isActing(node: NodeRecord) {
-    return (
-      actingId === node.registration?.id ||
-      actingId === node.backend?.id ||
-      actingId === node.registration?.backendId
-    );
+    return isActingOnNode(actingId, node);
   }
 
   function inspect(node: NodeRecord) {
     inspectedNode = node;
     sheetOpen = true;
-  }
-
-  function requestApproval(node: NodeRecord) {
-    approvalNode = node;
-    approvalOpen = true;
-  }
-
-  async function confirmApproval() {
-    if (approvalNode) await approve(approvalNode);
-    approvalOpen = false;
   }
 
   function tunnelLabel(node: NodeRecord) {
@@ -528,7 +512,7 @@
                   <Button
                     class="approve-button"
                     disabled={isActing(node)}
-                    onclick={() => requestApproval(node)}
+                    onclick={() => approve(node)}
                   >
                     <CheckIcon />{label('approve', 'Approve')}
                   </Button>
@@ -653,52 +637,6 @@
     {/if}
   </Sheet.Content>
 </Sheet.Root>
-
-<AlertDialog.Root bind:open={approvalOpen}>
-  <AlertDialog.Content class="approval-dialog">
-    <AlertDialog.Header>
-      <span class="dialog-mark"><ShieldCheckIcon /></span>
-      <AlertDialog.Title>{label('approvalTitle', 'Approve this node?')}</AlertDialog.Title>
-      <AlertDialog.Description
-        >{label(
-          'approvalBody',
-          'This agent will gain queue access and can begin receiving workloads.',
-        )}</AlertDialog.Description
-      >
-    </AlertDialog.Header>
-    {#if approvalNode}
-      <div class="approval-summary">
-        <strong>{approvalNode.registration.name}</strong>
-        <span class="approval-location">{approvalNode.registration.location ?? '—'}</span>
-        <ul class="approval-ip-list" aria-label={label('ip', 'IP')}>
-          {#each ipValues(approvalNode) as ip, ipIndex (ipIndex)}
-            <li class="approval-ip">{ip}</li>
-          {:else}
-            <li class="approval-ip">—</li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel
-        >{#snippet child({ props })}<Button {...props} variant="outline" class="h-11 rounded-[10px]"
-            >{label('cancel', 'Cancel')}</Button
-          >{/snippet}</AlertDialog.Cancel
-      >
-      <AlertDialog.Action>
-        {#snippet child({ props })}
-          <Button
-            {...props}
-            class="h-11 rounded-[10px]"
-            disabled={approvalNode ? isActing(approvalNode) : false}
-            onclick={confirmApproval}
-            ><CheckIcon />{label('confirmApprove', label('approve', 'Approve node'))}</Button
-          >
-        {/snippet}
-      </AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
 
 <style>
   .fleet-view {
@@ -1303,8 +1241,7 @@
     gap: 0.25rem;
     min-width: 0;
   }
-  .sheet-ip,
-  .approval-ip {
+  .sheet-ip {
     max-width: 100%;
     padding: 0.0625rem 0.3125rem;
     border: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
@@ -1398,53 +1335,6 @@
     gap: 0.5rem;
     padding: 1rem 1.5rem;
     border-top: 1px solid var(--border);
-  }
-  :global(.approval-dialog [data-slot='alert-dialog-header']) {
-    gap: 0.625rem;
-  }
-  .dialog-mark {
-    width: 2.75rem;
-    height: 2.75rem;
-    display: grid;
-    place-items: center;
-    margin-bottom: 0.25rem;
-    border-radius: 0.875rem;
-    color: var(--primary);
-    background: color-mix(in oklch, var(--primary) 12%, transparent);
-  }
-  .dialog-mark :global(svg) {
-    width: 1.25rem;
-    height: 1.25rem;
-  }
-  .approval-summary {
-    display: grid;
-    gap: 0.25rem;
-    padding: 0.875rem;
-    border: 1px solid var(--border);
-    border-radius: 0.75rem;
-    background: var(--muted);
-  }
-  .approval-summary strong {
-    overflow: hidden;
-    color: var(--foreground);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .approval-location {
-    overflow: hidden;
-    color: var(--muted-foreground);
-    font-size: 0.8125rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .approval-ip-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
   }
   .sr-only {
     position: absolute;

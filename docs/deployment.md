@@ -143,13 +143,13 @@ For a Managed Tunnel, first choose **移除节点 / Remove node** on its card in
 curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- uninstall
 ```
 
-It stops and removes the Agent, its local configuration, Quick Tunnel helper, Agent-scoped NVM runtime, and optional apt sudoers rule. It intentionally preserves `/var/lib/vacps` (SQLite task records and logs), the `agent` user, and cloudflared. To delete the preserved Agent data and system user, pass both explicit flags:
+It stops and removes the Agent, its local configuration, `vacps-tunnel` / Quick Tunnel helpers, Agent-scoped NVM runtime, and optional apt sudoers rule. It intentionally preserves `/var/lib/vacps` (SQLite task records and logs) and the `agent` user. Host-level `cloudflared.service` (other tunnels on the same VPS) is never modified. Managed Tunnel uses an isolated unit named `vacps-tunnel`. To delete the preserved Agent data and system user, pass both explicit flags:
 
 ```bash
 curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- uninstall --purge-data --remove-user
 ```
 
-If this host uses no other cloudflared service, add `--remove-managed-tunnel` to stop and remove the local cloudflared system service. This never deletes the remote Tunnel or DNS record; remove the node card in the Web UI for that cleanup.
+Removing the node card in the Web UI deletes the remote Tunnel and DNS record when the control plane manages them; the VPS uninstaller does not call the Cloudflare API.
 
 ## Smoke test
 

@@ -5,6 +5,9 @@ APP_DIRECTORY=/opt/vacps
 DATA_DIRECTORY=/var/lib/vacps
 ENVIRONMENT_DIRECTORY=/etc/vacps
 ENVIRONMENT_FILE=/etc/vacps/vacps.env
+TUNNEL_TOKEN_FILE=/etc/vacps/tunnel.env
+TUNNEL_SERVICE=vacps-tunnel
+TUNNEL_UNIT_FILE=/etc/systemd/system/vacps-tunnel.service
 SERVICE_USER=agent
 export NVM_DIR=/usr/local/lib/vacps/nvm
 NODE_MAJOR_VERSION=24
@@ -105,7 +108,7 @@ A fresh registration token is required.
 Uninstall options (before or mixed with install options):
   --purge-data              Delete /var/lib/vacps before reinstalling.
   --remove-user             Delete the agent system user (requires --purge-data).
-  --remove-managed-tunnel   Stop and remove this host's cloudflared system service.
+  --remove-managed-tunnel   Accepted for compatibility; vacps-tunnel is always removed on uninstall.
 
 Install options: same as "agent.sh install --help".
 EOF
@@ -115,14 +118,15 @@ uninstall_usage() {
   cat <<'EOF'
 Usage: sudo bash agent.sh uninstall [options]
 
-Stops and removes the VACPS service, its configuration, Quick Tunnel helper,
-Agent-scoped NVM runtime, and the optional apt sudoers rule. Task records and
-logs are preserved by default.
+Stops and removes the Vacps service, its configuration, vacps-tunnel /
+vacps-quick-tunnel helpers, Agent-scoped NVM runtime, and the optional apt
+sudoers rule. Task records and logs are preserved by default. Host-level
+cloudflared (other tunnels) is never modified.
 
 Options:
   --purge-data              Delete /var/lib/vacps, including SQLite task records and logs.
   --remove-user             Delete the agent system user. Requires --purge-data.
-  --remove-managed-tunnel   Stop and remove this host's cloudflared system service. Does not delete the remote Tunnel or DNS record.
+  --remove-managed-tunnel   Accepted for compatibility; vacps-tunnel is always removed.
   --help, -h                Show this help message.
 EOF
 }
@@ -224,6 +228,67 @@ install_cloudflared() {
     apt-get install -y "$PACKAGE_PATH"
     rm -f "$PACKAGE_PATH"
   fi
+}
+
+# Managed Tunnel runs as an independent unit (vacps-tunnel), never as the host's
+# default cloudflared.service, so other tunnels on the same VPS are left alone.
+install_managed_tunnel_service() {
+  local token=$1
+  local cloudflared_binary
+  if [[ -z $token ]]; then
+    echo 'Managed Tunnel install requires a non-empty --tunnel-token.' >&2
+    return 1
+  fi
+  install_cloudflared
+  cloudflared_binary=$(command -v cloudflared)
+  if [[ -z $cloudflared_binary ]]; then
+    echo 'cloudflared binary not found after install.' >&2
+    return 1
+  fi
+
+  # Drop Quick Tunnel helper if switching to managed mode on the same host.
+  systemctl disable --now vacps-quick-tunnel 2>/dev/null || true
+  rm -f /etc/systemd/system/vacps-quick-tunnel.service /usr/local/lib/vacps/quick-tunnel.sh
+
+  install -d -m 750 "$ENVIRONMENT_DIRECTORY"
+  # EnvironmentFile: only the first '=' separates key and value (token may end with '=').
+  install -m 600 -o root -g root /dev/null "$TUNNEL_TOKEN_FILE"
+  printf 'TUNNEL_TOKEN=%s\n' "$token" >"$TUNNEL_TOKEN_FILE"
+
+  cat >"$TUNNEL_UNIT_FILE" <<EOF
+[Unit]
+Description=Vacps managed Cloudflare Tunnel
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$TUNNEL_TOKEN_FILE
+ExecStart=$cloudflared_binary tunnel --no-autoupdate run --token \${TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+# Keep this connector isolated from any host-level cloudflared.service.
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 644 "$TUNNEL_UNIT_FILE"
+  systemctl daemon-reload
+  systemctl enable --now "$TUNNEL_SERVICE"
+
+  local deadline=$((SECONDS + 60))
+  while ((SECONDS < deadline)); do
+    if systemctl is-active --quiet "$TUNNEL_SERVICE"; then
+      echo "vacps-tunnel is active; Managed Tunnel should show as Healthy for $PUBLIC_BASE_URL."
+      return 0
+    fi
+    sleep 2
+  done
+  echo 'vacps-tunnel did not become active within 60 seconds.' >&2
+  systemctl status "$TUNNEL_SERVICE" --no-pager --full >&2 || true
+  journalctl -u "$TUNNEL_SERVICE" -n 50 --no-pager >&2 || true
+  return 1
 }
 
 install_quick_tunnel_service() {
@@ -396,18 +461,21 @@ uninstall_agent() {
 
   systemctl disable --now vacps 2>/dev/null || true
   systemctl disable --now vacps-quick-tunnel 2>/dev/null || true
+  systemctl disable --now "$TUNNEL_SERVICE" 2>/dev/null || true
+  # Never touch the host's cloudflared.service — Vacps only owns vacps-tunnel.
   if [[ $REMOVE_MANAGED_TUNNEL == true ]]; then
-    systemctl disable --now cloudflared 2>/dev/null || true
-    if command -v cloudflared >/dev/null; then cloudflared service uninstall 2>/dev/null || true; fi
+    echo 'Note: --remove-managed-tunnel is accepted for compatibility; vacps-tunnel is always removed. Host cloudflared is never modified.'
   fi
 
   rm -f /etc/systemd/system/vacps.service
   rm -rf /etc/systemd/system/vacps.service.d
   rm -f /etc/systemd/system/vacps-quick-tunnel.service
+  rm -f "$TUNNEL_UNIT_FILE"
   rm -f /usr/local/lib/vacps/quick-tunnel.sh
   rm -rf "$NVM_DIR"
   rmdir /usr/local/lib/vacps 2>/dev/null || true
   rm -f /etc/sudoers.d/vacps-apt
+  # ENVIRONMENT_DIRECTORY includes tunnel.env; remove after stopping the unit.
   rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
   if [[ $PURGE_DATA == true ]]; then
     rm -rf "$DATA_DIRECTORY"
@@ -416,11 +484,9 @@ uninstall_agent() {
   fi
   if [[ $REMOVE_USER == true ]] && id "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER"; fi
   systemctl daemon-reload
-  systemctl reset-failed vacps vacps-quick-tunnel 2>/dev/null || true
-  echo 'VACPS service files have been removed.'
-  if [[ $REMOVE_MANAGED_TUNNEL != true ]]; then
-    echo 'cloudflared was left installed and unchanged. Use --remove-managed-tunnel only when this host has no other cloudflared service.'
-  fi
+  systemctl reset-failed vacps vacps-quick-tunnel "$TUNNEL_SERVICE" 2>/dev/null || true
+  echo 'Vacps service files have been removed (including vacps-tunnel when present).'
+  echo 'Host cloudflared (if any) was left installed and unchanged.'
 }
 
 update_checkout() {
@@ -630,12 +696,11 @@ EOF
     install_quick_tunnel_service
     echo 'Quick Tunnel is starting. It will print a temporary trycloudflare.com URL and register the Agent automatically.'
   elif [[ -n $TUNNEL_TOKEN ]]; then
-    install_cloudflared
-    if ! systemctl is-enabled --quiet cloudflared 2>/dev/null; then
-      cloudflared service install "$TUNNEL_TOKEN"
-    fi
+    install_managed_tunnel_service "$TUNNEL_TOKEN"
     systemctl restart vacps
-    echo "Managed Tunnel installed for $PUBLIC_BASE_URL."
+    echo "Managed Tunnel (unit $TUNNEL_SERVICE) installed for $PUBLIC_BASE_URL."
+  else
+    echo 'Warning: no --tunnel-token or --quick-tunnel was provided; the Agent registered a public URL but no Vacps tunnel connector was configured.' >&2
   fi
 
   echo "VACPS $BACKEND_ID is running."
