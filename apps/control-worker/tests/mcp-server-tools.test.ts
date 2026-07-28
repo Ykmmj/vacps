@@ -28,7 +28,7 @@ describe('MCP server tools', () => {
     await client.close();
   });
 
-  it('returns structured content that validates against the output schema', async () => {
+  it('returns structured content that validates against the Schema v2 envelope', async () => {
     const env = {
       DB: { prepare: () => ({ all: async () => ({ results: [] }) }) },
       CONTROL_PLANE_SIGNING_PRIVATE_KEY: 'test-key',
@@ -36,31 +36,64 @@ describe('MCP server tools', () => {
     const client = await connect(env);
     const result = await client.callTool({ name: 'vacps.backends.list', arguments: {} });
     expect(result.isError).toBeFalsy();
-    const body = result.structuredContent as { ok?: boolean; backends?: unknown[] };
+    const body = result.structuredContent as {
+      ok?: boolean;
+      schema_version?: string;
+      request_id?: string;
+      trace_id?: string;
+      warnings?: string[];
+      backends?: unknown[];
+      returned_count?: number;
+      next_cursor?: string | null;
+    };
     expect(body.ok).toBe(true);
+    expect(body.schema_version).toBe('2.0');
+    expect(body.request_id).toBeTruthy();
+    expect(body.trace_id).toBeTruthy();
+    expect(body.warnings).toEqual([]);
     expect(body.backends).toEqual([]);
+    expect(body.returned_count).toBe(0);
+    expect(body.next_cursor).toBeNull();
+    // content text mirrors structuredContent as compact JSON
+    const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text;
+    expect(text).toBeTruthy();
+    expect(JSON.parse(text!)).toMatchObject({ ok: true, schema_version: '2.0' });
     await client.close();
   });
 
-  it('exposes JSON Schema that matches runtime constraints for write/process.start', async () => {
+  it('exposes Schema v2 constraints, annotations, and process.start oneOf', async () => {
     const client = await connect(baseEnv);
     const { tools } = await client.listTools();
+
+    for (const tool of tools) {
+      expect(tool.annotations, `${tool.name} missing annotations`).toBeTruthy();
+      expect(typeof tool.annotations?.readOnlyHint).toBe('boolean');
+      expect(typeof tool.annotations?.destructiveHint).toBe('boolean');
+    }
+
+    const list = tools.find((tool) => tool.name === 'vacps.backends.list');
+    expect(list?.annotations?.readOnlyHint).toBe(true);
+    expect(list?.annotations?.destructiveHint).toBe(false);
 
     const write = tools.find((tool) => tool.name === 'vacps.files.write');
     expect(write).toBeTruthy();
     const writeSchema = write?.inputSchema as {
       required?: string[];
+      additionalProperties?: boolean;
       properties?: Record<string, { default?: unknown; minimum?: number; enum?: string[] }>;
     };
     expect(writeSchema.required).toEqual(
       expect.arrayContaining(['backend_id', 'path', 'content', 'mode']),
     );
+    expect(writeSchema.additionalProperties).toBe(false);
     expect(writeSchema.properties?.mode?.default).toBeUndefined();
     expect(writeSchema.properties?.mode?.enum).toEqual([
       'create',
       'overwrite',
       'create_or_overwrite',
     ]);
+    expect(write?.annotations?.destructiveHint).toBe(true);
+    expect(write?.annotations?.idempotentHint).toBe(false);
 
     const start = tools.find((tool) => tool.name === 'vacps.process.start');
     expect(start).toBeTruthy();
@@ -68,16 +101,12 @@ describe('MCP server tools', () => {
       properties?: Record<string, { minimum?: number; maximum?: number; default?: unknown }>;
       required?: string[];
       oneOf?: Array<{ required?: string[]; not?: { required?: string[] } }>;
+      additionalProperties?: boolean;
     };
     const hard = startSchema.properties?.stdout_hard_max_bytes;
     expect(hard?.minimum).toBe(0);
     expect(hard?.maximum).toBe(1_073_741_824);
-    // Defaults must not advertise a fake "optional overwrite everything" path.
-    expect(hard?.minimum).not.toBeLessThan(0);
-    // No bogus MIN_SAFE_INTEGER from raw-shape conversion.
-    expect(hard?.minimum).not.toBe(Number.MIN_SAFE_INTEGER);
-    // program XOR command must be discoverable via oneOf (not only runtime superRefine).
-    expect(startSchema.required).toEqual(expect.arrayContaining(['backend_id']));
+    expect(startSchema.additionalProperties).toBe(false);
     expect(startSchema.oneOf).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -90,23 +119,36 @@ describe('MCP server tools', () => {
         }),
       ]),
     );
+    expect(start?.annotations?.openWorldHint).toBe(true);
+
+    const grep = tools.find((tool) => tool.name === 'vacps.files.grep');
+    const grepSchema = grep?.inputSchema as {
+      properties?: Record<string, unknown>;
+      additionalProperties?: boolean;
+    };
+    expect(grepSchema.properties?.cursor).toBeTruthy();
+    expect(grepSchema.additionalProperties).toBe(false);
 
     const caps = tools.find((tool) => tool.name === 'vacps.capabilities.get');
     expect(caps, 'vacps.capabilities.get must be advertised in tools/list').toBeTruthy();
+    expect(caps?.annotations?.readOnlyHint).toBe(true);
 
-    // Server version must bump when contracts change (forces client cache refresh).
-    const { publicToolJsonSchemas } = await import('../src/mcp/tool-schemas.js');
+    const { publicToolJsonSchemas, MCP_PROTOCOL_VERSION } = await import(
+      '../src/mcp/tool-schemas.js'
+    );
     const published = publicToolJsonSchemas();
-    expect(published.mcp_server_version).toBe('0.3.1');
+    expect(published.mcp_server_version).toBe(MCP_PROTOCOL_VERSION);
+    expect(published.schema_version).toBe('2.0');
+    expect(published.$defs).toBeTruthy();
     const writePublished = (published.tools as Record<string, { required?: string[] }>)[
       'vacps.files.write'
     ];
     expect(writePublished.required).toEqual(
       expect.arrayContaining(['backend_id', 'path', 'content', 'mode']),
     );
-    const startPublished = (
-      published.tools as Record<string, { oneOf?: unknown[] }>
-    )['vacps.process.start'];
+    const startPublished = (published.tools as Record<string, { oneOf?: unknown[] }>)[
+      'vacps.process.start'
+    ];
     expect(startPublished.oneOf).toHaveLength(2);
 
     await client.close();

@@ -222,6 +222,7 @@ export async function createServer(input: {
           path,
           limit: numberOr(query.limit, 200),
           includeHidden: query.include_hidden === 'true',
+          cursor: typeof query.cursor === 'string' ? query.cursor : undefined,
         })),
       };
     } catch (error) {

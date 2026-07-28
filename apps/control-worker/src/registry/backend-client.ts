@@ -80,11 +80,12 @@ export class BackendClient {
 
   async listDir(
     backend: Pick<Backend, 'baseUrl'>,
-    input: { path: string; limit?: number; includeHidden?: boolean },
+    input: { path: string; limit?: number; includeHidden?: boolean; cursor?: string },
   ): Promise<unknown> {
     const params = new URLSearchParams({ path: input.path });
     if (input.limit !== undefined) params.set('limit', String(input.limit));
     if (input.includeHidden) params.set('include_hidden', 'true');
+    if (input.cursor) params.set('cursor', input.cursor);
     return this.request(backend, `/fs/list?${params.toString()}`, { method: 'GET' });
   }
 
