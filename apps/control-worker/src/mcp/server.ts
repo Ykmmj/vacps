@@ -14,25 +14,67 @@ import { BackendClient } from '../registry/backend-client.js';
 import { BackendRepository } from '../registry/repository.js';
 import { ScheduleService } from '../schedules/schedule-service.js';
 import { TaskService } from '../tasks/task-service.js';
+import { annotationsFor } from './schema/annotations.js';
 import {
+  categoryFor,
+  isRetryable,
+  SCHEMA_VERSION,
+  successMeta,
+  toolResultContent,
+} from './schema/envelope.js';
+import {
+  backendsGetStatusInputSchema,
+  backendsListInputSchema,
   capabilitiesGetInputSchema,
   commandExecInputSchema,
+  filesApplyPatchInputSchema,
+  filesDeleteInputSchema,
+  filesEditInputSchema,
+  filesGlobInputSchema,
+  filesGrepInputSchema,
+  filesListInputSchema,
+  filesMkdirInputSchema,
+  filesMoveInputSchema,
+  filesReadInputSchema,
+  filesStatInputSchema,
   filesWriteInputSchema,
+  gitApplyInputSchema,
+  gitDiffInputSchema,
+  gitStatusInputSchema,
   MCP_PROTOCOL_VERSION,
+  processReadInputSchema,
   processStartInputSchema,
   processStartListJsonSchema,
+  processTerminateInputSchema,
+  processWriteInputSchema,
   shellExecInputSchema,
   TOOL_SCHEMA_REVISION,
 } from './tool-schemas.js';
-
-const SCHEMA_VERSION = '1.0';
 
 const okEnvelope = z.looseObject({
   ok: z.literal(true),
   schema_version: z.string(),
   request_id: z.string(),
+  trace_id: z.string(),
   generated_at: z.string(),
+  warnings: z.array(z.string()),
 });
+
+function toolConfig(
+  name: string,
+  config: {
+    description: string;
+    inputSchema?: unknown;
+    outputSchema?: unknown;
+    _meta?: Record<string, unknown>;
+  },
+) {
+  return {
+    ...config,
+    annotations: annotationsFor(name),
+    _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION, ...(config._meta ?? {}) },
+  } as never;
+}
 
 export function createMcpServer(env: Env): McpServer {
   const backends = new BackendRepository(env.DB);
@@ -45,20 +87,27 @@ export function createMcpServer(env: Env): McpServer {
     version: MCP_PROTOCOL_VERSION,
   });
 
-  const meta = () => ({
-    ok: true as const,
-    schema_version: SCHEMA_VERSION,
-    request_id: crypto.randomUUID(),
-    generated_at: new Date().toISOString(),
-  });
+  const ok = (value: Record<string, unknown>) => {
+    const backendId =
+      typeof value.backend_id === 'string'
+        ? value.backend_id
+        : typeof (value.backend as { id?: string } | undefined)?.id === 'string'
+          ? (value.backend as { id: string }).id
+          : undefined;
+    const structured = {
+      ...successMeta(backendId ? { backend_id: backendId } : undefined),
+      ...value,
+      ok: true as const,
+      schema_version: SCHEMA_VERSION,
+    };
+    return {
+      structuredContent: structured,
+      content: toolResultContent(structured),
+      isError: false as const,
+    };
+  };
 
-  const ok = (value: Record<string, unknown>, summary: string) => ({
-    structuredContent: { ...meta(), ...value },
-    content: [{ type: 'text' as const, text: summary }],
-    isError: false as const,
-  });
-
-  const fail = (error: unknown) => {
+  const fail = (error: unknown, backendId?: string) => {
     const app =
       error instanceof AppError
         ? error
@@ -69,69 +118,102 @@ export function createMcpServer(env: Env): McpServer {
               error instanceof Error ? error.message : String(error),
               500,
             );
+    const meta = successMeta(backendId ? { backend_id: backendId } : undefined);
     const payload = {
       ok: false as const,
       schema_version: SCHEMA_VERSION,
-      request_id: crypto.randomUUID(),
-      generated_at: new Date().toISOString(),
+      request_id: meta.request_id,
+      trace_id: meta.trace_id,
+      generated_at: meta.generated_at,
+      ...(backendId ? { backend_id: backendId } : {}),
       error: {
         code: app.code,
         message: app.message,
         category: categoryFor(app.code),
         retryable: isRetryable(app.code),
-        details: {},
+        retry_after_ms: null as number | null,
+        details: {} as Record<string, unknown>,
       },
     };
     return {
       structuredContent: payload,
-      content: [{ type: 'text' as const, text: `${app.code}: ${app.message}` }],
+      content: toolResultContent(payload),
       isError: true as const,
     };
   };
 
-  const wrap =
-    <T extends Record<string, unknown>>(
-      summary: (value: T) => string,
-      run: (args: Record<string, unknown>) => Promise<T>,
-    ) =>
-    async (args: Record<string, unknown>) => {
+  /** Supports wrap(run) or legacy wrap(summary, run). Summary is ignored (content is JSON). */
+  function wrap<T extends Record<string, unknown>>(
+    run: (args: Record<string, unknown>) => Promise<T>,
+  ): (args: Record<string, unknown>) => Promise<ReturnType<typeof ok> | ReturnType<typeof fail>>;
+  function wrap<T extends Record<string, unknown>>(
+    summary: (value: T) => string,
+    run: (args: Record<string, unknown>) => Promise<T>,
+  ): (args: Record<string, unknown>) => Promise<ReturnType<typeof ok> | ReturnType<typeof fail>>;
+  function wrap<T extends Record<string, unknown>>(
+    summaryOrRun:
+      | ((value: T) => string)
+      | ((args: Record<string, unknown>) => Promise<T>),
+    maybeRun?: (args: Record<string, unknown>) => Promise<T>,
+  ) {
+    const run = (maybeRun ?? summaryOrRun) as (args: Record<string, unknown>) => Promise<T>;
+    return async (args: Record<string, unknown>) => {
       try {
         const value = await run(args);
-        return ok(value, summary(value));
+        return ok(value);
       } catch (error) {
-        return fail(error);
+        const backendId = typeof args.backend_id === 'string' ? args.backend_id : undefined;
+        return fail(error, backendId);
       }
     };
+  }
 
   // ── Layer B: backends ──────────────────────────────────────────────
   server.registerTool(
     'vacps.backends.list',
-    {
-      description: 'List Vacps backends (nodes).',
-      outputSchema: okEnvelope.extend({ backends: z.array(z.unknown()) }).shape,
-    },
-    wrap(
-      (value) => `Backends: ${(value.backends as unknown[]).length}`,
-      async () => ({ backends: snakeBackends(await backends.list()) }),
-    ),
+    toolConfig('vacps.backends.list', {
+      description:
+        'List Vacps backends (nodes) as a slim summary. Use backends.get_status for health/metrics detail.',
+      inputSchema: backendsListInputSchema,
+      outputSchema: okEnvelope.extend({
+        backends: z.array(z.unknown()),
+        returned_count: z.number(),
+        next_cursor: z.string().nullable(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = backendsListInputSchema.parse(args);
+      return pageBackends(await backends.list(), parsed);
+    }),
   );
 
   server.registerTool(
     'vacps.backends.get_status',
-    {
+    toolConfig('vacps.backends.get_status', {
       description: 'Get live health and metrics for one backend.',
-      inputSchema: { backend_id: z.string() },
-      outputSchema: okEnvelope.extend({ backend_id: z.string(), status: z.unknown() }).shape,
-    },
-    wrap(
-      (value) => `Status for ${value.backend_id}`,
-      async ({ backend_id }) => {
-        const backend = await backends.get(String(backend_id));
-        const status = await client.status(backend);
-        await backends.recordStatus(backend.id, status, { preserveSystem: true });
-        return { backend_id: backend.id, status: snakeStatus(status) };
-      },
-    ),
+      inputSchema: backendsGetStatusInputSchema,
+      outputSchema: okEnvelope.extend({
+        backend: z.unknown(),
+        health: z.unknown().optional(),
+        metrics: z.unknown().optional(),
+        status: z.unknown().optional(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const { backend_id } = backendsGetStatusInputSchema.parse(args);
+      const backend = await backends.get(backend_id);
+      const status = await client.status(backend);
+      await backends.recordStatus(backend.id, status, { preserveSystem: true });
+      return {
+        backend_id: backend.id,
+        backend: {
+          id: backend.id,
+          name: backend.name,
+          enabled: backend.enabled,
+        },
+        status: snakeStatus(status),
+      };
+    }),
   );
 
   // ── Layer B: tasks ─────────────────────────────────────────────────
@@ -390,531 +472,551 @@ export function createMcpServer(env: Env): McpServer {
     return backend;
   };
 
-  // ── Command / shell / process (sug.md P0+P1) ───────────────────────
+  // ── Command / shell / process (Schema v2) ──────────────────────────
   server.registerTool(
     'vacps.command.exec',
-    {
+    toolConfig('vacps.command.exec', {
       description:
         'Run a non-interactive program on a backend (argv form, no shell). Uses yield_time_ms for sync wait.',
       inputSchema: commandExecInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
-    },
-    wrap(
-      (value) => `command ${String(value.status)} ${String(value.process_id)}`,
-      async (args) => {
-        const parsed = commandExecInputSchema.parse(args);
-        const backend = await requireBackend(parsed.backend_id);
-        return (await client.execCommand(backend, parsed)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = commandExecInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.execCommand(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.shell.exec',
-    {
+    toolConfig('vacps.shell.exec', {
       description:
         'Run a shell command as the agent user with full login environment (bash -lc, sources ~/.bashrc). Prefer vacps.command.exec for non-shell work. Set load_user_environment=false only for a clean --noprofile --norc shell.',
       inputSchema: shellExecInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
-    },
-    wrap(
-      (value) => `shell ${String(value.status)} ${String(value.process_id)}`,
-      async (args) => {
-        const parsed = shellExecInputSchema.parse(args);
-        const backend = await requireBackend(parsed.backend_id);
-        return (await client.execShell(backend, parsed)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = shellExecInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.execShell(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.process.start',
-    {
+    toolConfig('vacps.process.start', {
       description:
         'Start a long-running or interactive process on a backend. Provide exactly one of program or command (not both, not neither). stdout/stderr_hard_max_bytes are 0..1073741824.',
       inputSchema: processStartInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
-    },
-    wrap(
-      (value) => `started ${String(value.process_id)}`,
-      async (args) => {
-        const parsed = processStartInputSchema.parse(args);
-        const backend = await requireBackend(parsed.backend_id);
-        return (await client.processStart(backend, parsed)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = processStartInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.processStart(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.process.read',
-    {
+    toolConfig('vacps.process.read', {
       description: 'Read stdout/stderr chunks from a process started on a backend.',
-      inputSchema: {
-        backend_id: z.string(),
-        process_id: z.string(),
-        cursor: z.string().optional(),
-        max_bytes: z.number().int().min(1).max(1_048_576).optional(),
-        wait_ms: z.number().int().min(0).max(60_000).optional(),
-      },
+      inputSchema: processReadInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-    },
-    wrap(
-      (value) => `process ${String(value.process_id)} ${String(value.status)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.processRead(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = processReadInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.processRead(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.process.write',
-    {
+    toolConfig('vacps.process.write', {
       description: 'Write to process stdin on a backend.',
-      inputSchema: {
-        backend_id: z.string(),
-        process_id: z.string(),
-        data: z.string(),
-        close_stdin: z.boolean().optional(),
-      },
+      inputSchema: processWriteInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string() }).shape,
-    },
-    wrap(
-      (value) => `wrote to ${String(value.process_id)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.processWrite(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = processWriteInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.processWrite(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.process.terminate',
-    {
+    toolConfig('vacps.process.terminate', {
       description: 'Terminate a process on a backend.',
-      inputSchema: {
-        backend_id: z.string(),
-        process_id: z.string(),
-        signal: z.enum(['sigterm', 'sigint', 'sigkill']).optional(),
-        grace_period_ms: z.number().int().min(0).max(60_000).optional(),
-      },
+      inputSchema: processTerminateInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-    },
-    wrap(
-      (value) => `terminated ${String(value.process_id)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.processTerminate(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = processTerminateInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.processTerminate(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
-  // ── Files (sug.md P0+P1) ───────────────────────────────────────────
+  // ── Files (Schema v2) ──────────────────────────────────────────────
   server.registerTool(
     'vacps.files.read',
-    {
+    toolConfig('vacps.files.read', {
       description:
         'Read a file on a backend by absolute path with optional line range and byte cap.',
-      inputSchema: {
-        backend_id: z.string(),
-        path: z.string(),
-        start_line: z.number().int().min(1).optional(),
-        end_line: z.number().int().min(1).optional(),
-        max_bytes: z.number().int().min(1).max(262_144).default(32_768),
-        encoding: z.enum(['utf-8', 'base64']).optional(),
-      },
+      inputSchema: filesReadInputSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), content: z.string() }).shape,
-    },
-    wrap(
-      (value) => `Read ${String(value.path)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.readFile(backend, {
-          path: String(args.path),
-          startLine: typeof args.start_line === 'number' ? args.start_line : undefined,
-          endLine: typeof args.end_line === 'number' ? args.end_line : undefined,
-          maxBytes: typeof args.max_bytes === 'number' ? args.max_bytes : 32_768,
-          encoding: args.encoding === 'base64' ? 'base64' : 'utf-8',
-        })) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesReadInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.readFile(backend, {
+        path: parsed.path,
+        startLine: parsed.start_line,
+        endLine: parsed.end_line,
+        maxBytes: parsed.max_bytes ?? 32_768,
+        encoding: parsed.encoding === 'base64' ? 'base64' : 'utf-8',
+      })) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.stat',
-    {
+    toolConfig('vacps.files.stat', {
       description: 'Stat a file or directory on a backend.',
-      inputSchema: { backend_id: z.string(), path: z.string() },
+      inputSchema: filesStatInputSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), type: z.string() }).shape,
-    },
-    wrap(
-      (value) => `Stat ${String(value.path)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.statFile(backend, String(args.path))) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesStatInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.statFile(backend, parsed.path)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.list',
-    {
-      description: 'List directory entries on a backend.',
-      inputSchema: {
-        backend_id: z.string(),
-        path: z.string(),
-        limit: z.number().int().min(1).max(2000).optional(),
-        include_hidden: z.boolean().optional(),
-      },
-      outputSchema: okEnvelope.extend({ matches: z.array(z.unknown()) }).shape,
-    },
-    wrap(
-      (value) => `Listed ${(value.matches as unknown[])?.length ?? 0} entries`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.listDir(backend, {
-          path: String(args.path),
-          limit: typeof args.limit === 'number' ? args.limit : 200,
-          includeHidden: args.include_hidden === true,
-        })) as Record<string, unknown>;
-      },
-    ),
+    toolConfig('vacps.files.list', {
+      description: 'List directory entries on a backend. Supports limit + opaque cursor.',
+      inputSchema: filesListInputSchema,
+      outputSchema: okEnvelope.extend({
+        matches: z.array(z.unknown()),
+        next_cursor: z.string().nullable().optional(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = filesListInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.listDir(backend, {
+        path: parsed.path,
+        limit: parsed.limit ?? 200,
+        includeHidden: parsed.include_hidden === true,
+        ...(parsed.cursor ? { cursor: parsed.cursor } : {}),
+      })) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.glob',
-    {
+    toolConfig('vacps.files.glob', {
       description:
         'Glob files on a backend. Dialect is bash-like globstar: * is one segment, ** matches zero or more segments (so **/*.txt matches example.txt at the root). Uses rg when available.',
-      inputSchema: {
-        backend_id: z.string(),
-        pattern: z.string(),
-        path: z.string().optional(),
-        include_hidden: z.boolean().optional(),
-        respect_gitignore: z.boolean().optional(),
-        limit: z.number().int().min(1).max(2000).optional(),
-      },
-      outputSchema: okEnvelope.extend({ matches: z.array(z.unknown()) }).shape,
-    },
-    wrap(
-      (value) => `Glob ${(value.matches as unknown[])?.length ?? 0} matches`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.glob(backend, args)) as Record<string, unknown>;
-      },
-    ),
+      inputSchema: filesGlobInputSchema,
+      outputSchema: okEnvelope.extend({
+        matches: z.array(z.unknown()),
+        next_cursor: z.string().nullable().optional(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = filesGlobInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.glob(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.grep',
-    {
+    toolConfig('vacps.files.grep', {
       description:
         'Search file contents on a backend (ripgrep when available). path may be a file or a directory; when a file is given, only that file is searched.',
-      inputSchema: {
-        backend_id: z.string(),
-        pattern: z.string(),
-        path: z.string().optional(),
-        file_pattern: z.string().optional(),
-        case_sensitive: z.boolean().optional(),
-        fixed_string: z.boolean().optional(),
-        context_before: z.number().int().min(0).max(10).optional(),
-        context_after: z.number().int().min(0).max(10).optional(),
-        max_matches: z.number().int().min(1).max(500).optional(),
-        max_bytes: z.number().int().min(1).max(262_144).optional(),
-      },
-      outputSchema: okEnvelope.extend({ matches: z.array(z.unknown()) }).shape,
-    },
-    wrap(
-      (value) =>
-        `Grep ${String(value.match_count ?? (value.matches as unknown[])?.length ?? 0)} hits`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.grep(backend, args)) as Record<string, unknown>;
-      },
-    ),
+      inputSchema: filesGrepInputSchema,
+      outputSchema: okEnvelope.extend({
+        matches: z.array(z.unknown()),
+        next_cursor: z.string().nullable().optional(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = filesGrepInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.grep(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.edit',
-    {
+    toolConfig('vacps.files.edit', {
       description:
         'Exact string replacement in a file on a backend (old_text must be unique unless replace_all).',
-      inputSchema: {
-        backend_id: z.string(),
-        path: z.string(),
-        old_text: z.string(),
-        new_text: z.string(),
-        replace_all: z.boolean().optional(),
-        expected_sha256: z.string().optional(),
-        idempotency_key: z.string().optional(),
-      },
+      inputSchema: filesEditInputSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), replacement_count: z.number() }).shape,
-    },
-    wrap(
-      (value) => `Edited ${String(value.path)} ×${String(value.replacement_count)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.editFile(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesEditInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.editFile(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.write',
-    {
+    toolConfig('vacps.files.write', {
       description:
         'Write a file on a backend (atomic temp+rename). mode is required: create (fail if exists), overwrite (fail if missing), or create_or_overwrite. Supports idempotency_key + expected_sha256.',
       inputSchema: filesWriteInputSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
-      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
-    },
-    wrap(
-      (value) => `Wrote ${String(value.path)} (${String(value.operation)})`,
-      async (args) => {
-        const parsed = filesWriteInputSchema.parse(args);
-        const backend = await requireBackend(parsed.backend_id);
-        return (await client.writeFile(backend, parsed)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesWriteInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.writeFile(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.apply_patch',
-    {
+    toolConfig('vacps.files.apply_patch', {
       description: 'Apply a Codex-style multi-file patch on a backend.',
-      inputSchema: {
-        backend_id: z.string(),
-        patch: z.string(),
-        workspace_path: z.string().optional(),
-        dry_run: z.boolean().optional(),
-        atomic: z.boolean().optional(),
-        idempotency_key: z.string().optional(),
-      },
+      inputSchema: filesApplyPatchInputSchema,
       outputSchema: okEnvelope.extend({ files: z.array(z.unknown()) }).shape,
-    },
-    wrap(
-      (value) => `Patch ${(value.files as unknown[])?.length ?? 0} files`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.applyPatch(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesApplyPatchInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.applyPatch(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.move',
-    {
+    toolConfig('vacps.files.move', {
       description:
         'Move/rename a file on a backend. Optional expected_sha256 for optimistic concurrency.',
-      inputSchema: {
-        backend_id: z.string(),
-        from: z.string(),
-        to: z.string(),
-        overwrite: z.boolean().optional(),
-        expected_sha256: z.string().optional(),
-        idempotency_key: z.string().optional(),
-      },
+      inputSchema: filesMoveInputSchema,
       outputSchema: okEnvelope.extend({ from: z.string(), to: z.string() }).shape,
-    },
-    wrap(
-      (value) => `Moved ${String(value.from)} → ${String(value.to)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.moveFile(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesMoveInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.moveFile(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.files.delete',
-    {
+    toolConfig('vacps.files.delete', {
       description:
         'Delete a file or directory on a backend. Use dry_run to preview size/count; expected_sha256 / expected_type for safety.',
-      inputSchema: {
-        backend_id: z.string(),
-        path: z.string(),
-        recursive: z.boolean().optional(),
-        expected_sha256: z.string().optional(),
-        expected_type: z.enum(['file', 'directory']).optional(),
-        dry_run: z.boolean().optional(),
-        idempotency_key: z.string().optional(),
-      },
+      inputSchema: filesDeleteInputSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
-    },
-    wrap(
-      (value) => `Deleted ${String(value.path)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.deleteFile(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesDeleteInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.deleteFile(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.capabilities.get',
-    {
+    toolConfig('vacps.capabilities.get', {
       description:
-        'Report backend tool capabilities (ripgrep availability, grep engine, glob dialect, shell environment, limits).',
+        'Report backend tool capabilities (nested features, engines, limits; no dotted feature keys).',
       inputSchema: capabilitiesGetInputSchema,
-      outputSchema: okEnvelope.extend({ features: z.unknown(), executables: z.unknown() }).shape,
-      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
-    },
-    wrap(
-      () => 'capabilities',
-      async (args) => {
-        const parsed = capabilitiesGetInputSchema.parse(args);
-        const backend = await requireBackend(parsed.backend_id);
-        return (await client.getCapabilities(backend)) as Record<string, unknown>;
-      },
-    ),
+      outputSchema: okEnvelope.extend({
+        features: z.unknown(),
+        engines: z.unknown(),
+        limits: z.unknown(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = capabilitiesGetInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      const raw = (await client.getCapabilities(backend)) as Record<string, unknown>;
+      return normalizeCapabilities(raw);
+    }),
   );
 
   server.registerTool(
     'vacps.files.mkdir',
-    {
+    toolConfig('vacps.files.mkdir', {
       description: 'Create a directory on a backend.',
-      inputSchema: {
-        backend_id: z.string(),
-        path: z.string(),
-        recursive: z.boolean().optional(),
-      },
+      inputSchema: filesMkdirInputSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
-    },
-    wrap(
-      (value) => `mkdir ${String(value.path)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.mkdir(backend, args)) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = filesMkdirInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.mkdir(backend, parsed)) as Record<string, unknown>;
+    }),
   );
 
-  // ── Git helpers (P1; thin shell wrappers) ───────────────────────────
+  // ── Git helpers ────────────────────────────────────────────────────
   server.registerTool(
     'vacps.git.status',
-    {
+    toolConfig('vacps.git.status', {
       description: 'git status --short on a backend working tree.',
-      inputSchema: {
-        backend_id: z.string(),
-        working_directory: z.string().optional(),
-      },
+      inputSchema: gitStatusInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-    },
-    wrap(
-      (value) => `git status ${String(value.status)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.execCommand(backend, {
-          program: 'git',
-          arguments: ['status', '--short'],
-          working_directory: args.working_directory,
-          timeout_ms: 60_000,
-          yield_time_ms: 30_000,
-        })) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = gitStatusInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.execCommand(backend, {
+        program: 'git',
+        arguments: ['status', '--short'],
+        working_directory: parsed.working_directory,
+        timeout_ms: 60_000,
+        yield_time_ms: 30_000,
+      })) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.git.diff',
-    {
+    toolConfig('vacps.git.diff', {
       description: 'git diff on a backend working tree.',
-      inputSchema: {
-        backend_id: z.string(),
-        working_directory: z.string().optional(),
-        staged: z.boolean().optional(),
-      },
+      inputSchema: gitDiffInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-    },
-    wrap(
-      (value) => `git diff ${String(value.status)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        const arguments_ = args.staged === true ? ['diff', '--cached'] : ['diff'];
-        return (await client.execCommand(backend, {
-          program: 'git',
-          arguments: arguments_,
-          working_directory: args.working_directory,
-          timeout_ms: 60_000,
-          yield_time_ms: 30_000,
-          stdout_max_bytes: 65_536,
-        })) as Record<string, unknown>;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = gitDiffInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      const arguments_ = parsed.staged === true ? ['diff', '--cached'] : ['diff'];
+      return (await client.execCommand(backend, {
+        program: 'git',
+        arguments: arguments_,
+        working_directory: parsed.working_directory,
+        timeout_ms: 60_000,
+        yield_time_ms: 30_000,
+        stdout_max_bytes: 65_536,
+      })) as Record<string, unknown>;
+    }),
   );
 
   server.registerTool(
     'vacps.git.apply',
-    {
+    toolConfig('vacps.git.apply', {
       description: 'Apply a unified diff with git apply on a backend.',
-      inputSchema: {
-        backend_id: z.string(),
-        patch: z.string(),
-        working_directory: z.string().optional(),
-        check: z.boolean().optional(),
-      },
+      inputSchema: gitApplyInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
-    },
-    wrap(
-      (value) => `git apply ${String(value.status)}`,
-      async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        const path = `/tmp/vacps-git-apply-${crypto.randomUUID()}.patch`;
-        await client.writeFile(backend, {
-          path,
-          content: String(args.patch),
-          mode: 'create_or_overwrite',
-          create_parent_directories: true,
-        });
-        try {
-          return (await client.execCommand(backend, {
-            program: 'git',
-            arguments: args.check === true ? ['apply', '--check', path] : ['apply', path],
-            working_directory: args.working_directory,
-            timeout_ms: 60_000,
-            yield_time_ms: 30_000,
-          })) as Record<string, unknown>;
-        } finally {
-          await client.deleteFile(backend, { path }).catch(() => undefined);
-        }
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = gitApplyInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      const path = `/tmp/vacps-git-apply-${crypto.randomUUID()}.patch`;
+      await client.writeFile(backend, {
+        path,
+        content: parsed.patch,
+        mode: 'create_or_overwrite',
+        create_parent_directories: true,
+      });
+      try {
+        return (await client.execCommand(backend, {
+          program: 'git',
+          arguments: parsed.check === true ? ['apply', '--check', path] : ['apply', path],
+          working_directory: parsed.working_directory,
+          timeout_ms: 60_000,
+          yield_time_ms: 30_000,
+        })) as Record<string, unknown>;
+      } finally {
+        await client.deleteFile(backend, { path }).catch(() => undefined);
+      }
+    }),
   );
 
-  // MCP SDK only emits object schemas from Zod; inject process.start oneOf for discoverability.
-  patchProcessStartListSchema(server);
+  // Schema v2 list patches: process.start oneOf + fill annotations for legacy registrations.
+  applySchemaV2ListPatches(server);
 
   return server;
 }
 
 /**
- * Wrap tools/list so vacps.process.start advertises program XOR command via oneOf.
- * CallTool still validates with processStartInputSchema (Zod superRefine).
+ * Schema v2 tools/list patches:
+ * - inject process.start oneOf (SDK cannot emit superRefine XOR)
+ * - ensure annotations present on every tool
  */
-function patchProcessStartListSchema(server: McpServer): void {
-  const protocol = server.server as unknown as {
-    _requestHandlers: Map<
+function applySchemaV2ListPatches(server: McpServer): void {
+  const host = server as unknown as {
+    _registeredTools?: Record<
       string,
-      (request: unknown, extra: unknown) => unknown | Promise<unknown>
+      { annotations?: unknown; _meta?: Record<string, unknown>; enabled?: boolean }
     >;
+    server: {
+      _requestHandlers: Map<
+        string,
+        (request: unknown, extra: unknown) => unknown | Promise<unknown>
+      >;
+    };
   };
-  const previous = protocol._requestHandlers.get('tools/list');
+
+  for (const [name, tool] of Object.entries(host._registeredTools ?? {})) {
+    tool.annotations = annotationsFor(name);
+    tool._meta = { tool_schema_revision: TOOL_SCHEMA_REVISION, ...(tool._meta ?? {}) };
+  }
+
+  const previous = host.server._requestHandlers.get('tools/list');
   if (!previous) return;
 
-  protocol._requestHandlers.set('tools/list', async (request, extra) => {
+  host.server._requestHandlers.set('tools/list', async (request, extra) => {
     const result = (await previous(request, extra)) as {
-      tools?: Array<{ name?: string; inputSchema?: Record<string, unknown> }>;
+      tools?: Array<{
+        name?: string;
+        inputSchema?: Record<string, unknown>;
+        annotations?: unknown;
+      }>;
     };
     for (const tool of result.tools ?? []) {
       if (tool.name === 'vacps.process.start') {
         tool.inputSchema = { ...processStartListJsonSchema };
       }
+      if (tool.name) {
+        tool.annotations = annotationsFor(tool.name);
+      }
     }
     return result;
   });
+}
+
+function pageBackends(
+  list: Array<{
+    id: string;
+    name: string;
+    baseUrl: string;
+    tags: string[];
+    enabled: boolean;
+    createdAt: string;
+    updatedAt: string;
+    lastStatus?: unknown;
+    lastCheckedAt?: string;
+  }>,
+  query: {
+    limit?: number | undefined;
+    cursor?: string | undefined;
+    enabled?: boolean | undefined;
+    status?: 'healthy' | 'unhealthy' | 'unknown' | undefined;
+    tags?: string[] | undefined;
+  },
+) {
+  let filtered = list.map((backend) => slimBackend(backend));
+  if (typeof query.enabled === 'boolean') {
+    filtered = filtered.filter((item) => item.enabled === query.enabled);
+  }
+  if (query.status) {
+    filtered = filtered.filter((item) => item.status === query.status);
+  }
+  if (query.tags && query.tags.length > 0) {
+    filtered = filtered.filter((item) => query.tags!.every((tag) => item.tags.includes(tag)));
+  }
+
+  const limit = query.limit ?? 50;
+  let offset = 0;
+  if (query.cursor) {
+    try {
+      offset = decodeOffsetCursor(query.cursor);
+    } catch {
+      throw new AppError('validation_error', 'Invalid cursor.', 400);
+    }
+  }
+
+  const page = filtered.slice(offset, offset + limit);
+  const nextOffset = offset + page.length;
+  const next_cursor =
+    nextOffset < filtered.length ? encodeOffsetCursor(nextOffset) : null;
+
+  return {
+    backends: page,
+    returned_count: page.length,
+    next_cursor,
+  };
+}
+
+function slimBackend(backend: {
+  id: string;
+  name: string;
+  tags: string[];
+  enabled: boolean;
+  lastStatus?: unknown;
+  lastCheckedAt?: string;
+}) {
+  return {
+    id: backend.id,
+    name: backend.name,
+    enabled: backend.enabled,
+    status: deriveBackendStatus(backend.lastStatus),
+    tags: backend.tags,
+    ...(backend.lastCheckedAt ? { last_checked_at: backend.lastCheckedAt } : {}),
+  };
+}
+
+function deriveBackendStatus(lastStatus: unknown): 'healthy' | 'unhealthy' | 'unknown' {
+  if (!lastStatus || typeof lastStatus !== 'object') return 'unknown';
+  const health = (lastStatus as { health?: { ok?: boolean } }).health;
+  if (health && typeof health.ok === 'boolean') return health.ok ? 'healthy' : 'unhealthy';
+  const ok = (lastStatus as { ok?: boolean }).ok;
+  if (typeof ok === 'boolean') return ok ? 'healthy' : 'unhealthy';
+  return 'unknown';
+}
+
+/** Normalize agent capabilities into Schema v2 nested shape (no dotted feature keys). */
+function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unknown> {
+  const featuresRaw = (raw.features ?? {}) as Record<string, unknown>;
+  const enginesRaw = (raw.engines ?? {}) as Record<string, unknown>;
+  const grepEngine = (enginesRaw.grep ?? {}) as Record<string, unknown>;
+  const globEngine = (enginesRaw.glob ?? {}) as Record<string, unknown>;
+  const executables = (raw.executables ?? {}) as Record<string, { available?: boolean; version?: string }>;
+  const rg = executables.rg;
+
+  const active =
+    featuresRaw['files.grep.engine'] === 'rg' || grepEngine.available === true
+      ? 'ripgrep'
+      : 'node';
+
+  return {
+    backend_id: raw.backend_id,
+    features: {
+      command_exec: featuresRaw.command_exec !== false,
+      shell_exec: featuresRaw.shell_exec !== false,
+      interactive_process: featuresRaw.interactive_process !== false,
+      file_patch: featuresRaw.file_patch !== false,
+      git_tools: featuresRaw.git_tools !== false,
+    },
+    engines: {
+      grep: {
+        active,
+        available: Boolean(rg?.available ?? grepEngine.available),
+        version: rg?.version ?? null,
+        fallback: grepEngine.fallback ?? 'node',
+        regex_flavor:
+          (grepEngine.engine_features as { regex_flavor?: string } | undefined)?.regex_flavor ??
+          (active === 'ripgrep' ? 'rust' : 'javascript'),
+        respects_gitignore:
+          (grepEngine.engine_features as { respects_gitignore?: boolean } | undefined)
+            ?.respects_gitignore ?? active === 'ripgrep',
+      },
+      glob: {
+        dialect: featuresRaw['files.glob.dialect'] ?? 'globstar',
+        respects_gitignore: globEngine.respect_gitignore !== false,
+      },
+    },
+    limits: raw.limits ?? {
+      command_timeout_max_ms: 3_600_000,
+      process_read_max_bytes: 1_048_576,
+      file_read_max_bytes: 262_144,
+    },
+    agent_environment: raw.agent_environment,
+  };
 }
 
 // ── MCP snake_case input schemas ─────────────────────────────────────
@@ -1138,57 +1240,28 @@ function snakeSchedule(schedule: {
   };
 }
 
-function snakeBackends(
-  list: Array<{
-    id: string;
-    name: string;
-    baseUrl: string;
-    tags: string[];
-    enabled: boolean;
-    createdAt: string;
-    updatedAt: string;
-    lastStatus?: unknown;
-    lastCheckedAt?: string;
-  }>,
-) {
-  return list.map((backend) => ({
-    id: backend.id,
-    name: backend.name,
-    base_url: backend.baseUrl,
-    tags: backend.tags,
-    enabled: backend.enabled,
-    created_at: backend.createdAt,
-    updated_at: backend.updatedAt,
-    ...(backend.lastStatus ? { last_status: backend.lastStatus } : {}),
-    ...(backend.lastCheckedAt ? { last_checked_at: backend.lastCheckedAt } : {}),
-  }));
-}
-
 function snakeStatus(status: unknown) {
   return status;
 }
 
-function categoryFor(code: string): string {
-  if (
-    code.includes('validation') ||
-    code === 'invalid_request' ||
-    code.startsWith('invalid_') ||
-    code === 'path_not_allowed' ||
-    code === 'path_not_directory' ||
-    code === 'path_not_found'
-  )
-    return 'validation';
-  if (code.includes('not_found')) return 'not_found';
-  if (code.includes('disabled') || code.includes('conflict') || code.includes('mismatch'))
-    return 'conflict';
-  if (code.includes('unauthorized') || code.includes('forbidden')) return 'permission';
-  if (code.includes('unreachable') || code.includes('failed') || code.includes('unavailable'))
-    return 'runtime';
-  return 'internal';
+function encodeOffsetCursor(offset: number): string {
+  const json = JSON.stringify({ o: offset });
+  const bytes = new TextEncoder().encode(json);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function isRetryable(code: string): boolean {
-  return ['backend_unavailable', 'backend_unreachable', 'backend_request_failed'].includes(code);
+function decodeOffsetCursor(cursor: string): number {
+  const padded = cursor.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = padded.length % 4 === 0 ? '' : '='.repeat(4 - (padded.length % 4));
+  const binary = atob(padded + pad);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const decoded = JSON.parse(new TextDecoder().decode(bytes)) as { o?: number };
+  if (typeof decoded.o !== 'number' || decoded.o < 0) {
+    throw new Error('invalid cursor');
+  }
+  return Math.trunc(decoded.o);
 }
 
 // Silence unused import warning if taskStatuses only used historically

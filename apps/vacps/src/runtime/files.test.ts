@@ -8,6 +8,7 @@ import {
   filesEdit,
   filesGlob,
   filesGrep,
+  filesList,
   filesRead,
   filesWrite,
 } from './files.js';
@@ -88,5 +89,24 @@ describe('files runtime', () => {
     await expect(
       filesGrep({ pattern: 'x', path: '/tmp/vacps-definitely-missing-' + Date.now() }),
     ).rejects.toMatchObject({ code: 'path_not_found', statusCode: 400 });
+  });
+
+  it('pages directory listing with opaque cursor', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'vacps-files-'));
+    const { mkdir } = await import('node:fs/promises');
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) {
+      await writeFile(join(dir, name), 'x\n');
+    }
+    await mkdir(join(dir, 'sub'), { recursive: true });
+    const first = await filesList({ path: dir, limit: 2 });
+    expect(first.returned_count).toBe(2);
+    expect(first.next_cursor).toBeTruthy();
+    const second = await filesList({ path: dir, limit: 2, cursor: first.next_cursor! });
+    expect(second.returned_count).toBeGreaterThanOrEqual(1);
+    const allNames = [
+      ...first.matches.map((m) => String((m as { name: string }).name)),
+      ...second.matches.map((m) => String((m as { name: string }).name)),
+    ];
+    expect(new Set(allNames).size).toBe(allNames.length);
   });
 });

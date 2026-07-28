@@ -151,14 +151,17 @@ export async function filesList(input: {
   path: string;
   limit?: number | undefined;
   includeHidden?: boolean | undefined;
+  cursor?: string | undefined;
 }) {
   const path = assertSafeAbsolutePath(input.path);
   const limit = clamp(input.limit ?? 200, 1, 2000);
   const includeHidden = Boolean(input.includeHidden);
+  const offset = decodeOffsetCursor(input.cursor);
   const entries = await readdir(path, { withFileTypes: true });
+  const visible = entries.filter((entry) => includeHidden || !entry.name.startsWith('.'));
+  const slice = visible.slice(offset, offset + limit);
   const matches = [];
-  for (const entry of entries) {
-    if (!includeHidden && entry.name.startsWith('.')) continue;
+  for (const entry of slice) {
     const full = join(path, entry.name);
     let size = 0;
     let modified_at = new Date(0).toISOString();
@@ -176,15 +179,34 @@ export async function filesList(input: {
       size_bytes: size,
       modified_at,
     });
-    if (matches.length >= limit) break;
   }
+  const nextOffset = offset + matches.length;
   return {
     path,
     matches,
     returned_count: matches.length,
-    truncated: entries.length > matches.length,
-    next_cursor: null,
+    truncated: nextOffset < visible.length,
+    next_cursor: nextOffset < visible.length ? encodeOffsetCursor(nextOffset) : null,
   };
+}
+
+function encodeOffsetCursor(offset: number): string {
+  return Buffer.from(JSON.stringify({ o: offset }), 'utf8').toString('base64url');
+}
+
+function decodeOffsetCursor(cursor: string | undefined): number {
+  if (!cursor) return 0;
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+      o?: number;
+    };
+    return typeof decoded.o === 'number' && decoded.o >= 0 ? Math.trunc(decoded.o) : 0;
+  } catch {
+    throw Object.assign(new Error('Invalid cursor.'), {
+      code: 'validation_error',
+      statusCode: 400,
+    });
+  }
 }
 
 export async function filesGlob(input: {
@@ -1017,44 +1039,38 @@ export async function detectCapabilities() {
       rgVersion = null;
     }
   }
+  // Schema v2 nested shape — no dotted feature keys.
   return {
-    schema_version: '1.0',
-    executables: {
-      rg: { available: rgAvailable, version: rgVersion },
-    },
+    schema_version: '2.0',
     features: {
       command_exec: true,
       shell_exec: true,
       interactive_process: true,
       file_patch: true,
       git_tools: true,
-      'files.grep': true,
-      'files.glob': true,
-      'files.grep.engine': rgAvailable ? 'rg' : 'node_fallback',
-      'files.glob.dialect': 'globstar',
     },
     engines: {
       grep: {
-        preferred: 'ripgrep',
+        active: rgAvailable ? 'ripgrep' : 'node',
         available: rgAvailable,
+        version: rgVersion,
         fallback: 'node',
-        engine_features: rgAvailable
-          ? { regex_flavor: 'rust', respects_gitignore: true }
-          : {
-              regex_flavor: 'javascript',
-              respects_gitignore: false,
-              binary_files_skipped: true,
-            },
+        regex_flavor: rgAvailable ? 'rust' : 'javascript',
+        respects_gitignore: rgAvailable,
       },
       glob: {
-        globstar: true,
-        respect_gitignore: true,
+        dialect: 'globstar',
+        respects_gitignore: true,
       },
     },
     limits: {
       command_timeout_max_ms: 3_600_000,
-      process_output_read_max_bytes: 1_048_576,
+      process_read_max_bytes: 1_048_576,
       file_read_max_bytes: 262_144,
+    },
+    // Compatibility for older control planes until fully migrated.
+    executables: {
+      rg: { available: rgAvailable, version: rgVersion },
     },
   };
 }
