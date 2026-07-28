@@ -352,25 +352,17 @@
     }
   }
   function handleVisibilityChange() {
-    if (
-      document.visibilityState === 'visible' &&
-      authState === 'authenticated' &&
-      activeView === 'fleet'
-    ) {
+    if (document.visibilityState === 'visible' && authState === 'authenticated') {
       void refresh(true);
     }
   }
+  // Poll while authenticated (any tab) so a newly registered node shows up without a manual refresh.
+  // Interval is fixed so dashboard updates do not re-enter this effect and thrash the API.
   $effect(() => {
-    if (
-      authState !== 'authenticated' ||
-      activeView !== 'fleet' ||
-      document.visibilityState !== 'visible'
-    ) {
-      return;
-    }
+    if (authState !== 'authenticated') return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh(true);
-    }, 30_000);
+    }, 5_000);
     return () => window.clearInterval(timer);
   });
   async function refreshCloudflare() {
@@ -743,7 +735,10 @@
             variant="ghost"
             class={`nav-button h-11 rounded-xl px-3 text-sm ${activeView === 'fleet' ? 'nav-active' : ''}`}
             aria-current={activeView === 'fleet' ? 'page' : undefined}
-            onclick={() => (activeView = 'fleet')}>{text.nodes}</Button
+            onclick={() => {
+              activeView = 'fleet';
+              void refresh(true);
+            }}>{text.nodes}</Button
           >
           <Button
             variant="ghost"
