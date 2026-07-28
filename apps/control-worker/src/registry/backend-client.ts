@@ -42,6 +42,7 @@ export class BackendClient {
       offset?: number;
       maxBytes?: number;
       previewMaxBytes?: number;
+      expectedStreamVersion?: string;
     } = {},
   ): Promise<unknown> {
     const params = new URLSearchParams();
@@ -50,6 +51,8 @@ export class BackendClient {
     if (query.maxBytes !== undefined) params.set('max_bytes', String(query.maxBytes));
     if (query.previewMaxBytes !== undefined)
       params.set('preview_max_bytes', String(query.previewMaxBytes));
+    if (query.expectedStreamVersion)
+      params.set('expected_stream_version', query.expectedStreamVersion);
     const suffix = params.size > 0 ? `?${params.toString()}` : '';
     return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/logs${suffix}`, {
       method: 'GET',

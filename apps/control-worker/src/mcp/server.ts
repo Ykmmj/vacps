@@ -349,20 +349,19 @@ export function createMcpServer(env: Env): McpServer {
         eof: z.boolean().optional(),
         content: z.string().optional(),
         encoding: z.string().optional(),
+        stream_version: z.string().optional(),
       }).shape,
     }),
     wrap(async (args) => {
       const parsed = tasksOutputReadInputSchema.parse(args);
-      const payload = (await tasks.readOutput(parsed.task_id, {
+      return (await tasks.readOutput(parsed.task_id, {
         stream: parsed.stream ?? 'stdout',
         offset: parsed.offset ?? 0,
         maxBytes: parsed.max_bytes ?? 65_536,
+        ...(parsed.expected_stream_version
+          ? { expectedStreamVersion: parsed.expected_stream_version }
+          : {}),
       })) as Record<string, unknown>;
-      // Normalize content alias for Schema v2 clients.
-      if (payload.data !== undefined && payload.content === undefined) {
-        return { ...payload, content: payload.data, encoding: 'utf-8' };
-      }
-      return payload;
     }),
   );
 
@@ -511,14 +510,21 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.schedules.delete',
     toolConfig('vacps.schedules.delete', {
-      description: 'Delete a cron schedule.',
+      description:
+        'Delete a cron schedule. Natural idempotent when absent (already_absent). With idempotency_key, replays the stored result.',
       inputSchema: schedulesIdInputSchema,
-      outputSchema: okEnvelope.extend({ deleted: z.boolean(), schedule_id: z.string() }).shape,
+      outputSchema: okEnvelope.extend({
+        deleted: z.boolean(),
+        schedule_id: z.string(),
+        already_absent: z.boolean().optional(),
+        idempotency: z.unknown().optional(),
+      }).shape,
     }),
     wrap(async (args) => {
       const parsed = schedulesIdInputSchema.parse(args);
-      await schedules.delete(parsed.schedule_id);
-      return { deleted: true, schedule_id: parsed.schedule_id };
+      return (await schedules.delete(parsed.schedule_id, {
+        ...(parsed.idempotency_key ? { idempotencyKey: parsed.idempotency_key } : {}),
+      })) as Record<string, unknown>;
     }),
   );
   server.registerTool(

@@ -271,15 +271,122 @@ export class ScheduleService {
     return this.get(current.id);
   }
 
-  async delete(id: string): Promise<void> {
-    const schedule = await this.get(id);
-    // Always remove control-plane row. Best-effort disable on agent (older agents may 400).
-    try {
-      await this.client.deleteScheduler(await this.backends.get(schedule.backendId), id);
-    } catch {
-      // Control plane is source of truth for schedule inventory.
+  /**
+   * Delete a schedule.
+   * - Without idempotency_key: natural idempotent (missing → already_absent).
+   * - With key: request-hash replay like create (same key+hash → replayed result).
+   */
+  async delete(
+    id: string,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<{
+    deleted: boolean;
+    already_absent?: boolean;
+    schedule_id: string;
+    idempotency?: {
+      key: string;
+      replayed: boolean;
+      request_hash: string;
+    };
+  }> {
+    const requestHash = await hashOpaque({
+      operation: 'schedules.delete',
+      schedule_id: id,
+    });
+    const scope = 'schedules.delete';
+
+    if (options.idempotencyKey) {
+      const cached = await this.loadIdempotency(scope, options.idempotencyKey);
+      if (cached) {
+        if (cached.requestHash !== requestHash) {
+          throw new AppError(
+            'idempotency_conflict',
+            'The idempotency key was previously used with different arguments.',
+            409,
+          );
+        }
+        return {
+          ...(cached.result as {
+            deleted: boolean;
+            already_absent?: boolean;
+            schedule_id: string;
+          }),
+          idempotency: {
+            key: options.idempotencyKey,
+            replayed: true,
+            request_hash: requestHash,
+          },
+        };
+      }
     }
-    await this.db.prepare('DELETE FROM schedules WHERE id = ?').bind(id).run();
+
+    const existing = await this.db
+      .prepare('SELECT id, backend_id FROM schedules WHERE id = ?')
+      .bind(id)
+      .first<{ id: string; backend_id: string }>();
+
+    let result: { deleted: boolean; already_absent?: boolean; schedule_id: string };
+    if (!existing) {
+      result = { deleted: false, already_absent: true, schedule_id: id };
+    } else {
+      try {
+        await this.client.deleteScheduler(
+          await this.backends.get(existing.backend_id),
+          id,
+        );
+      } catch {
+        // Control plane is source of truth for schedule inventory.
+      }
+      await this.db.prepare('DELETE FROM schedules WHERE id = ?').bind(id).run();
+      result = { deleted: true, schedule_id: id };
+    }
+
+    if (options.idempotencyKey) {
+      await this.storeIdempotency(scope, options.idempotencyKey, requestHash, result);
+      return {
+        ...result,
+        idempotency: {
+          key: options.idempotencyKey,
+          replayed: false,
+          request_hash: requestHash,
+        },
+      };
+    }
+    return result;
+  }
+
+  private async loadIdempotency(
+    scope: string,
+    key: string,
+  ): Promise<{ requestHash: string; result: unknown } | undefined> {
+    const row = await this.db
+      .prepare(
+        'SELECT request_hash, result_json FROM operation_idempotency WHERE scope = ? AND idempotency_key = ?',
+      )
+      .bind(scope, key)
+      .first<{ request_hash: string; result_json: string }>();
+    if (!row) return undefined;
+    try {
+      return { requestHash: row.request_hash, result: JSON.parse(row.result_json) };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async storeIdempotency(
+    scope: string,
+    key: string,
+    requestHash: string,
+    result: unknown,
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT OR REPLACE INTO operation_idempotency
+          (scope, idempotency_key, request_hash, result_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .bind(scope, key, requestHash, JSON.stringify(result), new Date().toISOString())
+      .run();
   }
 
   async runNow(
@@ -402,4 +509,11 @@ function stableStringify(value: unknown): string {
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+}
+
+async function hashOpaque(value: unknown): Promise<string> {
+  const data = new TextEncoder().encode(stableStringify(value));
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `sha256:${hex}`;
 }

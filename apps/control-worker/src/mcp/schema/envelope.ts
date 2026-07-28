@@ -83,7 +83,8 @@ export function categoryFor(code: string): ErrorCategory {
     code.includes('conflict') ||
     code.includes('mismatch') ||
     code.includes('idempotency') ||
-    code.includes('revision')
+    code.includes('revision') ||
+    code === 'stream_version_conflict'
   ) {
     return 'conflict';
   }
