@@ -87,7 +87,13 @@ function toolConfig(
   return {
     ...config,
     annotations: annotationsFor(name),
-    _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION, ...(config._meta ?? {}) },
+    // Schema v2: do not opt into experimental MCP protocol tasks yet (vacps.tasks.* is the model).
+    execution: { taskSupport: 'forbidden' as const },
+    _meta: {
+      tool_schema_revision: TOOL_SCHEMA_REVISION,
+      tool_schema_version: '2.0',
+      ...(config._meta ?? {}),
+    },
   } as never;
 }
 
@@ -250,8 +256,8 @@ export function createMcpServer(env: Env): McpServer {
     wrap(async (args) => {
       const parsed = tasksCreateCommandInputSchema.parse(args);
       const input = toCreateCommandTask(parsed);
-      const created = await tasks.create(input, 'mcp');
-      return taskCreateResult(created, parsed.idempotency_key);
+      const created = await tasks.create(input, 'mcp', undefined, 'command');
+      return taskCreateResult(created, parsed.idempotency_key, 'command');
     }),
   );
 
@@ -266,8 +272,8 @@ export function createMcpServer(env: Env): McpServer {
     wrap(async (args) => {
       const parsed = tasksCreateShellInputSchema.parse(args);
       const input = toCreateShellTask(parsed);
-      const created = await tasks.create(input, 'mcp');
-      return taskCreateResult(created, parsed.idempotency_key);
+      const created = await tasks.create(input, 'mcp', undefined, 'shell');
+      return taskCreateResult(created, parsed.idempotency_key, 'shell');
     }),
   );
 
@@ -281,8 +287,8 @@ export function createMcpServer(env: Env): McpServer {
     wrap(async (args) => {
       const parsed = tasksCreateAgentInputSchema.parse(args);
       const input = toCreateAgentTask(parsed);
-      const created = await tasks.create(input, 'mcp');
-      return taskCreateResult(created, parsed.idempotency_key);
+      const created = await tasks.create(input, 'mcp', undefined, 'agent');
+      return taskCreateResult(created, parsed.idempotency_key, 'agent');
     }),
   );
 
@@ -336,13 +342,13 @@ export function createMcpServer(env: Env): McpServer {
       description: 'Read a task stdout/stderr stream by absolute byte offset.',
       inputSchema: tasksOutputReadInputSchema,
       outputSchema: okEnvelope.extend({
-        task_id: z.string(),
-        stream: z.string(),
+        task_id: z.string().optional(),
+        stream: z.string().optional(),
         offset: z.number().optional(),
         next_offset: z.number().optional(),
         eof: z.boolean().optional(),
-        data: z.string().optional(),
         content: z.string().optional(),
+        encoding: z.string().optional(),
       }).shape,
     }),
     wrap(async (args) => {
@@ -439,9 +445,11 @@ export function createMcpServer(env: Env): McpServer {
       const created = await schedules.create(parseScheduleCreateV2(parsed));
       return {
         schedule: snakeSchedule(created),
-        ...(created.reused
-          ? { idempotency: { key: created.idempotencyKey ?? null, replayed: true } }
-          : {}),
+        idempotency: {
+          key: parsed.idempotency_key ?? created.idempotencyKey ?? null,
+          replayed: Boolean(created.reused),
+          request_hash: created.requestHash ?? null,
+        },
       };
     }),
   );
@@ -676,19 +684,35 @@ export function createMcpServer(env: Env): McpServer {
       description: 'List directory entries on a backend. Supports limit + opaque cursor.',
       inputSchema: filesListInputSchema,
       outputSchema: okEnvelope.extend({
-        matches: z.array(z.unknown()),
+        entries: z.array(z.unknown()),
+        returned_count: z.number().optional(),
+        truncated: z.boolean().optional(),
         next_cursor: z.string().nullable().optional(),
       }).shape,
     }),
     wrap(async (args) => {
       const parsed = filesListInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.listDir(backend, {
+      const raw = (await client.listDir(backend, {
         path: parsed.path,
         limit: parsed.limit ?? 200,
         includeHidden: parsed.include_hidden === true,
         ...(parsed.cursor ? { cursor: parsed.cursor } : {}),
       })) as Record<string, unknown>;
+      // Normalize legacy matches → entries if an older agent still returns matches.
+      const entries = Array.isArray(raw.entries)
+        ? raw.entries
+        : Array.isArray(raw.matches)
+          ? raw.matches
+          : [];
+      const { matches: _drop, ...rest } = raw;
+      return {
+        ...rest,
+        entries,
+        returned_count:
+          typeof raw.returned_count === 'number' ? raw.returned_count : entries.length,
+        next_cursor: (raw.next_cursor as string | null | undefined) ?? null,
+      };
     }),
   );
 
@@ -1149,6 +1173,7 @@ function snakeTask(task: {
   id: string;
   backendId: string;
   type: string;
+  kind?: string | undefined;
   source?: string | undefined;
   profile?: string | undefined;
   name?: string | undefined;
@@ -1166,8 +1191,8 @@ function snakeTask(task: {
   return {
     id: task.id,
     backend_id: task.backendId,
-    type: task.type,
-    kind: task.type,
+    // Public kind only (command | shell | agent). Internal storage type is not exposed.
+    kind: task.kind ?? task.type,
     ...(task.source ? { source: task.source } : {}),
     ...(task.profile ? { profile: task.profile } : {}),
     ...(task.name ? { name: task.name } : {}),
@@ -1201,18 +1226,13 @@ function snakeSchedule(schedule: {
   };
   taskTemplate: unknown;
   idempotencyKey?: string | undefined;
+  requestHash?: string | undefined;
   lastRunAt?: string | undefined;
   nextRunAt?: string | undefined;
   createdAt: string;
   updatedAt: string;
   reused?: boolean;
 }) {
-  const taskKind =
-    schedule.taskTemplate &&
-    typeof schedule.taskTemplate === 'object' &&
-    'type' in schedule.taskTemplate
-      ? String((schedule.taskTemplate as { type: string }).type)
-      : 'unknown';
   return {
     id: schedule.id,
     revision: schedule.revision ?? 1,
@@ -1229,16 +1249,107 @@ function snakeSchedule(schedule: {
       misfire: schedule.policy?.misfire ?? 'run_once',
       max_catchup_runs: schedule.policy?.maxCatchupRuns ?? 1,
     },
-    task_kind: taskKind,
-    // Legacy fields kept during migration.
-    cron: schedule.cron,
-    timezone: schedule.timezone,
-    task_template: schedule.taskTemplate,
+    task: publicScheduleTask(schedule.taskTemplate),
     ...(schedule.idempotencyKey ? { idempotency_key: schedule.idempotencyKey } : {}),
+    ...(schedule.requestHash ? { request_hash: schedule.requestHash } : {}),
     ...(schedule.lastRunAt ? { last_run_at: schedule.lastRunAt } : {}),
     ...(schedule.nextRunAt ? { next_run_at: schedule.nextRunAt } : {}),
     created_at: schedule.createdAt,
     updated_at: schedule.updatedAt,
+  };
+}
+
+/** Map internal CreateTaskInput → Schema v2 public task (kind command|shell|agent). */
+function publicScheduleTask(template: unknown): Record<string, unknown> {
+  if (!template || typeof template !== 'object') {
+    return { kind: 'unknown' };
+  }
+  const t = template as {
+    type?: string;
+    name?: string;
+    cwd?: string;
+    timeoutSeconds?: number;
+    environment?: Record<string, string>;
+    labels?: Record<string, string>;
+    shell?: {
+      mode?: string;
+      program?: string;
+      arguments?: string[];
+      interpreter?: string;
+      content?: string;
+    };
+    agent?: {
+      prompt?: string;
+      profile?: string;
+      maxSteps?: number;
+      permissions?: { shell?: boolean; network?: boolean; fileWrite?: boolean };
+    };
+    output?: {
+      previewMaxBytes?: number;
+      hardMaxBytes?: number;
+      retentionSeconds?: number;
+    };
+  };
+
+  const output =
+    t.output !== undefined
+      ? {
+          preview_max_bytes: t.output.previewMaxBytes,
+          hard_max_bytes: t.output.hardMaxBytes,
+          retention_seconds: t.output.retentionSeconds,
+        }
+      : undefined;
+
+  if (t.type === 'agent' && t.agent) {
+    return {
+      kind: 'agent',
+      ...(t.name ? { name: t.name } : {}),
+      prompt: t.agent.prompt,
+      ...(t.agent.profile ? { profile: t.agent.profile } : {}),
+      ...(t.agent.maxSteps !== undefined ? { max_steps: t.agent.maxSteps } : {}),
+      permissions: {
+        shell: Boolean(t.agent.permissions?.shell),
+        network: Boolean(t.agent.permissions?.network),
+        file_write: Boolean(t.agent.permissions?.fileWrite),
+      },
+      ...(t.cwd ? { working_directory: t.cwd } : {}),
+      ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
+      ...(t.environment ? { environment: t.environment } : {}),
+      ...(output ? { output } : {}),
+    };
+  }
+
+  if (t.shell?.mode === 'exec') {
+    return {
+      kind: 'command',
+      ...(t.name ? { name: t.name } : {}),
+      program: t.shell.program,
+      arguments: t.shell.arguments ?? [],
+      ...(t.cwd ? { working_directory: t.cwd } : {}),
+      ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
+      ...(t.environment ? { environment: t.environment } : {}),
+      ...(output ? { output } : {}),
+    };
+  }
+
+  if (t.shell?.mode === 'script') {
+    return {
+      kind: 'shell',
+      ...(t.name ? { name: t.name } : {}),
+      command: t.shell.content ?? '',
+      shell: t.shell.interpreter ?? '/bin/bash',
+      ...(t.cwd ? { working_directory: t.cwd } : {}),
+      ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
+      ...(t.environment ? { environment: t.environment } : {}),
+      ...(output ? { output } : {}),
+    };
+  }
+
+  return {
+    kind: t.type === 'agent' ? 'agent' : 'shell',
+    ...(t.name ? { name: t.name } : {}),
+    ...(t.cwd ? { working_directory: t.cwd } : {}),
+    ...(t.timeoutSeconds !== undefined ? { timeout_seconds: t.timeoutSeconds } : {}),
   };
 }
 

@@ -23,6 +23,7 @@ interface ScheduleRow {
   revision?: number | null;
   policy_json?: string | null;
   idempotency_key?: string | null;
+  request_hash?: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
   created_at: string;
@@ -34,6 +35,8 @@ const DEFAULT_POLICY: SchedulePolicy = {
   misfire: 'run_once',
   maxCatchupRuns: 1,
 };
+
+type ScheduleRecord = Schedule & { requestHash?: string };
 
 export class ScheduleService {
   constructor(
@@ -48,7 +51,11 @@ export class ScheduleService {
     enabled?: boolean;
     limit?: number;
     offset?: number;
-  } = {}): Promise<{ schedules: Schedule[]; returned_count: number; next_offset: number | null }> {
+  } = {}): Promise<{
+    schedules: ScheduleRecord[];
+    returned_count: number;
+    next_offset: number | null;
+  }> {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
     const offset = Math.max(query.offset ?? 0, 0);
     const clauses: string[] = [];
@@ -75,7 +82,7 @@ export class ScheduleService {
     };
   }
 
-  async get(id: string): Promise<Schedule> {
+  async get(id: string): Promise<ScheduleRecord> {
     const row = await this.db
       .prepare('SELECT * FROM schedules WHERE id = ?')
       .bind(id)
@@ -84,12 +91,28 @@ export class ScheduleService {
     return toSchedule(row);
   }
 
-  async create(input: CreateScheduleInput): Promise<Schedule & { reused?: boolean }> {
+  async create(
+    input: CreateScheduleInput,
+  ): Promise<ScheduleRecord & { reused?: boolean; requestHash?: string }> {
     const backend = await this.backends.get(input.backendId);
+    const requestHash = await hashScheduleRequest(input);
 
     if (input.idempotencyKey) {
       const existing = await this.findByIdempotency(input.backendId, input.idempotencyKey);
-      if (existing) return { ...existing, reused: true };
+      if (existing) {
+        if (existing.requestHash && existing.requestHash !== requestHash) {
+          throw new AppError(
+            'idempotency_conflict',
+            'The idempotency key was previously used with different arguments.',
+            409,
+          );
+        }
+        return {
+          ...existing,
+          reused: true,
+          requestHash: existing.requestHash ?? requestHash,
+        };
+      }
     }
 
     const id = crypto.randomUUID();
@@ -99,8 +122,8 @@ export class ScheduleService {
       await this.db
         .prepare(
           `INSERT INTO schedules
-            (id, backend_id, name, cron, timezone, task_template_json, enabled, revision, policy_json, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+            (id, backend_id, name, cron, timezone, task_template_json, enabled, revision, policy_json, idempotency_key, request_hash, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
         )
         .bind(
           id,
@@ -112,6 +135,7 @@ export class ScheduleService {
           Number(input.enabled),
           JSON.stringify(policy),
           input.idempotencyKey ?? null,
+          requestHash,
           now,
           now,
         )
@@ -119,21 +143,34 @@ export class ScheduleService {
     } catch {
       if (input.idempotencyKey) {
         const raced = await this.findByIdempotency(input.backendId, input.idempotencyKey);
-        if (raced) return { ...raced, reused: true };
+        if (raced) {
+          if (raced.requestHash && raced.requestHash !== requestHash) {
+            throw new AppError(
+              'idempotency_conflict',
+              'The idempotency key was previously used with different arguments.',
+              409,
+            );
+          }
+          return {
+            ...raced,
+            reused: true,
+            requestHash: raced.requestHash ?? requestHash,
+          };
+        }
       }
       throw new AppError('internal_error', 'Could not create schedule.', 500);
     }
     const schedule = await this.get(id);
     try {
       await this.sync(schedule, backend);
-      return schedule;
+      return { ...schedule, requestHash };
     } catch (error) {
       await this.db.prepare('DELETE FROM schedules WHERE id = ?').bind(id).run();
       throw error;
     }
   }
 
-  async update(id: string, input: UpdateScheduleInput): Promise<Schedule> {
+  async update(id: string, input: UpdateScheduleInput): Promise<ScheduleRecord> {
     const current = await this.get(id);
     return this.applyUpdate(current, {
       ...(input.name !== undefined ? { name: input.name } : {}),
@@ -146,7 +183,7 @@ export class ScheduleService {
   }
 
   /** Schema v2 patch with optional expected_revision optimistic concurrency. */
-  async patch(id: string, input: PatchScheduleInput): Promise<Schedule> {
+  async patch(id: string, input: PatchScheduleInput): Promise<ScheduleRecord> {
     const current = await this.get(id);
     if (
       input.expectedRevision !== undefined &&
@@ -174,7 +211,7 @@ export class ScheduleService {
   }
 
   private async applyUpdate(
-    current: Schedule,
+    current: ScheduleRecord,
     patch: {
       name?: string;
       cron?: string;
@@ -183,7 +220,7 @@ export class ScheduleService {
       taskTemplate?: Schedule['taskTemplate'];
       policy?: SchedulePolicy;
     },
-  ): Promise<Schedule> {
+  ): Promise<ScheduleRecord> {
     // Ensure task template backend always matches schedule.
     let taskTemplate = patch.taskTemplate ?? current.taskTemplate;
     if (taskTemplate.backendId !== current.backendId) {
@@ -236,7 +273,12 @@ export class ScheduleService {
 
   async delete(id: string): Promise<void> {
     const schedule = await this.get(id);
-    await this.client.deleteScheduler(await this.backends.get(schedule.backendId), id);
+    // Always remove control-plane row. Best-effort disable on agent (older agents may 400).
+    try {
+      await this.client.deleteScheduler(await this.backends.get(schedule.backendId), id);
+    } catch {
+      // Control plane is source of truth for schedule inventory.
+    }
     await this.db.prepare('DELETE FROM schedules WHERE id = ?').bind(id).run();
   }
 
@@ -284,7 +326,7 @@ export class ScheduleService {
   private async findByIdempotency(
     backendId: string,
     key: string,
-  ): Promise<Schedule | undefined> {
+  ): Promise<ScheduleRecord | undefined> {
     const row = await this.db
       .prepare(
         'SELECT * FROM schedules WHERE backend_id = ? AND idempotency_key = ? LIMIT 1',
@@ -295,7 +337,7 @@ export class ScheduleService {
   }
 
   private async sync(
-    schedule: Schedule,
+    schedule: ScheduleRecord,
     backend: Awaited<ReturnType<BackendRepository['get']>>,
   ): Promise<void> {
     await this.client.upsertScheduler(backend, schedule.id, {
@@ -309,7 +351,7 @@ export class ScheduleService {
   }
 }
 
-function toSchedule(row: ScheduleRow): Schedule {
+function toSchedule(row: ScheduleRow): ScheduleRecord {
   let policy: SchedulePolicy = DEFAULT_POLICY;
   if (row.policy_json) {
     try {
@@ -329,9 +371,35 @@ function toSchedule(row: ScheduleRow): Schedule {
     policy,
     taskTemplate: JSON.parse(row.task_template_json) as Schedule['taskTemplate'],
     ...(row.idempotency_key ? { idempotencyKey: row.idempotency_key } : {}),
+    ...(row.request_hash ? { requestHash: row.request_hash } : {}),
     ...(row.last_run_at ? { lastRunAt: row.last_run_at } : {}),
     ...(row.next_run_at ? { nextRunAt: row.next_run_at } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/** Canonical hash of schedule create payload for idempotency_conflict. */
+export async function hashScheduleRequest(input: CreateScheduleInput): Promise<string> {
+  const canonical = {
+    backendId: input.backendId,
+    name: input.name,
+    cron: input.cron,
+    timezone: input.timezone ?? 'UTC',
+    enabled: input.enabled ?? true,
+    policy: input.policy ?? DEFAULT_POLICY,
+    taskTemplate: input.taskTemplate,
+  };
+  const data = new TextEncoder().encode(stableStringify(canonical));
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `sha256:${hex}`;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
 }

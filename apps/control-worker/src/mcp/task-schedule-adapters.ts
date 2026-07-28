@@ -584,6 +584,7 @@ export function taskCreateResult(
     id: string;
     backendId: string;
     type: string;
+    kind?: string;
     status: string;
     createdAt: string;
     name?: string;
@@ -593,12 +594,15 @@ export function taskCreateResult(
     requestHash?: string;
   },
   inputKey?: string | null,
+  /** Public kind override (command | shell | agent). */
+  publicKind?: 'command' | 'shell' | 'agent',
 ) {
+  const kind = publicKind ?? created.kind ?? created.type;
   return {
     task: {
       id: created.id,
       backend_id: created.backendId,
-      kind: created.type,
+      kind,
       name: created.name ?? null,
       summary: created.summary ?? null,
       status: created.status,

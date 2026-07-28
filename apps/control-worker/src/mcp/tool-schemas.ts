@@ -31,8 +31,8 @@ import {
  * Canonical tool input schemas (MCP Schema v2).
  * Used for MCP registerTool (tools/list) and runtime parse.
  */
-export const MCP_PROTOCOL_VERSION = '0.4.3';
-export const TOOL_SCHEMA_REVISION = '2026-07-28-schema-v2-blockers';
+export const MCP_PROTOCOL_VERSION = '0.4.4';
+export const TOOL_SCHEMA_REVISION = '2026-07-28-schema-v2-list-schedule';
 
 // ── Backends ──────────────────────────────────────────────────────────
 

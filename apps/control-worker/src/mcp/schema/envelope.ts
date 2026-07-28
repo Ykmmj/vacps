@@ -71,7 +71,9 @@ export function categoryFor(code: string): ErrorCategory {
     code === 'path_not_allowed' ||
     code === 'path_not_directory' ||
     code === 'path_not_found' ||
-    code === 'invalid_line_range'
+    code === 'invalid_line_range' ||
+    code === 'backend_client_error' ||
+    code === 'invalid_scheduler'
   ) {
     return 'validation';
   }
@@ -91,13 +93,11 @@ export function categoryFor(code: string): ErrorCategory {
   if (code.includes('rate_limit') || code.includes('too_many')) return 'rate_limit';
   if (code.includes('timeout') || code.includes('timed_out')) return 'timeout';
   if (code.includes('dependency')) return 'dependency';
-  if (
-    code.includes('unreachable') ||
-    code.includes('unavailable') ||
-    code === 'backend_request_failed'
-  ) {
+  if (code.includes('unreachable') || code.includes('unavailable')) {
     return 'unavailable';
   }
+  // backend_request_failed is typically 5xx / transport — unavailable.
+  if (code === 'backend_request_failed') return 'unavailable';
   return 'internal';
 }
 
