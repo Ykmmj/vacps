@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "vacps-control",
+  "name": "vacps",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-17",
   // `global_fetch_strictly_public` is required by @cloudflare/workers-oauth-provider for its

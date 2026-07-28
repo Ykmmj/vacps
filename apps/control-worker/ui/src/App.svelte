@@ -713,7 +713,7 @@
   }
 </script>
 
-<svelte:head><title>VACPS Control</title></svelte:head>
+<svelte:head><title>Vacps Control</title></svelte:head>
 <svelte:document onvisibilitychange={handleVisibilityChange} />
 <Toaster {theme} position="top-right" closeButton richColors />
 <div
@@ -730,13 +730,13 @@
         <button
           class="brand-button flex h-11 items-center gap-2.5 rounded-xl font-semibold tracking-[-0.01em]"
           onclick={() => (activeView = 'fleet')}
-          aria-label="VACPS Control"
+          aria-label="Vacps Control"
         >
           <span
             class="grid size-8 place-items-center rounded-[10px] bg-foreground text-card shadow-[inset_0_0_0_1px_oklch(100%_0_0_/_0.12)]"
             ><ServerIcon class="size-4" /></span
           >
-          <span class="brand-label">VACPS</span>
+          <span class="brand-label">Vacps</span>
         </button>
         <nav class="flex gap-1" aria-label="Primary navigation">
           <Button
@@ -873,7 +873,7 @@
             <p class="text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
               {text.control}
             </p>
-            <h1 class="mt-0.5 text-lg font-semibold tracking-[-0.02em]">VACPS</h1>
+            <h1 class="mt-0.5 text-lg font-semibold tracking-[-0.02em]">Vacps</h1>
           </div>
         </div>
         {#if authState === 'checking'}

@@ -11,7 +11,7 @@ pnpm setup:cloudflare
 unset CONTROL_PANEL_PASSWORD
 ```
 
-It logs in to Cloudflare, creates D1 and KV, updates local bindings, stores the control-panel authentication secrets, generates a control-plane Ed25519 signing identity, applies migrations, and deploys the Worker. The control-panel password must be at least 12 non-whitespace characters. The private signing key never leaves the Worker; its public key is included automatically with each one-time Agent registration Token. The session signing secret is generated and stored without being printed.
+It logs in to Cloudflare, creates D1 and KV, updates local bindings, stores the control-panel authentication secrets, generates a control-plane Ed25519 signing identity, applies migrations, and deploys the Worker. On a first-time account (when the `vacps` Worker does not exist yet), it performs an initial deploy so Cloudflare will accept Worker secrets, then writes secrets and redeploys. The control-panel password must be at least 12 non-whitespace characters. The private signing key never leaves the Worker; its public key is included automatically with each one-time Agent registration Token. The session signing secret is generated and stored without being printed.
 
 To secure an existing production Worker before its next deploy, set the two Worker Secrets without placing either value in a command argument:
 

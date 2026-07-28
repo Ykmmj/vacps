@@ -126,7 +126,7 @@ function consentPage({ request, client, authenticated, error }: ConsentPageOptio
   return layout(
     'Authorize MCP access',
     `<h1>Authorize access</h1>
-     <p><strong>${clientName}</strong> is requesting access to the VACPS control plane over MCP.</p>
+     <p><strong>${clientName}</strong> is requesting access to the Vacps control plane over MCP.</p>
      <p class="note">Granting access is equivalent to sharing the control-panel password: the client
        will be able to list backends, queue tasks (including shell commands), and manage schedules.</p>
      ${errorBlock}

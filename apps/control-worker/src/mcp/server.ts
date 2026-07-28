@@ -93,7 +93,7 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.backends.list',
     {
-      description: 'List VACPS backends (nodes).',
+      description: 'List Vacps backends (nodes).',
       outputSchema: okEnvelope.extend({ backends: z.array(z.unknown()) }).shape,
     },
     wrap(

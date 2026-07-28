@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { webcrypto } from 'node:crypto';
 
-const secretNames = await existingSecretNames();
+const secretNames = await ensureSecretListing();
 const hasPrivateKey = secretNames.has('CONTROL_PLANE_SIGNING_PRIVATE_KEY');
 const hasPublicKey = secretNames.has('CONTROL_PLANE_SIGNING_PUBLIC_KEY');
 
@@ -22,26 +22,69 @@ if (!hasPrivateKey) {
   console.log('Control-plane Ed25519 signing identity already exists.');
 }
 
-async function existingSecretNames() {
-  try {
-    const output = await capture(['exec', 'wrangler', 'secret', 'list']);
-    try {
-      const parsed = JSON.parse(output);
-      if (Array.isArray(parsed)) {
-        return new Set(
-          parsed
-            .map((entry) => (typeof entry?.name === 'string' ? entry.name : undefined))
-            .filter(Boolean),
-        );
-      }
-    } catch {
-      // Wrangler's human-readable output is supported below.
-    }
-    return new Set(output.match(/[A-Z][A-Z0-9_]+/g) ?? []);
-  } catch {
-    // On the first deployment, `secret list` can fail because the Worker has not been created yet.
-    return new Set();
+/**
+ * Secret list requires the Worker script to exist. On first deploy, bootstrap a bare
+ * `wrangler deploy` (build UI + assets) so identity secrets can be stored.
+ */
+async function ensureSecretListing() {
+  let probe = await probeWorkerSecrets();
+  if (probe.exists) return probe.names;
+
+  console.log(
+    'Worker script is not deployed yet; performing an initial deploy so identity secrets can be stored...',
+  );
+  await run(['run', 'build:ui']);
+  await run(['run', 'copy:installer']);
+  await run(['exec', 'wrangler', 'deploy']);
+
+  probe = await probeWorkerSecrets();
+  if (!probe.exists) {
+    throw new Error(
+      'Initial Worker deploy finished, but secret list still reports the Worker as missing. Check CLOUDFLARE_ACCOUNT_ID and token permissions (Workers Scripts: Edit).',
+    );
   }
+  return probe.names;
+}
+
+async function probeWorkerSecrets() {
+  const result = await captureResult(['exec', 'wrangler', 'secret', 'list']);
+  if (result.code === 0) {
+    return { exists: true, names: parseSecretNames(result.output) };
+  }
+  if (isWorkerNotFoundError(result.output)) {
+    return { exists: false, names: new Set() };
+  }
+  process.stderr.write(result.output);
+  throw new Error(`pnpm exec wrangler secret list exited with ${result.code}.`);
+}
+
+function parseSecretNames(output) {
+  try {
+    const jsonLine =
+      output
+        .trim()
+        .split('\n')
+        .find((line) => line.startsWith('[')) ?? output;
+    const parsed = JSON.parse(jsonLine);
+    if (Array.isArray(parsed)) {
+      return new Set(
+        parsed
+          .map((entry) => (typeof entry?.name === 'string' ? entry.name : undefined))
+          .filter(Boolean),
+      );
+    }
+  } catch {
+    // Wrangler's human-readable output is supported below.
+  }
+  return new Set(output.match(/[A-Z][A-Z0-9_]+/g) ?? []);
+}
+
+function isWorkerNotFoundError(text) {
+  return (
+    /Worker ["'][^"']+["'] not found/i.test(text) ||
+    /\[code:\s*10007\]/i.test(text) ||
+    /script not found/i.test(text)
+  );
 }
 
 async function generateIdentity() {
@@ -74,7 +117,7 @@ function run(args, input) {
   });
 }
 
-function capture(args) {
+function captureResult(args) {
   return new Promise((resolve, reject) => {
     const child = spawn('pnpm', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
@@ -84,8 +127,7 @@ function capture(args) {
     child.stderr.on('data', (chunk) => (output += chunk));
     child.once('error', reject);
     child.once('close', (code) => {
-      if (code === 0) resolve(output);
-      else reject(new Error(`pnpm ${args.join(' ')} exited with ${code ?? 'an unknown signal'}.`));
+      resolve({ code: code ?? 1, output });
     });
   });
 }
