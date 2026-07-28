@@ -306,8 +306,15 @@ export class BackendClient {
         { error?: { message?: string; code?: string } } | undefined;
       if (!response.ok) {
         const detail = responseBody?.error?.message;
+        const code =
+          responseBody?.error?.code ??
+          (response.status === 404
+            ? 'backend_not_found'
+            : response.status >= 400 && response.status < 500
+              ? 'backend_client_error'
+              : 'backend_request_failed');
         throw new AppError(
-          responseBody?.error?.code ?? 'backend_request_failed',
+          code,
           detail ?? describeBackendHttpFailure(response.status, targetUrl),
           response.status >= 400 && response.status < 500 ? response.status : 502,
         );

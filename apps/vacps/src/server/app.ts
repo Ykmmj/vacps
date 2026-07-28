@@ -792,20 +792,34 @@ export async function createServer(input: {
     return reply.code(204).send();
   });
   app.delete('/schedulers/:id', async (request, reply) => {
-    await input.queue.upsertScheduler({
-      id: (request.params as { id: string }).id,
-      cron: '* * * * *',
-      timezone: 'UTC',
-      enabled: false,
-      taskTemplate: createTaskSchema.parse({
-        type: 'shell',
-        backendId: input.config.BACKEND_ID,
-        cwd: '/',
-        timeoutSeconds: 1,
-        profile: 'full',
-        shell: { mode: 'exec', program: 'true', arguments: [] },
-      }),
-    });
+    // Disable/remove the bullmq job scheduler. Do not re-validate a full task template.
+    const id = (request.params as { id: string }).id;
+    try {
+      await input.queue.upsertScheduler({
+        id,
+        cron: '0 0 1 1 *',
+        timezone: 'UTC',
+        enabled: false,
+        taskTemplate: {
+          type: 'shell',
+          backendId: input.config.BACKEND_ID,
+          cwd: '/tmp',
+          timeoutSeconds: 1,
+          profile: 'full',
+          shell: { mode: 'exec', program: 'true', arguments: [] },
+          output: {
+            captureStdout: true,
+            captureStderr: true,
+            previewMaxBytes: 8192,
+            retentionSeconds: 86_400,
+            hardMaxBytes: 10_485_760,
+          },
+        },
+      });
+    } catch (error) {
+      // Best-effort: control plane still deletes its row even if Redis/scheduler is gone.
+      request.log?.warn?.({ err: error, scheduleId: id }, 'scheduler delete on agent failed');
+    }
     return reply.code(204).send();
   });
   app.post('/schedulers/:id/run', async (request) => {

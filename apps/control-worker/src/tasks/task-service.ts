@@ -13,6 +13,7 @@ interface TaskRow {
   id: string;
   backend_id: string;
   type: 'shell' | 'agent';
+  kind: string | null;
   source: TaskSource;
   profile: string;
   name: string | null;
@@ -31,6 +32,8 @@ export interface TaskIndex {
   id: string;
   backendId: string;
   type: 'shell' | 'agent';
+  /** Public kind: command | shell | agent (create_command stores command). */
+  kind?: string;
   source: TaskSource;
   profile: string;
   name?: string;
@@ -56,6 +59,7 @@ export class TaskService {
     input: CreateTaskInput,
     source: TaskSource,
     scheduleId?: string,
+    publicKind?: 'command' | 'shell' | 'agent',
   ): Promise<
     TaskIndex & {
       reusedExistingTask?: boolean;
@@ -65,6 +69,14 @@ export class TaskService {
     const backend = await this.backends.get(input.backendId);
     if (!backend.enabled)
       throw new AppError('backend_disabled', `Backend '${backend.id}' is disabled.`, 409);
+
+    const kind =
+      publicKind ??
+      (input.type === 'agent'
+        ? 'agent'
+        : input.type === 'shell' && input.shell.mode === 'exec'
+          ? 'command'
+          : 'shell');
 
     const requestHash = await hashTaskRequest(input);
     if (input.idempotencyKey) {
@@ -94,14 +106,15 @@ export class TaskService {
       await this.db
         .prepare(
           `INSERT INTO tasks (
-             id, backend_id, type, source, profile, name, summary, status, schedule_id,
+             id, backend_id, type, kind, source, profile, name, summary, status, schedule_id,
              idempotency_key, request_hash, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)`,
         )
         .bind(
           taskId,
           input.backendId,
           input.type,
+          kind,
           source,
           input.profile,
           name,
@@ -313,15 +326,19 @@ export class TaskService {
       offset: input.offset ?? 0,
       maxBytes: input.maxBytes ?? 65_536,
     })) as Record<string, unknown>;
-    // Schema v2: single body field `content` (drop duplicate `data` when both present).
-    if (payload.data !== undefined && payload.content === undefined) {
-      return { ...payload, content: payload.data, encoding: payload.encoding ?? 'utf-8' };
-    }
-    if (payload.data !== undefined && payload.content !== undefined) {
-      const { data: _drop, ...rest } = payload;
-      return { ...rest, encoding: rest.encoding ?? 'utf-8' };
-    }
-    return payload;
+    // Schema v2: only `content` (never both data and content).
+    const body =
+      payload.content !== undefined
+        ? payload.content
+        : payload.data !== undefined
+          ? payload.data
+          : undefined;
+    const { data: _dropData, content: _dropContent, ...rest } = payload;
+    return {
+      ...rest,
+      ...(body !== undefined ? { content: body } : {}),
+      encoding: (payload.encoding as string | undefined) ?? 'utf-8',
+    };
   }
 
   async logs(id: string): Promise<unknown> {
@@ -385,6 +402,7 @@ function toTaskIndex(row: TaskRow): TaskIndex {
     id: row.id,
     backendId: row.backend_id,
     type: row.type,
+    kind: row.kind ?? row.type,
     source: row.source,
     profile: row.profile,
     ...(row.name ? { name: row.name } : {}),
