@@ -779,13 +779,19 @@ export async function createServer(input: {
       cron?: unknown;
       timezone?: unknown;
       enabled?: unknown;
-      /** Schema v3: task (not taskTemplate). */
       task?: unknown;
       taskTemplate?: unknown;
     };
-    // Prefer V3 `task`; reject if only legacy taskTemplate is sent without task.
-    const rawTask = body.task ?? body.taskTemplate;
-    const template = createTaskSchema.safeParse(rawTask);
+    // Schema v3 hard break: only `task` is accepted (not taskTemplate).
+    if (body.taskTemplate !== undefined) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'taskTemplate is not accepted; use task (Schema v3 kind payload).',
+        },
+      });
+    }
+    const template = createTaskSchema.safeParse(body.task);
     if (
       !template.success ||
       typeof body.cron !== 'string' ||
@@ -829,13 +835,26 @@ export async function createServer(input: {
     }
     return reply.code(204).send();
   });
-  app.post('/schedulers/:id/run', async (request) => {
+  app.post('/schedulers/:id/run', async (request, reply) => {
     const body = request.body as { task?: unknown; taskTemplate?: unknown };
-    const template = createTaskSchema.parse(body.task ?? body.taskTemplate);
+    if (body.taskTemplate !== undefined) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'taskTemplate is not accepted; use task (Schema v3 kind payload).',
+        },
+      });
+    }
+    const template = createTaskSchema.safeParse(body.task);
+    if (!template.success) {
+      return reply.code(400).send({
+        error: { code: 'invalid_task', message: template.error.message },
+      });
+    }
     return {
       task_id: await input.queue.runScheduleNow({
         id: (request.params as { id: string }).id,
-        task: template,
+        task: template.data,
       }),
     };
   });

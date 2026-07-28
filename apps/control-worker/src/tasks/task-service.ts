@@ -331,17 +331,11 @@ export class TaskService {
           ? { expectedStreamVersion: input.expectedStreamVersion }
           : {}),
       })) as Record<string, unknown>;
-      // Schema v3: only `content` (never both data and content).
-      const body =
-        payload.content !== undefined
-          ? payload.content
-          : payload.data !== undefined
-            ? payload.data
-            : undefined;
-      const { data: _dropData, content: _dropContent, ...rest } = payload;
+      // Schema v3: only `content` — no data alias, no legacy normalize.
+      const { data: _rejectData, ...rest } = payload;
       return {
         ...rest,
-        ...(body !== undefined ? { content: body } : {}),
+        ...(payload.content !== undefined ? { content: payload.content } : {}),
         encoding: (payload.encoding as string | undefined) ?? 'utf-8',
       };
     } catch (error) {
