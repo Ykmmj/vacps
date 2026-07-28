@@ -108,7 +108,15 @@ describe('MCP server tools', () => {
     expect(hard?.maximum).toBe(1_073_741_824);
     expect(startSchema.additionalProperties).toBe(false);
     expect(startSchema.properties?.mode).toBeTruthy();
-    expect(startSchema.oneOf?.length).toBeGreaterThanOrEqual(2);
+    expect(startSchema.required).toEqual(expect.arrayContaining(['backend_id', 'mode']));
+    // Only mode=exec and mode=shell branches (legacy XOR removed).
+    expect(startSchema.oneOf).toHaveLength(2);
+    expect(startSchema.oneOf).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ required: expect.arrayContaining(['mode', 'program']) }),
+        expect.objectContaining({ required: expect.arrayContaining(['mode', 'command']) }),
+      ]),
+    );
     expect(start?.annotations?.openWorldHint).toBe(true);
 
     const grep = tools.find((tool) => tool.name === 'vacps.files.grep');
@@ -163,8 +171,8 @@ describe('MCP server tools', () => {
     const startPublished = (published.tools as Record<string, { oneOf?: unknown[] }>)[
       'vacps.process.start'
     ];
-    // mode=exec|shell plus legacy program XOR command branches
-    expect(startPublished.oneOf!.length).toBeGreaterThanOrEqual(2);
+    expect(startPublished.oneOf).toHaveLength(2);
+    expect(published.tool_schema_version).toBe('2.0');
 
     await client.close();
   });

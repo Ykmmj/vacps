@@ -586,9 +586,11 @@ export function taskCreateResult(
     type: string;
     status: string;
     createdAt: string;
+    name?: string;
     summary?: string;
     reusedExistingTask?: boolean;
     idempotencyKey?: string;
+    requestHash?: string;
   },
   inputKey?: string | null,
 ) {
@@ -597,7 +599,8 @@ export function taskCreateResult(
       id: created.id,
       backend_id: created.backendId,
       kind: created.type,
-      name: created.summary ?? null,
+      name: created.name ?? null,
+      summary: created.summary ?? null,
       status: created.status,
       created_at: created.createdAt,
       cancellable: !['succeeded', 'failed', 'cancelled', 'timed_out', 'dispatch_failed'].includes(
@@ -612,6 +615,7 @@ export function taskCreateResult(
     idempotency: {
       key: inputKey ?? created.idempotencyKey ?? null,
       replayed: Boolean(created.reusedExistingTask),
+      request_hash: created.requestHash ?? null,
     },
   };
 }

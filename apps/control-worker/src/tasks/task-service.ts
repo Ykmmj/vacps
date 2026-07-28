@@ -15,10 +15,12 @@ interface TaskRow {
   type: 'shell' | 'agent';
   source: TaskSource;
   profile: string;
+  name: string | null;
   summary: string | null;
   status: TaskStatus;
   schedule_id: string | null;
   idempotency_key: string | null;
+  request_hash: string | null;
   retry_of_task_id: string | null;
   created_at: string;
   updated_at: string;
@@ -31,10 +33,12 @@ export interface TaskIndex {
   type: 'shell' | 'agent';
   source: TaskSource;
   profile: string;
+  name?: string;
   summary?: string;
   status: TaskStatus;
   scheduleId?: string;
   idempotencyKey?: string;
+  requestHash?: string;
   retryOfTaskId?: string;
   createdAt: string;
   updatedAt: string;
@@ -52,26 +56,47 @@ export class TaskService {
     input: CreateTaskInput,
     source: TaskSource,
     scheduleId?: string,
-  ): Promise<TaskIndex & { reusedExistingTask?: boolean }> {
+  ): Promise<
+    TaskIndex & {
+      reusedExistingTask?: boolean;
+      requestHash?: string;
+    }
+  > {
     const backend = await this.backends.get(input.backendId);
     if (!backend.enabled)
       throw new AppError('backend_disabled', `Backend '${backend.id}' is disabled.`, 409);
 
+    const requestHash = await hashTaskRequest(input);
     if (input.idempotencyKey) {
       const existing = await this.findByIdempotency(input.backendId, input.idempotencyKey);
-      if (existing) return { ...existing, reusedExistingTask: true };
+      if (existing) {
+        if (existing.requestHash && existing.requestHash !== requestHash) {
+          throw new AppError(
+            'idempotency_conflict',
+            'The idempotency key was previously used with different arguments.',
+            409,
+          );
+        }
+        // Legacy rows without request_hash: treat as replay (same key only).
+        return {
+          ...existing,
+          reusedExistingTask: true,
+          requestHash: existing.requestHash ?? requestHash,
+        };
+      }
     }
 
     const taskId = crypto.randomUUID();
     const now = new Date().toISOString();
     const summary = taskSummary(input);
+    const name = input.name?.trim() || null;
     try {
       await this.db
         .prepare(
           `INSERT INTO tasks (
-             id, backend_id, type, source, profile, summary, status, schedule_id,
-             idempotency_key, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?)`,
+             id, backend_id, type, source, profile, name, summary, status, schedule_id,
+             idempotency_key, request_hash, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)`,
         )
         .bind(
           taskId,
@@ -79,9 +104,11 @@ export class TaskService {
           input.type,
           source,
           input.profile,
+          name,
           summary,
           scheduleId ?? null,
           input.idempotencyKey ?? null,
+          requestHash,
           now,
           now,
         )
@@ -89,7 +116,20 @@ export class TaskService {
     } catch {
       if (input.idempotencyKey) {
         const raced = await this.findByIdempotency(input.backendId, input.idempotencyKey);
-        if (raced) return { ...raced, reusedExistingTask: true };
+        if (raced) {
+          if (raced.requestHash && raced.requestHash !== requestHash) {
+            throw new AppError(
+              'idempotency_conflict',
+              'The idempotency key was previously used with different arguments.',
+              409,
+            );
+          }
+          return {
+            ...raced,
+            reusedExistingTask: true,
+            requestHash: raced.requestHash ?? requestHash,
+          };
+        }
       }
       throw new AppError('internal_error', 'Could not create task index.', 500);
     }
@@ -107,7 +147,8 @@ export class TaskService {
       await this.setStatus(taskId, 'dispatch_failed');
       throw error;
     }
-    return this.get(taskId);
+    const created = await this.get(taskId);
+    return { ...created, requestHash };
   }
 
   async list(
@@ -122,7 +163,6 @@ export class TaskService {
           createdAfter?: string;
         } = 50,
   ): Promise<TaskIndex[]> {
-    // Back-compat: list(50)
     const opts = typeof query === 'number' ? { limit: query } : query;
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
     const offset = Math.max(opts.offset ?? 0, 0);
@@ -152,14 +192,16 @@ export class TaskService {
     return rows.results.map(toTaskIndex);
   }
 
-  async listPage(query: {
-    limit?: number;
-    offset?: number;
-    backendId?: string;
-    type?: 'shell' | 'agent';
-    status?: string;
-    createdAfter?: string;
-  } = {}): Promise<{ tasks: TaskIndex[]; returned_count: number; next_offset: number | null }> {
+  async listPage(
+    query: {
+      limit?: number;
+      offset?: number;
+      backendId?: string;
+      type?: 'shell' | 'agent';
+      status?: string;
+      createdAfter?: string;
+    } = {},
+  ): Promise<{ tasks: TaskIndex[]; returned_count: number; next_offset: number | null }> {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
     const offset = Math.max(query.offset ?? 0, 0);
     const tasks = await this.list({ ...query, limit: limit + 1, offset });
@@ -205,25 +247,47 @@ export class TaskService {
       const refreshed = await this.get(id);
       let commands: unknown;
       let output: unknown;
+      let result: unknown = remote?.result;
       if (options.includeCommands || options.includeOutputPreview) {
         const logs = (await this.client.getLogs(backend, id, {
           previewMaxBytes,
         })) as {
           commands?: Array<Record<string, unknown>>;
         };
-        commands = options.includeCommands ? logs.commands : undefined;
+        if (options.includeCommands) {
+          commands = Array.isArray(logs.commands)
+            ? logs.commands.map((cmd) => normalizeCommandEntry(cmd, id))
+            : [];
+        }
         if (options.includeOutputPreview) {
           const last = Array.isArray(logs.commands) ? logs.commands.at(-1) : undefined;
           output = {
-            stdout: streamPreview(last, 'stdout', previewMaxBytes),
-            stderr: streamPreview(last, 'stderr', previewMaxBytes),
+            stdout: streamPreview(last, 'stdout', previewMaxBytes, id),
+            stderr: streamPreview(last, 'stderr', previewMaxBytes, id),
           };
+          // Prefer structured process result without embedding full stdout/stderr text twice.
+          if (result && typeof result === 'object') {
+            const r = result as Record<string, unknown>;
+            result = {
+              kind: 'process',
+              exit_code: r.exitCode ?? r.exit_code ?? null,
+              signal: r.signal ?? null,
+              timed_out: r.timedOut ?? r.timed_out ?? false,
+            };
+          } else if (last) {
+            result = {
+              kind: 'process',
+              exit_code: last.exitCode ?? last.exit_code ?? null,
+              signal: last.signal ?? null,
+              timed_out: false,
+            };
+          }
         }
       }
       return {
         task: refreshed,
         remote,
-        ...(remote?.result !== undefined ? { result: remote.result } : {}),
+        ...(result !== undefined ? { result } : {}),
         ...(output ? { output } : {}),
         ...(commands ? { commands } : {}),
       };
@@ -244,11 +308,20 @@ export class TaskService {
   ): Promise<unknown> {
     const task = await this.get(id);
     const backend = await this.backends.get(task.backendId);
-    return this.client.getLogs(backend, id, {
+    const payload = (await this.client.getLogs(backend, id, {
       stream: input.stream,
       offset: input.offset ?? 0,
       maxBytes: input.maxBytes ?? 65_536,
-    });
+    })) as Record<string, unknown>;
+    // Schema v2: single body field `content` (drop duplicate `data` when both present).
+    if (payload.data !== undefined && payload.content === undefined) {
+      return { ...payload, content: payload.data, encoding: payload.encoding ?? 'utf-8' };
+    }
+    if (payload.data !== undefined && payload.content !== undefined) {
+      const { data: _drop, ...rest } = payload;
+      return { ...rest, encoding: rest.encoding ?? 'utf-8' };
+    }
+    return payload;
   }
 
   async logs(id: string): Promise<unknown> {
@@ -314,15 +387,56 @@ function toTaskIndex(row: TaskRow): TaskIndex {
     type: row.type,
     source: row.source,
     profile: row.profile,
+    ...(row.name ? { name: row.name } : {}),
     ...(row.summary ? { summary: row.summary } : {}),
     status: row.status,
     ...(row.schedule_id ? { scheduleId: row.schedule_id } : {}),
     ...(row.idempotency_key ? { idempotencyKey: row.idempotency_key } : {}),
+    ...(row.request_hash ? { requestHash: row.request_hash } : {}),
     ...(row.retry_of_task_id ? { retryOfTaskId: row.retry_of_task_id } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.finished_at ? { finishedAt: row.finished_at } : {}),
   };
+}
+
+/** Canonical SHA-256 of create payload (excluding pure display fields). */
+export async function hashTaskRequest(input: CreateTaskInput): Promise<string> {
+  const canonical = {
+    backendId: input.backendId,
+    type: input.type,
+    name: input.name ?? null,
+    cwd: input.cwd,
+    timeoutSeconds: input.timeoutSeconds,
+    profile: input.profile,
+    environment: input.environment ?? null,
+    labels: input.labels ?? null,
+    output: input.output ?? null,
+    verify: input.verify ?? null,
+    retry: input.retry ?? null,
+    shell: input.type === 'shell' ? input.shell : null,
+    agent: input.type === 'agent' ? input.agent : null,
+  };
+  const hex = await sha256Hex(stableStringify(canonical));
+  return `sha256:${hex}`;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const data = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
 }
 
 function extractStatus(value: unknown): TaskStatus | undefined {
@@ -340,7 +454,7 @@ function extractStatus(value: unknown): TaskStatus | undefined {
     'timed_out',
     'dispatch_failed',
   ];
-  return typeof status === 'string' && valid.includes(status as TaskStatus)
+  return typeof status === 'string' && (valid as string[]).includes(status)
     ? (status as TaskStatus)
     : undefined;
 }
@@ -348,28 +462,56 @@ function extractStatus(value: unknown): TaskStatus | undefined {
 function streamPreview(
   command: Record<string, unknown> | undefined,
   stream: 'stdout' | 'stderr',
-  previewMaxBytes: number,
+  maxBytes: number,
+  taskId: string,
 ) {
-  const preview = typeof command?.[stream] === 'string' ? (command[stream] as string) : '';
-  const bytesKey = `${stream}_bytes`;
-  const truncatedKey = `${stream}_truncated`;
-  const completeKey = `${stream}_complete`;
-  const totalBytes =
-    typeof command?.[bytesKey] === 'number'
-      ? (command[bytesKey] as number)
-      : new TextEncoder().encode(preview).byteLength;
-  const truncated =
-    typeof command?.[truncatedKey] === 'boolean'
-      ? (command[truncatedKey] as boolean)
-      : totalBytes > previewMaxBytes;
-  const complete =
-    typeof command?.[completeKey] === 'boolean' ? (command[completeKey] as boolean) : true;
+  if (!command) {
+    return {
+      available: false,
+      bytes: 0,
+      complete: false,
+      truncated: false,
+      preview: '',
+      resource_uri: `vacps://tasks/${taskId}/output/${stream}`,
+    };
+  }
+  const previewKey = stream === 'stdout' ? 'stdoutPreview' : 'stderrPreview';
+  const bytesKey = stream === 'stdout' ? 'stdoutBytes' : 'stderrBytes';
+  const text =
+    typeof command[stream] === 'string'
+      ? (command[stream] as string)
+      : typeof command[previewKey] === 'string'
+        ? (command[previewKey] as string)
+        : '';
+  const bytes =
+    typeof command[bytesKey] === 'number' ? (command[bytesKey] as number) : utf8ByteLength(text);
+  const truncated = utf8ByteLength(text) > maxBytes || bytes > maxBytes;
+  const preview =
+    utf8ByteLength(text) > maxBytes
+      ? new TextDecoder().decode(new TextEncoder().encode(text).slice(0, maxBytes))
+      : text;
   return {
-    available: Boolean(command),
-    bytes: totalBytes,
-    complete,
+    available: Boolean(text) || bytes > 0,
+    bytes,
+    complete: command.status === 'succeeded' || command.status === 'failed',
     truncated,
-    preview: preview.slice(0, previewMaxBytes),
-    next_offset: truncated ? previewMaxBytes : null,
+    preview,
+    resource_uri: `vacps://tasks/${taskId}/output/${stream}`,
+  };
+}
+
+function normalizeCommandEntry(cmd: Record<string, unknown>, taskId: string) {
+  return {
+    id: cmd.id ?? null,
+    sequence: cmd.sequence ?? cmd.sequenceNumber ?? null,
+    command: cmd.command ?? cmd.program ?? null,
+    working_directory: cmd.cwd ?? cmd.workingDirectory ?? cmd.working_directory ?? null,
+    status: cmd.status ?? null,
+    exit_code: cmd.exitCode ?? cmd.exit_code ?? null,
+    started_at: cmd.startedAt ?? cmd.started_at ?? null,
+    finished_at: cmd.finishedAt ?? cmd.finished_at ?? null,
+    stdout_resource_uri: `vacps://tasks/${taskId}/output/stdout`,
+    stderr_resource_uri: `vacps://tasks/${taskId}/output/stderr`,
+    // Do not embed stdout/stderr body or local log paths.
   };
 }

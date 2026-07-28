@@ -65,6 +65,39 @@ describe('files runtime', () => {
     expect(names.some((name) => name.endsWith('deep.txt'))).toBe(true);
   });
 
+  it('pages glob results with next_cursor when truncated', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'vacps-files-'));
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) {
+      await writeFile(join(dir, name), 'x\n');
+    }
+    const first = await filesGlob({
+      pattern: '**/*',
+      path: dir,
+      limit: 1,
+      respectGitignore: false,
+    });
+    expect(first.returned_count).toBe(1);
+    expect(first.truncated).toBe(true);
+    expect(first.next_cursor).toBeTruthy();
+    const second = await filesGlob({
+      pattern: '**/*',
+      path: dir,
+      limit: 10,
+      cursor: first.next_cursor!,
+      respectGitignore: false,
+    });
+    expect(second.returned_count).toBeGreaterThanOrEqual(1);
+    expect(second.matches[0]).not.toEqual(first.matches[0]);
+  });
+
+  it('lists entries without matches alias', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'vacps-files-'));
+    await writeFile(join(dir, 'only.txt'), 'x\n');
+    const result = await filesList({ path: dir, limit: 10 });
+    expect(result.entries.length).toBe(1);
+    expect((result as { matches?: unknown }).matches).toBeUndefined();
+  });
+
   it('edits unique text and rejects non-unique without replace_all', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'vacps-files-'));
     const path = join(dir, 'b.txt');
@@ -119,8 +152,8 @@ describe('files runtime', () => {
     const second = await filesList({ path: dir, limit: 2, cursor: first.next_cursor! });
     expect(second.returned_count).toBeGreaterThanOrEqual(1);
     const allNames = [
-      ...first.matches.map((m) => String((m as { name: string }).name)),
-      ...second.matches.map((m) => String((m as { name: string }).name)),
+      ...first.entries.map((m) => String((m as { name: string }).name)),
+      ...second.entries.map((m) => String((m as { name: string }).name)),
     ];
     expect(new Set(allNames).size).toBe(allNames.length);
   });

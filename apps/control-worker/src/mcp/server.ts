@@ -581,7 +581,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.process.start',
     toolConfig('vacps.process.start', {
       description:
-        'Start a long-running or interactive process. Prefer mode=exec|shell (or legacy XOR program/command). Returns a full Process Snapshot like command.exec. stdout/stderr_hard_max_bytes are 0..1073741824.',
+        'Start a long-running or interactive process. mode is required: exec (program+arguments) or shell (command). Returns a full Process Snapshot. stdout/stderr_hard_max_bytes are 0..1073741824.',
       inputSchema: processStartInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
@@ -922,10 +922,18 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
-  // Schema v2 list patches: process.start oneOf + fill annotations for legacy registrations.
+  // Schema v2 list patches: process.start oneOf + annotations + schema version meta.
   applySchemaV2ListPatches(server);
 
   return server;
+}
+
+/** Stable hash of advertised tool schemas for Host cache invalidation. */
+export async function computeToolSchemaHash(): Promise<string> {
+  const { publicToolJsonSchemas } = await import('./tool-schemas.js');
+  const payload = JSON.stringify(publicToolJsonSchemas());
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+  return `sha256:${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
 /**
@@ -961,7 +969,9 @@ function applySchemaV2ListPatches(server: McpServer): void {
         name?: string;
         inputSchema?: Record<string, unknown>;
         annotations?: unknown;
+        _meta?: Record<string, unknown>;
       }>;
+      _meta?: Record<string, unknown>;
     };
     for (const tool of result.tools ?? []) {
       if (tool.name === 'vacps.process.start') {
@@ -969,10 +979,40 @@ function applySchemaV2ListPatches(server: McpServer): void {
       }
       if (tool.name) {
         tool.annotations = annotationsFor(tool.name);
+        tool._meta = {
+          ...(tool._meta ?? {}),
+          tool_schema_version: '2.0',
+          tool_schema_revision: TOOL_SCHEMA_REVISION,
+        };
       }
+      // Strip nested $schema from Zod-generated property schemas for dialect consistency.
+      if (tool.inputSchema) stripNestedSchemaKeywords(tool.inputSchema);
     }
+    result._meta = {
+      ...(result._meta ?? {}),
+      tool_schema_version: '2.0',
+      tool_schema_revision: TOOL_SCHEMA_REVISION,
+      mcp_server_version: MCP_PROTOCOL_VERSION,
+    };
     return result;
   });
+}
+
+function stripNestedSchemaKeywords(schema: Record<string, unknown>, depth = 0): void {
+  if (depth > 12 || !schema || typeof schema !== 'object') return;
+  if (depth > 0 && '$schema' in schema) delete schema.$schema;
+  for (const value of Object.values(schema)) {
+    if (value && typeof value === 'object') {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (item && typeof item === 'object')
+            stripNestedSchemaKeywords(item as Record<string, unknown>, depth + 1);
+        }
+      } else {
+        stripNestedSchemaKeywords(value as Record<string, unknown>, depth + 1);
+      }
+    }
+  }
 }
 
 function pageBackends(
@@ -1111,10 +1151,12 @@ function snakeTask(task: {
   type: string;
   source?: string | undefined;
   profile?: string | undefined;
+  name?: string | undefined;
   summary?: string | undefined;
   status: string;
   scheduleId?: string | undefined;
   idempotencyKey?: string | undefined;
+  requestHash?: string | undefined;
   retryOfTaskId?: string | undefined;
   createdAt: string;
   updatedAt: string;
@@ -1125,12 +1167,15 @@ function snakeTask(task: {
     id: task.id,
     backend_id: task.backendId,
     type: task.type,
+    kind: task.type,
     ...(task.source ? { source: task.source } : {}),
     ...(task.profile ? { profile: task.profile } : {}),
+    ...(task.name ? { name: task.name } : {}),
     ...(task.summary ? { summary: task.summary } : {}),
     status: task.status,
     ...(task.scheduleId ? { schedule_id: task.scheduleId } : {}),
     ...(task.idempotencyKey ? { idempotency_key: task.idempotencyKey } : {}),
+    ...(task.requestHash ? { request_hash: task.requestHash } : {}),
     ...(task.retryOfTaskId ? { retry_of_task_id: task.retryOfTaskId } : {}),
     created_at: task.createdAt,
     updated_at: task.updatedAt,
@@ -1197,8 +1242,19 @@ function snakeSchedule(schedule: {
   };
 }
 
-function snakeStatus(status: unknown) {
-  return status;
+/** Recursively convert object keys to snake_case for Schema v2 status payloads. */
+function snakeStatus(status: unknown): unknown {
+  if (Array.isArray(status)) return status.map((item) => snakeStatus(item));
+  if (!status || typeof status !== 'object') return status;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(status as Record<string, unknown>)) {
+    const snake = key
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+      .toLowerCase();
+    out[snake] = snakeStatus(value);
+  }
+  return out;
 }
 
 function encodeOffsetCursor(offset: number): string {

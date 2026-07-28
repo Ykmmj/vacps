@@ -31,8 +31,8 @@ import {
  * Canonical tool input schemas (MCP Schema v2).
  * Used for MCP registerTool (tools/list) and runtime parse.
  */
-export const MCP_PROTOCOL_VERSION = '0.4.2';
-export const TOOL_SCHEMA_REVISION = '2026-07-28-schema-v2-p1-finish';
+export const MCP_PROTOCOL_VERSION = '0.4.3';
+export const TOOL_SCHEMA_REVISION = '2026-07-28-schema-v2-blockers';
 
 // ── Backends ──────────────────────────────────────────────────────────
 
@@ -104,25 +104,27 @@ const processStartShared = {
 
 /**
  * Runtime + CallTool validation.
- * Prefer mode=exec|shell; legacy XOR program/command still accepted.
+ * mode is required: exec | shell only (legacy XOR without mode removed).
  */
 export const processStartInputSchema = z
   .object({
     ...processStartShared,
-    mode: z.enum(['exec', 'shell']).optional(),
+    mode: z.enum(['exec', 'shell']),
     program: programSchema.optional(),
     arguments: argumentsSchema.optional(),
     command: commandSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
-    const hasProgram = value.program !== undefined;
-    const hasCommand = value.command !== undefined;
     if (value.mode === 'exec') {
-      if (!hasProgram) {
-        context.addIssue({ code: 'custom', message: 'mode=exec requires program.', path: ['program'] });
+      if (!value.program) {
+        context.addIssue({
+          code: 'custom',
+          message: 'mode=exec requires program.',
+          path: ['program'],
+        });
       }
-      if (hasCommand) {
+      if (value.command !== undefined) {
         context.addIssue({
           code: 'custom',
           message: 'mode=exec forbids command.',
@@ -131,61 +133,68 @@ export const processStartInputSchema = z
       }
       return;
     }
-    if (value.mode === 'shell') {
-      if (!hasCommand) {
-        context.addIssue({
-          code: 'custom',
-          message: 'mode=shell requires command.',
-          path: ['command'],
-        });
-      }
-      if (hasProgram) {
-        context.addIssue({
-          code: 'custom',
-          message: 'mode=shell forbids program.',
-          path: ['program'],
-        });
-      }
-      if (value.shell === '/bin/sh' && value.load_user_environment === true) {
-        context.addIssue({
-          code: 'custom',
-          message: 'load_user_environment=true is not supported with shell=/bin/sh.',
-          path: ['load_user_environment'],
-        });
-      }
-      return;
-    }
-    if (hasProgram === hasCommand) {
+    // mode === 'shell'
+    if (!value.command) {
       context.addIssue({
         code: 'custom',
-        message: 'Provide exactly one of program or command, or set mode=exec|shell.',
+        message: 'mode=shell requires command.',
+        path: ['command'],
+      });
+    }
+    if (value.program !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        message: 'mode=shell forbids program.',
+        path: ['program'],
+      });
+    }
+    if (value.arguments !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        message: 'mode=shell forbids arguments.',
+        path: ['arguments'],
+      });
+    }
+    if (value.shell === '/bin/sh' && value.load_user_environment === true) {
+      context.addIssue({
+        code: 'custom',
+        message: 'load_user_environment=true is not supported with shell=/bin/sh.',
+        path: ['load_user_environment'],
       });
     }
   });
 
 /**
- * Advertised JSON Schema for tools/list — mode discriminant + legacy XOR.
- * MCP SDK only auto-converts plain object Zod schemas (superRefine is invisible).
+ * Advertised JSON Schema for tools/list — mode=exec|shell only (no legacy branches).
+ * MCP SDK cannot emit this oneOf from Zod superRefine; tools/list is patched.
  */
 export const processStartListJsonSchema: Record<string, unknown> = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
   type: 'object',
   properties: {
-    backend_id: z.toJSONSchema(backendIdSchema),
+    backend_id: { type: 'string', minLength: 1, maxLength: 128 },
     mode: { type: 'string', enum: ['exec', 'shell'] },
-    program: z.toJSONSchema(programSchema),
-    arguments: z.toJSONSchema(argumentsSchema),
-    command: z.toJSONSchema(commandSchema),
+    program: { type: 'string', minLength: 1, maxLength: 4096 },
+    arguments: {
+      type: 'array',
+      maxItems: 1000,
+      items: { type: 'string', maxLength: 100_000 },
+    },
+    command: { type: 'string', minLength: 1, maxLength: 262_144 },
     shell: { type: 'string', enum: ['/bin/bash', '/bin/sh'] },
     load_user_environment: { type: 'boolean' },
-    working_directory: z.toJSONSchema(workingDirectorySchema),
-    environment: z.toJSONSchema(environmentSchema),
+    working_directory: { type: 'string', minLength: 1, maxLength: 4096 },
+    environment: {
+      type: 'object',
+      additionalProperties: { type: 'string', maxLength: 65_536 },
+    },
     tty: { type: 'boolean' },
-    timeout_ms: z.toJSONSchema(timeoutMsSchema),
-    stdout_hard_max_bytes: z.toJSONSchema(hardMaxBytesSchema),
-    stderr_hard_max_bytes: z.toJSONSchema(hardMaxBytesSchema),
-    idempotency_key: z.toJSONSchema(idempotencyKeySchema),
+    timeout_ms: { type: 'integer', minimum: 1, maximum: 3_600_000 },
+    stdout_hard_max_bytes: { type: 'integer', minimum: 0, maximum: 1_073_741_824 },
+    stderr_hard_max_bytes: { type: 'integer', minimum: 0, maximum: 1_073_741_824 },
+    idempotency_key: { type: 'string', minLength: 1, maxLength: 128 },
   },
-  required: ['backend_id'],
+  required: ['backend_id', 'mode'],
   oneOf: [
     {
       properties: { mode: { const: 'exec' } },
@@ -195,15 +204,7 @@ export const processStartListJsonSchema: Record<string, unknown> = {
     {
       properties: { mode: { const: 'shell' } },
       required: ['mode', 'command'],
-      not: { required: ['program'] },
-    },
-    {
-      required: ['program'],
-      not: { required: ['command', 'mode'] },
-    },
-    {
-      required: ['command'],
-      not: { required: ['program', 'mode'] },
+      not: { anyOf: [{ required: ['program'] }, { required: ['arguments'] }] },
     },
   ],
   additionalProperties: false,
@@ -379,8 +380,10 @@ export const gitApplyInputSchema = z.strictObject({
 export function publicToolJsonSchemas(): Record<string, unknown> {
   return {
     tool_schema_revision: TOOL_SCHEMA_REVISION,
+    tool_schema_version: '2.0',
     mcp_server_version: MCP_PROTOCOL_VERSION,
     schema_version: '2.0',
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
     $defs: publicDefsJson(),
     tools: {
       'vacps.backends.list': z.toJSONSchema(backendsListInputSchema),
