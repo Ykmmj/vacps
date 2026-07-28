@@ -24,12 +24,12 @@ describe('TaskStore', () => {
     const taskId = randomUUID();
     const store = new TaskStore(join(directory, 'agent.db'));
     store.createTask({
-      taskId,
-      backendId: 'vps-la-01',
-      type: 'shell',
+      task_id: taskId,
+      backend_id: 'vps-la-01',
+      kind: 'shell',
       command: 'uname -a',
-      cwd: '/tmp',
-      timeoutSeconds: 30,
+      working_directory: '/tmp',
+      timeout_seconds: 30,
       profile: 'full',
       source: 'api',
     });

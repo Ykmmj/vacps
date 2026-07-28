@@ -15,8 +15,9 @@ export const taskStatuses = [
   'dispatch_failed',
 ] as const;
 export const taskStatusSchema = z.enum(taskStatuses);
-export const taskTypeSchema = z.enum(['shell', 'agent']);
-export const profileSchema = z.string().trim().min(1).max(64).default('full');
+
+/** Public + internal task kind (Schema v3). Replaces legacy type=shell|agent + shell.mode. */
+export const taskKindSchema = z.enum(['command', 'shell', 'agent']);
 export const taskSourceSchema = z.enum(['mcp', 'web', 'schedule', 'api']);
 
 export const verifySchema = z.discriminatedUnion('mode', [
@@ -27,93 +28,107 @@ export const verifySchema = z.discriminatedUnion('mode', [
 
 export const retrySchema = z.object({
   attempts: z.number().int().min(1).max(10),
-  backoffSeconds: z.number().int().min(0).max(86_400),
-});
-
-export const shellSpecSchema = z.discriminatedUnion('mode', [
-  z.object({
-    mode: z.literal('exec'),
-    program: z.string().trim().min(1).max(4096),
-    arguments: z.array(z.string().max(65_536)).max(1000).default([]),
-  }),
-  z.object({
-    mode: z.literal('script'),
-    interpreter: z.string().trim().min(1).max(4096),
-    interpreterArguments: z.array(z.string().max(4096)).max(20).default(['-c']),
-    content: z.string().min(1).max(1_048_576),
-  }),
-]);
-
-export const agentSpecSchema = z.object({
-  prompt: z.string().trim().min(1).max(1_048_576),
-  profile: z.enum(['restricted', 'diagnostic', 'standard', 'privileged']).default('standard'),
-  maxSteps: z.number().int().min(1).max(1000).default(20),
-  permissions: z
-    .object({
-      shell: z.boolean().default(false),
-      network: z.boolean().default(false),
-      fileWrite: z.boolean().default(false),
-    })
-    .default({ shell: false, network: false, fileWrite: false }),
+  backoff_seconds: z.number().int().min(0).max(86_400),
 });
 
 export const taskOutputOptionsSchema = z
   .object({
-    captureStdout: z.boolean().default(true),
-    captureStderr: z.boolean().default(true),
-    // Schema v2 bounds (no JS safe-integer extremes).
-    previewMaxBytes: z.number().int().min(0).max(1_048_576).default(8192),
-    retentionSeconds: z.number().int().min(60).max(2_592_000).default(86_400),
-    hardMaxBytes: z.number().int().min(0).max(1_073_741_824).default(10_485_760),
+    capture_stdout: z.boolean().default(true),
+    capture_stderr: z.boolean().default(true),
+    preview_max_bytes: z.number().int().min(0).max(1_048_576).default(8192),
+    retention_seconds: z.number().int().min(60).max(2_592_000).default(86_400),
+    hard_max_bytes: z.number().int().min(0).max(1_073_741_824).default(10_485_760),
   })
   .default({
-    captureStdout: true,
-    captureStderr: true,
-    previewMaxBytes: 8192,
-    retentionSeconds: 86_400,
-    hardMaxBytes: 10_485_760,
+    capture_stdout: true,
+    capture_stderr: true,
+    preview_max_bytes: 8192,
+    retention_seconds: 86_400,
+    hard_max_bytes: 10_485_760,
   });
 
-const taskBaseSchema = z.object({
-  backendId: backendIdSchema,
+export const agentPermissionsSchema = z
+  .object({
+    shell: z.boolean().default(false),
+    network: z.boolean().default(false),
+    file_write: z.boolean().default(false),
+  })
+  .default({ shell: false, network: false, file_write: false });
+
+const taskSharedSchema = z.object({
+  backend_id: backendIdSchema,
   name: z.string().trim().min(1).max(200).optional(),
-  cwd: z.string().startsWith('/').max(4096).default('/tmp'),
-  timeoutSeconds: z.number().int().min(1).max(86_400),
-  profile: profileSchema,
+  working_directory: z.string().startsWith('/').max(4096).default('/tmp'),
+  timeout_seconds: z.number().int().min(1).max(86_400),
+  /** Policy profile for non-agent tasks; agent uses its own profile field. */
+  profile: z.string().trim().min(1).max(64).default('full'),
   verify: verifySchema.optional(),
   retry: retrySchema.optional(),
   labels: z.record(z.string(), z.string().max(500)).optional(),
   environment: z.record(z.string(), z.string().max(32_768)).optional(),
-  idempotencyKey: z.string().trim().min(1).max(200).optional(),
+  idempotency_key: z.string().trim().min(1).max(200).optional(),
   output: taskOutputOptionsSchema,
 });
 
-export const createTaskSchema = z.discriminatedUnion('type', [
-  taskBaseSchema.extend({
-    type: z.literal('shell'),
-    shell: shellSpecSchema,
+const commandTaskSchema = taskSharedSchema.extend({
+  kind: z.literal('command'),
+  program: z.string().trim().min(1).max(4096),
+  arguments: z.array(z.string().max(65_536)).max(1000).default([]),
+});
+
+const shellTaskSchema = taskSharedSchema.extend({
+  kind: z.literal('shell'),
+  command: z.string().min(1).max(1_048_576),
+  shell: z.enum(['/bin/bash', '/bin/sh']).default('/bin/bash'),
+  load_user_environment: z.boolean().default(true),
+});
+
+const agentTaskSchema = taskSharedSchema.extend({
+  kind: z.literal('agent'),
+  prompt: z.string().trim().min(1).max(1_048_576),
+  profile: z.enum(['restricted', 'diagnostic', 'standard', 'privileged']).default('standard'),
+  max_steps: z.number().int().min(1).max(1000).default(20),
+  permissions: agentPermissionsSchema,
+});
+
+/** Schema v3 create-task wire shape (snake_case, kind-discriminated). */
+export const createTaskSchema = z.discriminatedUnion('kind', [
+  commandTaskSchema,
+  shellTaskSchema,
+  agentTaskSchema,
+]);
+
+/**
+ * Schedule embedded task — same as createTask but backend_id is optional
+ * (inherited from the schedule when omitted).
+ */
+export const scheduleTaskSchema = z.discriminatedUnion('kind', [
+  commandTaskSchema.omit({ backend_id: true }).extend({
+    backend_id: backendIdSchema.optional(),
   }),
-  taskBaseSchema.extend({
-    type: z.literal('agent'),
-    agent: agentSpecSchema,
+  shellTaskSchema.omit({ backend_id: true }).extend({
+    backend_id: backendIdSchema.optional(),
+  }),
+  agentTaskSchema.omit({ backend_id: true }).extend({
+    backend_id: backendIdSchema.optional(),
   }),
 ]);
 
 export const taskDispatchSchema = createTaskSchema.and(
   z.object({
-    taskId: z.uuid(),
+    task_id: z.uuid(),
     source: taskSourceSchema,
-    scheduleId: z.uuid().optional(),
+    schedule_id: z.uuid().optional(),
   }),
 );
 
 export const taskSchema = taskDispatchSchema.and(
   z.object({
     status: taskStatusSchema,
-    createdAt: z.iso.datetime(),
-    updatedAt: z.iso.datetime(),
-    startedAt: z.iso.datetime().optional(),
-    finishedAt: z.iso.datetime().optional(),
+    created_at: z.iso.datetime(),
+    updated_at: z.iso.datetime(),
+    started_at: z.iso.datetime().optional(),
+    finished_at: z.iso.datetime().optional(),
   }),
 );
 
@@ -136,30 +151,65 @@ export interface TaskError {
 }
 
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
-export type TaskType = z.infer<typeof taskTypeSchema>;
+export type TaskKind = z.infer<typeof taskKindSchema>;
+/** @deprecated Use TaskKind — kept as alias during migration of type column. */
+export type TaskType = TaskKind;
 export type TaskSource = z.infer<typeof taskSourceSchema>;
 export type VerifyConfig = z.infer<typeof verifySchema>;
-export type ShellSpec = z.infer<typeof shellSpecSchema>;
-export type AgentSpec = z.infer<typeof agentSpecSchema>;
 export type TaskOutputOptions = z.infer<typeof taskOutputOptionsSchema>;
 export type CreateTaskInput = z.infer<typeof createTaskSchema>;
+export type ScheduleTaskInput = z.infer<typeof scheduleTaskSchema>;
 export type TaskDispatch = z.infer<typeof taskDispatchSchema>;
 export type Task = z.infer<typeof taskSchema>;
 
-/** Build a bash -lc command string from a structured shell spec. */
-export function shellToCommand(shell: ShellSpec): string {
-  if (shell.mode === 'exec') {
-    return [shell.program, ...shell.arguments].map(shellQuote).join(' ');
-  }
-  const args = shell.interpreterArguments.map(shellQuote).join(' ');
-  return `${shellQuote(shell.interpreter)} ${args} ${shellQuote(shell.content)}`.trim();
+/** Resolve working directory for any task kind. */
+export function taskWorkingDirectory(task: { working_directory?: string }): string {
+  return task.working_directory ?? '/tmp';
 }
 
-export function taskSummary(input: CreateTaskInput): string {
-  if (input.type === 'shell') {
-    return shellToCommand(input.shell).replace(/\s+/g, ' ').slice(0, 240);
+/** Human-readable summary for indexes / UI. */
+export function taskSummary(input: CreateTaskInput | ScheduleTaskInput): string {
+  if (input.kind === 'command') {
+    return [input.program, ...(input.arguments ?? [])]
+      .map(shellQuote)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .slice(0, 240);
   }
-  return input.agent.prompt.replace(/\s+/g, ' ').slice(0, 240);
+  if (input.kind === 'shell') {
+    return input.command.replace(/\s+/g, ' ').slice(0, 240);
+  }
+  return input.prompt.replace(/\s+/g, ' ').slice(0, 240);
+}
+
+/** Build a display / policy command string for authorize checks. */
+export function taskToCommand(input: CreateTaskInput | ScheduleTaskInput): string {
+  if (input.kind === 'command') {
+    return [input.program, ...(input.arguments ?? [])].map(shellQuote).join(' ');
+  }
+  if (input.kind === 'shell') {
+    return input.command;
+  }
+  return '(Pi agent task)';
+}
+
+/** @deprecated Use taskToCommand. */
+export function shellToCommand(input: CreateTaskInput | ScheduleTaskInput | { mode?: string }): string {
+  if (input && typeof input === 'object' && 'kind' in input) {
+    return taskToCommand(input as CreateTaskInput);
+  }
+  return '';
+}
+
+/** Attach backend_id to a schedule task template for dispatch. */
+export function withBackendId(
+  task: ScheduleTaskInput | CreateTaskInput,
+  backendId: string,
+): CreateTaskInput {
+  return createTaskSchema.parse({
+    ...task,
+    backend_id: backendId,
+  });
 }
 
 function shellQuote(value: string): string {

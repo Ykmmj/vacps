@@ -260,11 +260,11 @@ export class BackendClient {
   async runSchedule(
     backend: Pick<Backend, 'baseUrl'>,
     id: string,
-    taskTemplate: unknown,
+    task: unknown,
   ): Promise<unknown> {
     return this.request(backend, `/schedulers/${encodeURIComponent(id)}/run`, {
       method: 'POST',
-      body: JSON.stringify({ taskTemplate }),
+      body: JSON.stringify({ task }),
     });
   }
 

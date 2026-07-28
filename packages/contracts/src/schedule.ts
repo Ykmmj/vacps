@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { backendIdSchema } from './backend.js';
-import { createTaskSchema } from './task.js';
+import { createTaskSchema, scheduleTaskSchema, withBackendId } from './task.js';
 
 export const scheduleConcurrencyPolicies = ['allow', 'forbid', 'replace', 'queue'] as const;
 export const scheduleMisfirePolicies = ['skip', 'run_once', 'catch_up'] as const;
@@ -9,62 +9,83 @@ export const scheduleMisfirePolicies = ['skip', 'run_once', 'catch_up'] as const
 export const schedulePolicySchema = z.object({
   concurrency: z.enum(scheduleConcurrencyPolicies).default('forbid'),
   misfire: z.enum(scheduleMisfirePolicies).default('run_once'),
-  maxCatchupRuns: z.number().int().min(0).max(100).default(1),
+  max_catchup_runs: z.number().int().min(0).max(100).default(1),
 });
 
+export const scheduleTriggerSchema = z.object({
+  type: z.literal('cron'),
+  expression: z.string().trim().min(1).max(120),
+  timezone: z.string().trim().min(1).max(120).default('UTC'),
+});
+
+/** Schema v3 schedule wire shape (snake_case, trigger/policy/task). */
 export const scheduleSchema = z.object({
   id: z.uuid(),
-  backendId: backendIdSchema,
+  backend_id: backendIdSchema,
   name: z.string().trim().min(1).max(120),
-  cron: z.string().trim().min(1).max(120),
-  timezone: z.string().trim().min(1).max(120).default('UTC'),
-  enabled: z.boolean().default(true),
-  /** Optimistic concurrency token; increments on every update. */
-  revision: z.number().int().min(1).default(1),
+  trigger: scheduleTriggerSchema,
   policy: schedulePolicySchema.default({
     concurrency: 'forbid',
     misfire: 'run_once',
-    maxCatchupRuns: 1,
+    max_catchup_runs: 1,
   }),
-  taskTemplate: createTaskSchema,
-  idempotencyKey: z.string().trim().min(1).max(200).optional(),
-  lastRunAt: z.iso.datetime().optional(),
-  nextRunAt: z.iso.datetime().optional(),
-  createdAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime(),
+  enabled: z.boolean().default(true),
+  /** Optimistic concurrency token; increments on every update. */
+  revision: z.number().int().min(1).default(1),
+  /** Task template; backend_id is forced to schedule.backend_id on write. */
+  task: scheduleTaskSchema,
+  idempotency_key: z.string().trim().min(1).max(200).optional(),
+  last_run_at: z.iso.datetime().optional(),
+  next_run_at: z.iso.datetime().optional(),
+  created_at: z.iso.datetime(),
+  updated_at: z.iso.datetime(),
 });
 
-export const createScheduleSchema = scheduleSchema.omit({
-  id: true,
-  lastRunAt: true,
-  nextRunAt: true,
-  createdAt: true,
-  updatedAt: true,
-  revision: true,
+const createScheduleBaseSchema = z.object({
+  backend_id: backendIdSchema,
+  name: z.string().trim().min(1).max(120),
+  trigger: scheduleTriggerSchema,
+  policy: schedulePolicySchema.default({
+    concurrency: 'forbid',
+    misfire: 'run_once',
+    max_catchup_runs: 1,
+  }),
+  enabled: z.boolean().default(true),
+  task: scheduleTaskSchema,
+  idempotency_key: z.string().trim().min(1).max(200).optional(),
 });
 
-/** Partial update of schedule fields (backendId is immutable). */
-export const updateScheduleSchema = createScheduleSchema.omit({ backendId: true }).partial();
+export const createScheduleSchema = createScheduleBaseSchema.superRefine((value, ctx) => {
+  if (value.task.backend_id && value.task.backend_id !== value.backend_id) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'task.backend_id must match schedule backend_id or be omitted.',
+      path: ['task', 'backend_id'],
+    });
+  }
+});
+
+/** Partial update of schedule fields (backend_id is immutable). */
+export const updateScheduleSchema = createScheduleBaseSchema.omit({ backend_id: true }).partial();
 
 /**
- * Schema v2 patch update: only `changes` fields are applied.
- * expectedRevision enforces optimistic concurrency when provided.
+ * Schema v3 patch: only `changes` fields are applied.
+ * expected_revision enforces optimistic concurrency when provided.
  */
 export const patchScheduleSchema = z.object({
-  expectedRevision: z.number().int().min(1).optional(),
+  expected_revision: z.number().int().min(1).optional(),
   changes: z
     .object({
       name: z.string().trim().min(1).max(120).optional(),
       enabled: z.boolean().optional(),
-      cron: z.string().trim().min(1).max(120).optional(),
-      timezone: z.string().trim().min(1).max(120).optional(),
+      trigger: scheduleTriggerSchema.partial().optional(),
       policy: schedulePolicySchema.partial().optional(),
-      taskTemplate: createTaskSchema.optional(),
+      task: scheduleTaskSchema.optional(),
     })
     .refine((value) => Object.keys(value).length > 0, {
       message: 'changes must include at least one field',
     }),
-  idempotencyKey: z.string().trim().min(1).max(200).optional(),
+  idempotency_key: z.string().trim().min(1).max(200).optional(),
 });
 
 export type Schedule = z.infer<typeof scheduleSchema>;
@@ -72,3 +93,15 @@ export type CreateScheduleInput = z.infer<typeof createScheduleSchema>;
 export type UpdateScheduleInput = z.infer<typeof updateScheduleSchema>;
 export type PatchScheduleInput = z.infer<typeof patchScheduleSchema>;
 export type SchedulePolicy = z.infer<typeof schedulePolicySchema>;
+export type ScheduleTrigger = z.infer<typeof scheduleTriggerSchema>;
+
+/** Normalize schedule task with inherited backend_id for storage/dispatch. */
+export function scheduleTaskForBackend(
+  backendId: string,
+  task: z.infer<typeof scheduleTaskSchema>,
+): z.infer<typeof createTaskSchema> {
+  return withBackendId(task, backendId);
+}
+
+// Re-export for callers that previously imported createTaskSchema via schedule.
+export { createTaskSchema, scheduleTaskSchema };

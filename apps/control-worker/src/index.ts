@@ -467,27 +467,10 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       if (id && !action && request.method === 'GET') return json(await services.schedules.get(id));
       if (id && !action && request.method === 'PATCH') {
         const body = (await readJson(request)) as Record<string, unknown>;
-        // Schema v2 patch shape: { expected_revision?, changes }
+        // Schema v3 patch: { expected_revision?, changes: { name, enabled, trigger, policy, task } }
         if (body && typeof body === 'object' && body.changes && typeof body.changes === 'object') {
-          const changes = body.changes as Record<string, unknown>;
-          return json(
-            await services.schedules.patch(id, {
-              ...(typeof body.expected_revision === 'number'
-                ? { expectedRevision: body.expected_revision }
-                : {}),
-              changes: {
-                ...(typeof changes.name === 'string' ? { name: changes.name } : {}),
-                ...(typeof changes.enabled === 'boolean' ? { enabled: changes.enabled } : {}),
-                ...(typeof changes.cron === 'string' ? { cron: changes.cron } : {}),
-                ...(typeof changes.timezone === 'string' ? { timezone: changes.timezone } : {}),
-                ...(changes.task_template
-                  ? {
-                      taskTemplate: createTaskSchema.parse(changes.task_template),
-                    }
-                  : {}),
-              },
-            }),
-          );
+          const { patchScheduleSchema } = await import('@vacps/contracts');
+          return json(await services.schedules.patch(id, patchScheduleSchema.parse(body)));
         }
         return json(
           await services.schedules.update(id, updateScheduleSchema.parse(body)),

@@ -3,7 +3,8 @@ import { join } from 'node:path';
 
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import {
-  shellToCommand,
+  taskToCommand,
+  taskWorkingDirectory,
   type TaskDispatch,
   type TaskError,
   type TaskStatus,
@@ -47,7 +48,7 @@ export class TaskGraphRunner {
 
   async run(task: TaskDispatch): Promise<TaskRunResult> {
     const controller = new AbortController();
-    this.abortControllers.set(task.taskId, controller);
+    this.abortControllers.set(task.task_id, controller);
     this.store.createTask(task, 'queued');
     try {
       const output = await this.buildGraph(controller.signal).invoke(
@@ -57,25 +58,25 @@ export class TaskGraphRunner {
           graphNode: 'queued',
           commandCount: 0,
         },
-        { configurable: { thread_id: task.taskId } },
+        { configurable: { thread_id: task.task_id } },
       );
       return {
-        taskId: task.taskId,
+        taskId: task.task_id,
         status: output.status,
         ...(output.result !== undefined ? { result: output.result } : {}),
         ...(output.error !== undefined ? { error: output.error } : {}),
       };
     } catch (cause: unknown) {
       const error = toTaskError(cause);
-      this.store.updateTask(task.taskId, {
+      this.store.updateTask(task.task_id, {
         status: 'failed',
         graphNode: 'finalize',
         error,
         finishedAt: new Date().toISOString(),
       });
-      return { taskId: task.taskId, status: 'failed', error };
+      return { taskId: task.task_id, status: 'failed', error };
     } finally {
-      this.abortControllers.delete(task.taskId);
+      this.abortControllers.delete(task.task_id);
     }
   }
 
@@ -110,26 +111,26 @@ export class TaskGraphRunner {
 
   private async prepare(state: TaskGraphState): Promise<Partial<TaskGraphState>> {
     const startedAt = new Date().toISOString();
-    this.store.updateTask(state.task.taskId, {
+    this.store.updateTask(state.task.task_id, {
       status: 'running',
       graphNode: 'prepare',
       startedAt,
     });
-    this.store.saveCheckpoint(state.task.taskId, 'prepare', state);
+    this.store.saveCheckpoint(state.task.task_id, 'prepare', state);
     return { status: 'running', graphNode: 'prepare' };
   }
 
   private async authorize(state: TaskGraphState): Promise<Partial<TaskGraphState>> {
-    const command =
-      state.task.type === 'shell' ? shellToCommand(state.task.shell) : '(Pi agent task)';
+    const cwd = taskWorkingDirectory(state.task);
+    const command = taskToCommand(state.task);
     const decision = await this.policy.authorize({
-      taskId: state.task.taskId,
+      taskId: state.task.task_id,
       profile: state.task.profile,
       command,
-      cwd: state.task.cwd,
+      cwd,
     });
-    this.store.updateTask(state.task.taskId, { graphNode: 'authorize' });
-    this.store.saveCheckpoint(state.task.taskId, 'authorize', state);
+    this.store.updateTask(state.task.task_id, { graphNode: 'authorize' });
+    this.store.saveCheckpoint(state.task.task_id, 'authorize', state);
     if (decision.decision !== 'allow') {
       return {
         graphNode: 'authorize',
@@ -144,16 +145,11 @@ export class TaskGraphRunner {
     state: TaskGraphState,
     signal: AbortSignal,
   ): Promise<Partial<TaskGraphState>> {
-    this.store.updateTask(state.task.taskId, { graphNode: 'execute' });
-    this.store.saveCheckpoint(state.task.taskId, 'execute', state);
+    this.store.updateTask(state.task.task_id, { graphNode: 'execute' });
+    this.store.saveCheckpoint(state.task.task_id, 'execute', state);
     try {
-      if (state.task.type === 'shell') {
-        const command = await this.executeCommand(
-          state.task,
-          state.commandCount + 1,
-          shellToCommand(state.task.shell),
-          signal,
-        );
+      if (state.task.kind === 'command' || state.task.kind === 'shell') {
+        const command = await this.executeProcess(state.task, state.commandCount + 1, signal);
         if (command.status !== 'succeeded') {
           return {
             graphNode: 'execute',
@@ -187,14 +183,18 @@ export class TaskGraphRunner {
           commandCount: state.commandCount + 1,
         };
       }
+
+      // kind === 'agent'
       let piSequence = state.commandCount;
+      const cwd = taskWorkingDirectory(state.task);
       const result = await this.piRuntime.run({
-        taskId: state.task.taskId,
-        prompt: state.task.agent.prompt,
-        cwd: state.task.cwd,
-        timeoutSeconds: state.task.timeoutSeconds,
+        taskId: state.task.task_id,
+        prompt: state.task.prompt,
+        cwd,
+        timeoutSeconds: state.task.timeout_seconds,
         signal,
-        execute: (command) => this.executeCommand(state.task, ++piSequence, command, signal),
+        execute: (command) =>
+          this.executeShellString(state.task, ++piSequence, command, signal),
       });
       return {
         graphNode: 'execute',
@@ -215,13 +215,13 @@ export class TaskGraphRunner {
     state: TaskGraphState,
     signal: AbortSignal,
   ): Promise<Partial<TaskGraphState>> {
-    this.store.updateTask(state.task.taskId, { graphNode: 'verify' });
-    this.store.saveCheckpoint(state.task.taskId, 'verify', state);
+    this.store.updateTask(state.task.task_id, { graphNode: 'verify' });
+    this.store.saveCheckpoint(state.task.task_id, 'verify', state);
     const verify = state.task.verify ?? {
-      mode: state.task.type === 'shell' ? 'exit_code' : 'none',
+      mode: state.task.kind === 'command' || state.task.kind === 'shell' ? 'exit_code' : 'none',
     };
     if (verify.mode !== 'command') return { graphNode: 'verify' };
-    const outcome = await this.executeCommand(
+    const outcome = await this.executeShellString(
       state.task,
       state.commandCount + 1,
       verify.command,
@@ -244,33 +244,80 @@ export class TaskGraphRunner {
         : state.status
       : 'succeeded';
     const finishedAt = new Date().toISOString();
-    this.store.updateTask(state.task.taskId, {
+    this.store.updateTask(state.task.task_id, {
       status,
       graphNode: 'finalize',
       ...(state.result !== undefined ? { result: state.result } : {}),
       ...(state.error !== undefined ? { error: state.error } : {}),
       finishedAt,
     });
-    this.store.saveCheckpoint(state.task.taskId, 'finalize', state);
+    this.store.saveCheckpoint(state.task.task_id, 'finalize', state);
     return { status, graphNode: 'finalize' };
   }
 
-  private async executeCommand(
+  /** Run the task's primary process (kind command | shell). */
+  private async executeProcess(
+    task: TaskDispatch,
+    sequence: number,
+    signal: AbortSignal,
+  ): Promise<ShellExecutionResult> {
+    if (task.kind === 'command') {
+      return this.runLogged(task, sequence, signal, {
+        program: task.program,
+        arguments: task.arguments ?? [],
+        displayCommand: taskToCommand(task),
+      });
+    }
+    if (task.kind === 'shell') {
+      return this.runLogged(task, sequence, signal, {
+        shell: task.shell ?? '/bin/bash',
+        shellCommand: task.command,
+        loadUserEnvironment: task.load_user_environment !== false,
+        displayCommand: task.command,
+      });
+    }
+    throw new Error('executeProcess only supports kind command|shell');
+  }
+
+  /** Run an arbitrary shell string (agent tools / verify). */
+  private async executeShellString(
     task: TaskDispatch,
     sequence: number,
     command: string,
     signal: AbortSignal,
   ): Promise<ShellExecutionResult> {
+    return this.runLogged(task, sequence, signal, {
+      shell: '/bin/bash',
+      shellCommand: command,
+      loadUserEnvironment: true,
+      displayCommand: command,
+    });
+  }
+
+  private async runLogged(
+    task: TaskDispatch,
+    sequence: number,
+    signal: AbortSignal,
+    spec: {
+      program?: string;
+      arguments?: string[];
+      shell?: string;
+      shellCommand?: string;
+      loadUserEnvironment?: boolean;
+      displayCommand: string;
+    },
+  ): Promise<ShellExecutionResult> {
+    const cwd = taskWorkingDirectory(task);
     const decision = await this.policy.authorize({
-      taskId: task.taskId,
+      taskId: task.task_id,
       profile: task.profile,
-      command,
-      cwd: task.cwd,
+      command: spec.displayCommand,
+      cwd,
     });
     if (decision.decision !== 'allow')
       throw new Error(decision.reason ?? 'Command denied by policy.');
     const commandId = randomUUID();
-    const commandDirectory = join(this.logDirectory, task.taskId);
+    const commandDirectory = join(this.logDirectory, task.task_id);
     const stdoutPath = join(
       commandDirectory,
       `${String(sequence).padStart(3, '0')}-${commandId}.stdout.log`,
@@ -282,23 +329,29 @@ export class TaskGraphRunner {
     const startedAt = new Date().toISOString();
     this.store.startCommand({
       id: commandId,
-      taskId: task.taskId,
+      taskId: task.task_id,
       sequence,
-      command,
-      cwd: task.cwd,
+      command: spec.displayCommand,
+      cwd,
       status: 'running',
       stdoutPath,
       stderrPath,
       startedAt,
     });
     const outcome = await this.executor.execute({
-      command,
-      cwd: task.cwd,
-      timeoutSeconds: task.timeoutSeconds,
+      ...(spec.program
+        ? { program: spec.program, arguments: spec.arguments ?? [] }
+        : {
+            shell: spec.shell ?? '/bin/bash',
+            command: spec.shellCommand ?? '',
+            loadUserEnvironment: spec.loadUserEnvironment !== false,
+          }),
+      cwd,
+      timeoutSeconds: task.timeout_seconds,
       stdoutPath,
       stderrPath,
       signal,
-      hardMaxBytes: task.output.hardMaxBytes,
+      hardMaxBytes: task.output.hard_max_bytes,
     });
     this.store.finishCommand({
       id: commandId,

@@ -12,7 +12,7 @@ import type { BackendRepository } from '../registry/repository.js';
 interface TaskRow {
   id: string;
   backend_id: string;
-  type: 'shell' | 'agent';
+  type: string;
   kind: string | null;
   source: TaskSource;
   profile: string;
@@ -31,9 +31,8 @@ interface TaskRow {
 export interface TaskIndex {
   id: string;
   backendId: string;
-  type: 'shell' | 'agent';
-  /** Public kind: command | shell | agent (create_command stores command). */
-  kind?: string;
+  /** Schema v3 kind: command | shell | agent. */
+  kind: string;
   source: TaskSource;
   profile: string;
   name?: string;
@@ -59,28 +58,21 @@ export class TaskService {
     input: CreateTaskInput,
     source: TaskSource,
     scheduleId?: string,
-    publicKind?: 'command' | 'shell' | 'agent',
+    _publicKind?: 'command' | 'shell' | 'agent',
   ): Promise<
     TaskIndex & {
       reusedExistingTask?: boolean;
       requestHash?: string;
     }
   > {
-    const backend = await this.backends.get(input.backendId);
+    const backend = await this.backends.get(input.backend_id);
     if (!backend.enabled)
       throw new AppError('backend_disabled', `Backend '${backend.id}' is disabled.`, 409);
 
-    const kind =
-      publicKind ??
-      (input.type === 'agent'
-        ? 'agent'
-        : input.type === 'shell' && input.shell.mode === 'exec'
-          ? 'command'
-          : 'shell');
-
+    const kind = input.kind;
     const requestHash = await hashTaskRequest(input);
-    if (input.idempotencyKey) {
-      const existing = await this.findByIdempotency(input.backendId, input.idempotencyKey);
+    if (input.idempotency_key) {
+      const existing = await this.findByIdempotency(input.backend_id, input.idempotency_key);
       if (existing) {
         if (existing.requestHash && existing.requestHash !== requestHash) {
           throw new AppError(
@@ -89,7 +81,6 @@ export class TaskService {
             409,
           );
         }
-        // Legacy rows without request_hash: treat as replay (same key only).
         return {
           ...existing,
           reusedExistingTask: true,
@@ -112,23 +103,24 @@ export class TaskService {
         )
         .bind(
           taskId,
-          input.backendId,
-          input.type,
+          input.backend_id,
+          // type column stores kind (Schema v3); kept for backward column name.
+          kind,
           kind,
           source,
           input.profile,
           name,
           summary,
           scheduleId ?? null,
-          input.idempotencyKey ?? null,
+          input.idempotency_key ?? null,
           requestHash,
           now,
           now,
         )
         .run();
     } catch {
-      if (input.idempotencyKey) {
-        const raced = await this.findByIdempotency(input.backendId, input.idempotencyKey);
+      if (input.idempotency_key) {
+        const raced = await this.findByIdempotency(input.backend_id, input.idempotency_key);
         if (raced) {
           if (raced.requestHash && raced.requestHash !== requestHash) {
             throw new AppError(
@@ -149,11 +141,12 @@ export class TaskService {
 
     await this.setStatus(taskId, 'dispatching');
     try {
+      // Dispatch Schema v3 wire body as-is (snake_case + kind).
       await this.client.createTask(backend, {
         ...input,
-        taskId,
+        task_id: taskId,
         source,
-        ...(scheduleId ? { scheduleId } : {}),
+        ...(scheduleId ? { schedule_id: scheduleId } : {}),
       });
       await this.setStatus(taskId, 'queued');
     } catch (error) {
@@ -171,7 +164,8 @@ export class TaskService {
           limit?: number;
           offset?: number;
           backendId?: string;
-          type?: 'shell' | 'agent';
+          type?: string;
+          kind?: string;
           status?: string;
           createdAfter?: string;
         } = 50,
@@ -185,9 +179,10 @@ export class TaskService {
       clauses.push('backend_id = ?');
       binds.push(opts.backendId);
     }
-    if (opts.type) {
-      clauses.push('type = ?');
-      binds.push(opts.type);
+    const kindFilter = opts.kind ?? opts.type;
+    if (kindFilter) {
+      clauses.push('(kind = ? OR type = ?)');
+      binds.push(kindFilter, kindFilter);
     }
     if (opts.status) {
       clauses.push('status = ?');
@@ -210,7 +205,8 @@ export class TaskService {
       limit?: number;
       offset?: number;
       backendId?: string;
-      type?: 'shell' | 'agent';
+      type?: string;
+      kind?: string;
       status?: string;
       createdAfter?: string;
     } = {},
@@ -415,7 +411,6 @@ function toTaskIndex(row: TaskRow): TaskIndex {
   return {
     id: row.id,
     backendId: row.backend_id,
-    type: row.type,
     kind: row.kind ?? row.type,
     source: row.source,
     profile: row.profile,
@@ -432,24 +427,10 @@ function toTaskIndex(row: TaskRow): TaskIndex {
   };
 }
 
-/** Canonical SHA-256 of create payload (excluding pure display fields). */
+/** Canonical SHA-256 of Schema v3 create payload. */
 export async function hashTaskRequest(input: CreateTaskInput): Promise<string> {
-  const canonical = {
-    backendId: input.backendId,
-    type: input.type,
-    name: input.name ?? null,
-    cwd: input.cwd,
-    timeoutSeconds: input.timeoutSeconds,
-    profile: input.profile,
-    environment: input.environment ?? null,
-    labels: input.labels ?? null,
-    output: input.output ?? null,
-    verify: input.verify ?? null,
-    retry: input.retry ?? null,
-    shell: input.type === 'shell' ? input.shell : null,
-    agent: input.type === 'agent' ? input.agent : null,
-  };
-  const hex = await sha256Hex(stableStringify(canonical));
+  const { idempotency_key: _drop, ...rest } = input;
+  const hex = await sha256Hex(stableStringify(rest));
   return `sha256:${hex}`;
 }
 
