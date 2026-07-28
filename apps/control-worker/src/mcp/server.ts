@@ -588,10 +588,7 @@ export function createMcpServer(env: Env): McpServer {
     wrap(async (args) => {
       const parsed = processStartCommandInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      // Agent still uses mode=exec on /process/start.
-      return (await client.processStart(backend, {
-        mode: 'exec',
-        backend_id: parsed.backend_id,
+      return (await client.processStartCommand(backend, {
         program: parsed.program,
         ...(parsed.arguments ? { arguments: parsed.arguments } : {}),
         ...(parsed.working_directory ? { working_directory: parsed.working_directory } : {}),
@@ -620,10 +617,7 @@ export function createMcpServer(env: Env): McpServer {
     wrap(async (args) => {
       const parsed = processStartShellInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      // Agent still uses mode=shell on /process/start.
-      return (await client.processStart(backend, {
-        mode: 'shell',
-        backend_id: parsed.backend_id,
+      return (await client.processStartShell(backend, {
         command: parsed.command,
         ...(parsed.shell ? { shell: parsed.shell } : {}),
         ...(typeof parsed.load_user_environment === 'boolean'
@@ -743,12 +737,8 @@ export function createMcpServer(env: Env): McpServer {
         includeHidden: parsed.include_hidden === true,
         ...(parsed.cursor ? { cursor: parsed.cursor } : {}),
       })) as Record<string, unknown>;
-      // Schema v3 public output is entries-only (never expose matches).
-      const entries = Array.isArray(raw.entries)
-        ? raw.entries
-        : Array.isArray(raw.matches)
-          ? raw.matches
-          : [];
+      // Schema v3: agent returns entries only; no matches alias.
+      const entries = Array.isArray(raw.entries) ? raw.entries : [];
       return {
         entries,
         returned_count:

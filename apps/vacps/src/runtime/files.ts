@@ -180,7 +180,7 @@ export async function filesList(input: {
   const entries = await readdir(path, { withFileTypes: true });
   const visible = entries.filter((entry) => includeHidden || !entry.name.startsWith('.'));
   const slice = visible.slice(offset, offset + limit);
-  const matches = [];
+  const page = [];
   for (const entry of slice) {
     const full = join(path, entry.name);
     let size = 0;
@@ -192,7 +192,7 @@ export async function filesList(input: {
     } catch {
       /* ignore */
     }
-    matches.push({
+    page.push({
       path: full,
       name: entry.name,
       type: entry.isDirectory() ? 'directory' : 'file',
@@ -200,11 +200,11 @@ export async function filesList(input: {
       modified_at,
     });
   }
-  const nextOffset = offset + matches.length;
+  const nextOffset = offset + page.length;
   return {
     path,
-    entries: matches,
-    returned_count: matches.length,
+    entries: page,
+    returned_count: page.length,
     truncated: nextOffset < visible.length,
     next_cursor: nextOffset < visible.length ? encodeOffsetCursor(nextOffset) : null,
   };
@@ -1069,9 +1069,9 @@ export async function detectCapabilities() {
       rgVersion = null;
     }
   }
-  // Schema v2 nested shape — no dotted feature keys.
+  // Schema v3 nested shape — no dotted feature keys.
   return {
-    schema_version: '2.0',
+    schema_version: '3.0',
     features: {
       command_exec: true,
       shell_exec: true,
