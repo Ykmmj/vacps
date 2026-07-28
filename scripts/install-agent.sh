@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_DIRECTORY=/opt/vps-agent
-DATA_DIRECTORY=/var/lib/vps-agent
-ENVIRONMENT_DIRECTORY=/etc/vps-agent
-ENVIRONMENT_FILE=/etc/vps-agent/vps-agent.env
+APP_DIRECTORY=/opt/vacps
+DATA_DIRECTORY=/var/lib/vacps
+ENVIRONMENT_DIRECTORY=/etc/vacps
+ENVIRONMENT_FILE=/etc/vacps/vacps.env
 SERVICE_USER=agent
-export NVM_DIR=/usr/local/lib/vps-agent/nvm
+export NVM_DIR=/usr/local/lib/vacps/nvm
 NODE_MAJOR_VERSION=24
 REPOSITORY_URL=''
 REPOSITORY_REF=main
@@ -54,12 +54,12 @@ uninstall_usage() {
   cat <<'EOF'
 Usage: sudo bash agent.sh uninstall [options]
 
-Stops and removes the VPS Agent service, its configuration, Quick Tunnel helper,
+Stops and removes the VACPS service, its configuration, Quick Tunnel helper,
 Agent-scoped NVM runtime, and the optional apt sudoers rule. Task records and
 logs are preserved by default.
 
 Options:
-  --purge-data              Delete /var/lib/vps-agent, including SQLite task records and logs.
+  --purge-data              Delete /var/lib/vacps, including SQLite task records and logs.
   --remove-user             Delete the agent system user. Requires --purge-data.
   --remove-managed-tunnel   Stop and remove this host's cloudflared system service. Does not delete the remote Tunnel or DNS record.
   --help, -h                Show this help message.
@@ -86,20 +86,20 @@ uninstall_agent() {
     return 2
   fi
 
-  systemctl disable --now vps-agent 2>/dev/null || true
-  systemctl disable --now vps-agent-quick-tunnel 2>/dev/null || true
+  systemctl disable --now vacps 2>/dev/null || true
+  systemctl disable --now vacps-quick-tunnel 2>/dev/null || true
   if [[ $remove_managed_tunnel == true ]]; then
     systemctl disable --now cloudflared 2>/dev/null || true
     if command -v cloudflared >/dev/null; then cloudflared service uninstall 2>/dev/null || true; fi
   fi
 
-  rm -f /etc/systemd/system/vps-agent.service
-  rm -rf /etc/systemd/system/vps-agent.service.d
-  rm -f /etc/systemd/system/vps-agent-quick-tunnel.service
-  rm -f /usr/local/lib/vps-agent/quick-tunnel.sh
+  rm -f /etc/systemd/system/vacps.service
+  rm -rf /etc/systemd/system/vacps.service.d
+  rm -f /etc/systemd/system/vacps-quick-tunnel.service
+  rm -f /usr/local/lib/vacps/quick-tunnel.sh
   rm -rf "$NVM_DIR"
-  rmdir /usr/local/lib/vps-agent 2>/dev/null || true
-  rm -f /etc/sudoers.d/vps-agent-apt
+  rmdir /usr/local/lib/vacps 2>/dev/null || true
+  rm -f /etc/sudoers.d/vacps-apt
   rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
   if [[ $purge_data == true ]]; then
     rm -rf "$DATA_DIRECTORY"
@@ -108,8 +108,8 @@ uninstall_agent() {
   fi
   if [[ $remove_user == true ]] && id "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER"; fi
   systemctl daemon-reload
-  systemctl reset-failed vps-agent vps-agent-quick-tunnel 2>/dev/null || true
-  echo 'VPS Agent service files have been removed.'
+  systemctl reset-failed vacps vacps-quick-tunnel 2>/dev/null || true
+  echo 'VACPS service files have been removed.'
   if [[ $remove_managed_tunnel != true ]]; then
     echo 'cloudflared was left installed and unchanged. Use --remove-managed-tunnel only when this host has no other cloudflared service.'
   fi
@@ -225,12 +225,12 @@ normalize_repository_url() {
 install_nvm_node
 if [[ -e $APP_DIRECTORY ]]; then
   if [[ ! -d $APP_DIRECTORY/.git ||
-    ! -f $APP_DIRECTORY/apps/vps-agent/package.json ||
-    ! -f $APP_DIRECTORY/apps/vps-agent/systemd/vps-agent.service ||
+    ! -f $APP_DIRECTORY/apps/agent/package.json ||
+    ! -f $APP_DIRECTORY/apps/agent/systemd/vacps.service ||
     ! -f $APP_DIRECTORY/packages/contracts/package.json ||
     ! -f $ENVIRONMENT_FILE ||
-    ! -f /etc/systemd/system/vps-agent.service ]]; then
-    echo "$APP_DIRECTORY exists but is not a resumable VPS Agent installation; refusing to overwrite it." >&2
+    ! -f /etc/systemd/system/vacps.service ]]; then
+    echo "$APP_DIRECTORY exists but is not a resumable VACPS installation; refusing to overwrite it." >&2
     exit 1
   fi
   # The checkout is owned by the unprivileged service user after installation.
@@ -258,10 +258,10 @@ if [[ -e $APP_DIRECTORY ]]; then
   fi
   BACKEND_ID=$EXISTING_BACKEND_ID
   RESUME_INSTALL=true
-  echo "Resuming the existing VPS Agent installation for $BACKEND_ID."
+  echo "Resuming the existing VACPS installation for $BACKEND_ID."
 else
   if [[ -z $BACKEND_ID ]]; then
-    BACKEND_ID="vps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
+    BACKEND_ID="vacps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
   fi
   git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
 fi
@@ -297,14 +297,14 @@ cd "$APP_DIRECTORY"
 if [[ $RESUME_INSTALL == false ]]; then
   pnpm --version
   pnpm install --frozen-lockfile
-  pnpm --filter @vps-agent/contracts build
-  pnpm --filter @vps-agent/vps-agent build
+  pnpm --filter @vacps/contracts build
+  pnpm --filter @vacps/agent build
 fi
 
 useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
 install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
 install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
-install -d /etc/vps-agent /etc/systemd/system/vps-agent.service.d
+install -d /etc/vacps /etc/systemd/system/vacps.service.d
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
 
 install -m 640 -o root -g "$SERVICE_USER" /dev/null "$ENVIRONMENT_FILE"
@@ -323,8 +323,8 @@ TELEMETRY_FALLBACK_INTERVAL_SECONDS=120
 LISTEN_HOST=127.0.0.1
 LISTEN_PORT=3100
 REDIS_URL=$REDIS_URL
-DATABASE_PATH=/var/lib/vps-agent/agent.db
-LOG_DIR=/var/lib/vps-agent/logs
+DATABASE_PATH=/var/lib/vacps/agent.db
+LOG_DIR=/var/lib/vacps/logs
 WORKER_CONCURRENCY=1
 RUN_MODE=all
 DEFAULT_PROFILE=full
@@ -333,37 +333,37 @@ PI_COMMAND_ARGS_JSON=[]
 EOF
 chmod 640 "$ENVIRONMENT_FILE"
 
-install -m 644 "$APP_DIRECTORY/apps/vps-agent/systemd/vps-agent.service" /etc/systemd/system/vps-agent.service
+install -m 644 "$APP_DIRECTORY/apps/agent/systemd/vacps.service" /etc/systemd/system/vacps.service
 NODE_BINARY=$(command -v node)
-cat >/etc/systemd/system/vps-agent.service.d/node.conf <<EOF
+cat >/etc/systemd/system/vacps.service.d/node.conf <<EOF
 [Service]
 ExecStart=
-ExecStart=$NODE_BINARY /opt/vps-agent/apps/vps-agent/dist/main.js
+ExecStart=$NODE_BINARY /opt/vacps/apps/agent/dist/main.js
 EOF
 
 if [[ $ALLOW_APT == true ]]; then
-  cat >/etc/sudoers.d/vps-agent-apt <<EOF
+  cat >/etc/sudoers.d/vacps-apt <<EOF
 # apt-get can execute package maintainer scripts as root. Treat this as root access.
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get
 EOF
-  chmod 440 /etc/sudoers.d/vps-agent-apt
-  visudo -cf /etc/sudoers.d/vps-agent-apt
-  cat >/etc/systemd/system/vps-agent.service.d/allow-apt.conf <<'EOF'
+  chmod 440 /etc/sudoers.d/vacps-apt
+  visudo -cf /etc/sudoers.d/vacps-apt
+  cat >/etc/systemd/system/vacps.service.d/allow-apt.conf <<'EOF'
 [Service]
 NoNewPrivileges=false
 EOF
 fi
 
 systemctl daemon-reload
-systemctl enable vps-agent
-systemctl restart vps-agent
+systemctl enable vacps
+systemctl restart vacps
 
 wait_for_agent_health() {
   local deadline=$((SECONDS + HEALTH_CHECK_TIMEOUT_SECONDS))
   local response=''
   while ((SECONDS < deadline)); do
-    if systemctl is-active --quiet vps-agent; then
-      echo 'VPS Agent service is active; it will complete signed registration in the background.'
+    if systemctl is-active --quiet vacps; then
+      echo 'VACPS service is active; it will complete signed registration in the background.'
       return 0
     fi
     if ((SECONDS < deadline)); then
@@ -371,12 +371,12 @@ wait_for_agent_health() {
     fi
   done
 
-  echo "VPS Agent did not become healthy after $HEALTH_CHECK_TIMEOUT_SECONDS seconds." >&2
+  echo "VACPS did not become healthy after $HEALTH_CHECK_TIMEOUT_SECONDS seconds." >&2
   if [[ -n $response ]]; then
     echo "Last health-check error: $response" >&2
   fi
-  systemctl status vps-agent --no-pager --full >&2 || true
-  journalctl -u vps-agent -n 50 --no-pager >&2 || true
+  systemctl status vacps --no-pager --full >&2 || true
+  journalctl -u vacps -n 50 --no-pager >&2 || true
   return 1
 }
 
@@ -398,34 +398,34 @@ install_cloudflared() {
 }
 
 install_quick_tunnel_service() {
-  install -d /usr/local/lib/vps-agent
-  cat >/usr/local/lib/vps-agent/quick-tunnel.sh <<'EOF'
+  install -d /usr/local/lib/vacps
+  cat >/usr/local/lib/vacps/quick-tunnel.sh <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ENVIRONMENT_FILE=/etc/vps-agent/vps-agent.env
+ENVIRONMENT_FILE=/etc/vacps/vacps.env
 while true; do
   cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3100 2>&1 | while IFS= read -r line; do
     printf '%s\n' "$line"
     if [[ $line =~ https://[-a-z0-9]+\.trycloudflare\.com ]]; then
       public_url=${BASH_REMATCH[0]}
       sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=$public_url|" "$ENVIRONMENT_FILE"
-      systemctl try-restart vps-agent
+      systemctl try-restart vacps
     fi
   done || true
   sleep 3
 done
 EOF
-  chmod 700 /usr/local/lib/vps-agent/quick-tunnel.sh
-  cat >/etc/systemd/system/vps-agent-quick-tunnel.service <<'EOF'
+  chmod 700 /usr/local/lib/vacps/quick-tunnel.sh
+  cat >/etc/systemd/system/vacps-quick-tunnel.service <<'EOF'
 [Unit]
-Description=VPS Agent temporary Cloudflare Quick Tunnel
-After=network-online.target vps-agent.service
+Description=VACPS temporary Cloudflare Quick Tunnel
+After=network-online.target vacps.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/lib/vps-agent/quick-tunnel.sh
+ExecStart=/usr/local/lib/vacps/quick-tunnel.sh
 Restart=always
 RestartSec=3
 
@@ -433,7 +433,7 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now vps-agent-quick-tunnel
+  systemctl enable --now vacps-quick-tunnel
 }
 
 if [[ $QUICK_TUNNEL == true ]]; then
@@ -445,11 +445,11 @@ elif [[ -n $TUNNEL_TOKEN ]]; then
   if ! systemctl is-enabled --quiet cloudflared 2>/dev/null; then
     cloudflared service install "$TUNNEL_TOKEN"
   fi
-  systemctl restart vps-agent
+  systemctl restart vacps
   echo "Managed Tunnel installed for $PUBLIC_BASE_URL."
 fi
 
-echo "VPS Agent $BACKEND_ID is running."
+echo "VACPS $BACKEND_ID is running."
 if [[ $ALLOW_APT == true ]]; then
   echo 'apt enabled: Agent tasks may run sudo apt-get install -y <package>; this is root-equivalent access.'
 fi

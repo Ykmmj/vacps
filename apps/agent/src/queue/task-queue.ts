@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
-import type { CreateTaskInput, TaskDispatch } from '@vps-agent/contracts';
+import type { CreateTaskInput, TaskDispatch } from '@vacps/contracts';
 import { Redis } from 'ioredis';
 
 import type { AgentConfig } from '../config.js';

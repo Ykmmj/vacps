@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-import type { TaskDispatch, TaskError, TaskStatus } from '@vps-agent/contracts';
+import type { TaskDispatch, TaskError, TaskStatus } from '@vacps/contracts';
 
 import type { ShellExecutionResult } from '../executor/shell-executor.js';
 import type { ShellExecutor } from '../executor/shell-executor.js';

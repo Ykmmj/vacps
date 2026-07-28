@@ -105,7 +105,7 @@
   "noTask": "Tasks are submitted through MCP or schedules.",
   "mcpCopied": "MCP endpoint copied",
   "control": "CONTROL",
-  "footer": "VPS Agent · Cloudflare Worker + D1 + BullMQ",
+  "footer": "VACPS · Cloudflare Worker + D1 + BullMQ",
   "clipboardUnavailable": "Clipboard access is unavailable.",
   "cachedTelemetry": "Cached telemetry",
   "system": "System",

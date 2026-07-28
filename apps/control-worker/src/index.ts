@@ -8,8 +8,8 @@ import {
   telemetrySettingsSchema,
   updateBackendSchema,
   updateScheduleSchema,
-} from '@vps-agent/contracts';
-import type { Backend, BackendRegistration, BackendStatus } from '@vps-agent/contracts';
+} from '@vacps/contracts';
+import type { Backend, BackendRegistration, BackendStatus } from '@vacps/contracts';
 import { z } from 'zod';
 
 import {

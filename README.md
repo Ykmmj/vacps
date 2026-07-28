@@ -1,17 +1,17 @@
-# VPS Agent Platform
+# VACPS
 
 Cloudflare Workers control plane for queued Shell and Pi-powered agent work on multiple VPS hosts. It is a TypeScript pnpm monorepo with exactly three workspaces:
 
 - `apps/control-worker` — same-domain Web UI, management API, D1 registry, schedule reconciliation, and Remote MCP.
-- `apps/vps-agent` — the single process deployed to each VPS: Fastify, BullMQ, LangGraph lifecycle, SQLite, Pi adapter, and Shell executor.
+- `apps/agent` — the single process deployed to each VPS: Fastify, BullMQ, LangGraph lifecycle, SQLite, Pi adapter, and Shell executor.
 - `packages/contracts` — shared Zod schemas and API contracts.
 
-> **Security warning:** v1 deliberately supports arbitrary commands. Deploy it behind Cloudflare Access, keep the control-panel password private, and do not expose a VPS Agent port directly to the Internet. Each Agent has its own Ed25519 identity; no shared backend bearer secret exists.
+> **Security warning:** v1 deliberately supports arbitrary commands. Deploy it behind Cloudflare Access, keep the control-panel password private, and do not expose a VACPS port directly to the Internet. Each Agent has its own Ed25519 identity; no shared backend bearer secret exists.
 
 ## Architecture
 
 ```text
-Web UI / MCP → Cloudflare Worker + D1 → HTTPS → target VPS Agent
+Web UI / MCP → Cloudflare Worker + D1 → HTTPS → target VACPS
                                               ├→ BullMQ + Redis
                                               ├→ LangGraph lifecycle
                                               ├→ Pi adapter / ShellExecutor
@@ -67,7 +67,7 @@ Before copying an installer command, use the Web UI to generate a one-time regis
 
 Each report writes one current snapshot containing CPU, memory, root-disk usage, queue state, operating system, and upload/download byte rates. D1 keeps only the latest snapshot, which makes the UI inexpensive to poll and leaves a clean input for future roll-up charts; it is not raw time-series retention.
 
-To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vps-agent` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
+To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vacps` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
 
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 
@@ -78,15 +78,15 @@ pnpm install
 pnpm check
 
 # Create a local D1 database and apply the control-plane migration.
-pnpm --filter @vps-agent/control-worker exec wrangler d1 create vps-agent-control
-pnpm --filter @vps-agent/control-worker exec wrangler d1 migrations apply vps-agent-control --local
+pnpm --filter @vacps/control-worker exec wrangler d1 create vacps-control
+pnpm --filter @vacps/control-worker exec wrangler d1 migrations apply vacps-control --local
 
 # Copy and fill the example files before starting either runtime.
 cp apps/control-worker/.dev.vars.example apps/control-worker/.dev.vars
-cp apps/vps-agent/.env.example apps/vps-agent/.env
+cp apps/agent/.env.example apps/agent/.env
 ```
 
-Run the control plane with `pnpm dev:control`. Start a local VPS Agent only after supplying Redis and a safe test directory in its environment: `pnpm dev:agent`.
+Run the control plane with `pnpm dev:control`. Start a local VACPS only after supplying Redis and a safe test directory in its environment: `pnpm dev:agent`.
 
 See [`docs/deployment.md`](docs/deployment.md) for the security/operations checklist and [`docs/pi-adapter-protocol.md`](docs/pi-adapter-protocol.md) for the Pi integration boundary.
 

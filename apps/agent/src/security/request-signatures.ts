@@ -19,10 +19,10 @@ export async function createAgentSignatureHeaders(
     Buffer.from(canonicalRequest('agent', request, config.BACKEND_ID, timestamp, nonce, body)),
   );
   return {
-    'x-vps-agent-id': config.BACKEND_ID,
-    'x-vps-agent-timestamp': timestamp,
-    'x-vps-agent-nonce': nonce,
-    'x-vps-agent-signature': Buffer.from(signature).toString('base64url'),
+    'x-vacps-id': config.BACKEND_ID,
+    'x-vacps-timestamp': timestamp,
+    'x-vacps-nonce': nonce,
+    'x-vacps-signature': Buffer.from(signature).toString('base64url'),
   };
 }
 
@@ -88,7 +88,7 @@ function canonicalRequest(
   body: string,
 ): string {
   return [
-    'vps-agent-request-v1',
+    'vacps-request-v1',
     issuer,
     request.method.toUpperCase(),
     new URL(request.url).pathname,

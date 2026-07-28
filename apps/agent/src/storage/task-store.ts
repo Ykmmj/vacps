@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import Database from 'better-sqlite3';
-import type { CommandExecution, TaskDispatch, TaskError, TaskStatus } from '@vps-agent/contracts';
+import type { CommandExecution, TaskDispatch, TaskError, TaskStatus } from '@vacps/contracts';
 
 export interface StoredTask {
   task: TaskDispatch;

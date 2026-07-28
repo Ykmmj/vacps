@@ -18,10 +18,10 @@ export async function verifyAgentRequestSignature(
   publicKey: string,
   body?: string,
 ): Promise<SignedRequestIdentity> {
-  const backendId = requiredHeader(request, 'x-vps-agent-id');
-  const timestamp = requiredTimestamp(request, 'x-vps-agent-timestamp');
-  const nonce = requiredNonce(request, 'x-vps-agent-nonce');
-  const signature = requiredBase64Url(request, 'x-vps-agent-signature', 86);
+  const backendId = requiredHeader(request, 'x-vacps-id');
+  const timestamp = requiredTimestamp(request, 'x-vacps-timestamp');
+  const nonce = requiredNonce(request, 'x-vacps-nonce');
+  const signature = requiredBase64Url(request, 'x-vacps-signature', 86);
   const signedBody = body ?? (await request.clone().text());
   const key = await crypto.subtle.importKey(
     'raw',
@@ -120,7 +120,7 @@ async function canonicalRequest(
 ): Promise<string> {
   const path = new URL(request.url).pathname;
   return [
-    'vps-agent-request-v1',
+    'vacps-request-v1',
     issuer,
     request.method.toUpperCase(),
     path,

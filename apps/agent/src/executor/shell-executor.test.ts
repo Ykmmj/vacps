@@ -18,7 +18,7 @@ afterEach(async () => {
 
 describe('ShellExecutor', () => {
   it('captures stdout, stderr, and a successful exit code', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'vps-agent-shell-'));
+    const directory = await mkdtemp(join(tmpdir(), 'vacps-shell-'));
     temporaryDirectories.push(directory);
     const outcome = await new ShellExecutor().execute({
       command: 'printf "out"; printf "err" >&2',

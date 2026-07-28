@@ -1,5 +1,5 @@
 [Unit]
-Description=VPS Agent Backend
+Description=VACPS Backend
 After=network-online.target
 Wants=network-online.target
 
@@ -7,15 +7,15 @@ Wants=network-online.target
 Type=simple
 User=agent
 Group=agent
-WorkingDirectory=/opt/vps-agent
-EnvironmentFile=/etc/vps-agent/vps-agent.env
-ExecStart=/usr/bin/node /opt/vps-agent/apps/vps-agent/dist/main.js
+WorkingDirectory=/opt/vacps
+EnvironmentFile=/etc/vacps/vacps.env
+ExecStart=/usr/bin/node /opt/vacps/apps/agent/dist/main.js
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ReadWritePaths=/var/lib/vps-agent
+ReadWritePaths=/var/lib/vacps
 
 [Install]
 WantedBy=multi-user.target

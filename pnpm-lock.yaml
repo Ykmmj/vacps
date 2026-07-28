@@ -41,7 +41,7 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.15.1
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
-      '@vps-agent/contracts':
+      '@vacps/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
       flag-icons:
@@ -109,12 +109,12 @@ importers:
         specifier: ^4.21.0
         version: 4.114.0(@cloudflare/workers-types@5.20260724.1)(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
-  apps/vps-agent:
+  apps/agent:
     dependencies:
       '@langchain/langgraph':
         specifier: ^0.2.74
         version: 0.2.74(@langchain/core@0.3.80(@opentelemetry/api@1.9.0))(react@18.3.1)(zod-to-json-schema@3.25.2(zod@4.4.3))
-      '@vps-agent/contracts':
+      '@vacps/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
       better-sqlite3:

@@ -1,4 +1,4 @@
-import { telemetrySettingsSchema, type TelemetrySettings } from '@vps-agent/contracts';
+import { telemetrySettingsSchema, type TelemetrySettings } from '@vacps/contracts';
 
 const telemetryIntervalKey = 'telemetry_interval_seconds';
 const defaultTelemetrySettings = { intervalSeconds: 120 } satisfies TelemetrySettings;

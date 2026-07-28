@@ -18,7 +18,7 @@ fi
 printf '%s' "$CLOUDFLARE_ACCOUNT_ID" |
   CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
     CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
-    pnpm --filter @vps-agent/control-worker exec wrangler secret put CLOUDFLARE_ACCOUNT_ID
+    pnpm --filter @vacps/control-worker exec wrangler secret put CLOUDFLARE_ACCOUNT_ID
 
 unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
 echo 'Managed Tunnel account context saved. Refresh the Web UI and connect Cloudflare again.'

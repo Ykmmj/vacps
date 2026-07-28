@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const options = parseOptions(process.argv.slice(2));
-const databaseName = options.get('database-name') ?? 'vps-agent-control';
+const databaseName = options.get('database-name') ?? 'vacps-control';
 const suppliedAdminPassword = options.get('admin-password') ?? process.env.CONTROL_PANEL_PASSWORD;
 const suppliedSessionSecret = process.env.CONTROL_PANEL_SESSION_SECRET;
 const suppliedDatabaseId =
@@ -78,7 +78,7 @@ if (bootstrapManagedTunnelOAuth && (!cloudflareApiToken || !cloudflareAccountId)
   );
 }
 if (!options.has('skip-login') && !hasCloudflareApiToken) {
-  await run('pnpm', ['--filter', '@vps-agent/control-worker', 'exec', 'wrangler', 'login']);
+  await run('pnpm', ['--filter', '@vacps/control-worker', 'exec', 'wrangler', 'login']);
 } else if (hasCloudflareApiToken) {
   console.log('Using CLOUDFLARE_API_TOKEN; skipping interactive Wrangler OAuth login.');
 }
@@ -123,7 +123,7 @@ if (oauthConfiguration) {
 }
 await run('pnpm', [
   '--filter',
-  '@vps-agent/control-worker',
+  '@vacps/control-worker',
   'exec',
   'wrangler',
   'd1',
@@ -132,7 +132,7 @@ await run('pnpm', [
   databaseName,
   '--remote',
 ]);
-await run('pnpm', ['--filter', '@vps-agent/control-worker', 'run', 'deploy']);
+await run('pnpm', ['--filter', '@vacps/control-worker', 'run', 'deploy']);
 
 console.log('\nControl plane deployed successfully.');
 console.log(`D1 database ID: ${databaseId}`);
@@ -149,7 +149,7 @@ console.log(
 async function createDatabase(name) {
   const output = await capture('pnpm', [
     '--filter',
-    '@vps-agent/control-worker',
+    '@vacps/control-worker',
     'exec',
     'wrangler',
     'd1',
@@ -206,7 +206,7 @@ async function configuredDatabaseId() {
 async function createKvNamespace(binding) {
   const output = await capture('pnpm', [
     '--filter',
-    '@vps-agent/control-worker',
+    '@vacps/control-worker',
     'exec',
     'wrangler',
     'kv',
@@ -274,7 +274,7 @@ async function createManagedTunnelOAuthClient() {
   const client = await cloudflareApi(`/accounts/${cloudflareAccountId}/oauth_clients`, {
     method: 'POST',
     body: JSON.stringify({
-      client_name: 'VPS Agent Managed Tunnels',
+      client_name: 'VACPS Managed Tunnels',
       grant_types: ['authorization_code', 'refresh_token'],
       redirect_uris: [redirectUrl],
       response_types: ['code'],
@@ -350,7 +350,7 @@ function oauthScopeId(scopes, name) {
 async function putSecret(name, value) {
   await run(
     'pnpm',
-    ['--filter', '@vps-agent/control-worker', 'exec', 'wrangler', 'secret', 'put', name],
+    ['--filter', '@vacps/control-worker', 'exec', 'wrangler', 'secret', 'put', name],
     `${value}\n`,
   );
 }
@@ -359,7 +359,7 @@ async function workerSecretNames() {
   try {
     const output = await capture('pnpm', [
       '--filter',
-      '@vps-agent/control-worker',
+      '@vacps/control-worker',
       'exec',
       'wrangler',
       'secret',
@@ -475,7 +475,7 @@ Options:
   --admin-password <password>
                            Control-panel password. Prefer CONTROL_PANEL_PASSWORD
                            so it is not retained in shell history.
-  --database-name <name>   D1 name, default: vps-agent-control.
+  --database-name <name>   D1 name, default: vacps-control.
   --database-id <uuid>     Reuse an existing D1 database instead of creating one.
   --oauth-kv-id <id>       Reuse an existing OAUTH_KV namespace instead of creating one.
   --cloudflare-account-id <id>

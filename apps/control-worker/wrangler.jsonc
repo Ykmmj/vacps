@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "vps-agent-control",
+  "name": "vacps-control",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-17",
   // `global_fetch_strictly_public` is required by @cloudflare/workers-oauth-provider for its
@@ -17,7 +17,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "vps-agent-control",
+      "database_name": "vacps-control",
       "database_id": "810577ab-90fe-4008-a2f6-f36f915ab041",
       "migrations_dir": "migrations",
     },

@@ -1,4 +1,4 @@
-import type { CreateTaskInput, TaskSource, TaskStatus } from '@vps-agent/contracts';
+import type { CreateTaskInput, TaskSource, TaskStatus } from '@vacps/contracts';
 
 import { AppError } from '../lib/http.js';
 import type { BackendClient } from '../registry/backend-client.js';

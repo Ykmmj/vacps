@@ -17,7 +17,7 @@ describe('managed tunnel naming', () => {
   it('parses vacps and legacy vps names', () => {
     expect(parseBackendIdFromTunnelName('vacps-715f765653e6')).toBe('vacps-715f765653e6');
     expect(parseBackendIdFromTunnelName('vps-715f765653e6')).toBe('vps-715f765653e6');
-    expect(parseBackendIdFromTunnelName('VPS Agent vps-715f765653e6')).toBe('vps-715f765653e6');
+    expect(parseBackendIdFromTunnelName('VACPS vps-715f765653e6')).toBe('vps-715f765653e6');
     expect(parseBackendIdFromTunnelName('edge-node')).toBeUndefined();
   });
 });

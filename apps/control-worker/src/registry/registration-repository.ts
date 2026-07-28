@@ -2,7 +2,7 @@ import type {
   BackendRegistration,
   RegisterBackendInput,
   RegistrationStatus,
-} from '@vps-agent/contracts';
+} from '@vacps/contracts';
 
 import { AppError } from '../lib/http.js';
 

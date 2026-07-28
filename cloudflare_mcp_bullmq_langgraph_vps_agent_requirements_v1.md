@@ -1,4 +1,4 @@
-# VPS Agent 控制平台需求与架构设计
+# VACPS 控制平台需求与架构设计
 
 > 版本：v1.0  
 > 状态：待实现  
@@ -120,7 +120,7 @@ Redis 不是永久数据库。D1 和 VPS SQLite 才是需要备份的数据。
               ┌─────────────┼─────────────┐
               ▼             ▼             ▼
 ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
-│ VPS Agent LA      │ │ VPS Agent Tokyo   │ │ VPS Agent EU      │
+│ VACPS LA      │ │ VACPS Tokyo   │ │ VACPS EU      │
 │                   │ │                   │ │                   │
 │ HTTP Backend API  │ │ HTTP Backend API  │ │ HTTP Backend API  │
 │ BullMQ Producer   │ │ BullMQ Producer   │ │ BullMQ Producer   │
@@ -139,7 +139,7 @@ Redis 不是永久数据库。D1 和 VPS SQLite 才是需要备份的数据。
 ### 3.1 关键约束
 
 - Cloudflare Worker 不直接连接 Redis。
-- 所有 BullMQ 操作都由 VPS Agent Backend 执行。
+- 所有 BullMQ 操作都由 VACPS Backend 执行。
 - 每台 VPS 使用独立 BullMQ Queue。
 - Cloudflare Worker 通过 HTTPS 调用目标 VPS Backend。
 - VPS Backend 可以通过 Cloudflare Tunnel 暴露，不开放原始服务端口。
@@ -151,7 +151,7 @@ Redis 不是永久数据库。D1 和 VPS SQLite 才是需要备份的数据。
 
 ### 4.1 Backend
 
-Backend 表示一台安装了 VPS Agent 的服务器。
+Backend 表示一台安装了 VACPS 的服务器。
 
 ```ts
 interface Backend {
@@ -291,9 +291,9 @@ audit_events
 
 D1 中的 Task 只保存索引和摘要，完整日志仍在目标 VPS。
 
-### 5.3 VPS Agent Backend
+### 5.3 VACPS Backend
 
-每台 VPS 运行同一个 `vps-agent` 程序，内部包含：
+每台 VPS 运行同一个 `vacps` 程序，内部包含：
 
 ```text
 HTTP API
@@ -825,7 +825,7 @@ Backend ID
 区域
 标签
 在线状态
-VPS Agent 版本
+VACPS 版本
 Pi 状态
 Redis 状态
 Worker 状态
@@ -1342,7 +1342,7 @@ LangGraph 负责暂停和恢复；CommandPolicy 负责判断每条命令。
 2. Web UI 和管理 API 使用 Cloudflare Access。
 3. MCP 使用可验证的用户身份或 OAuth。
 4. Redis 只允许 TLS 连接，不向公网暴露自建 6379。
-5. VPS Agent 使用专用 Linux 用户。
+5. VACPS 使用专用 Linux 用户。
 6. 是否允许 root 由 VPS sudoers 配置决定。
 7. 所有执行命令必须记录。
 8. Token、API Key 和模型密钥不得写入日志。
@@ -1399,7 +1399,7 @@ Task 状态 = dispatch_failed
 ## 18. 项目代码结构
 
 ```text
-vps-agent-platform/
+vacps/
 ├── apps/
 │   ├── control-worker/
 │   │   ├── src/
@@ -1413,7 +1413,7 @@ vps-agent-platform/
 │   │   ├── migrations/
 │   │   └── wrangler.jsonc
 │   │
-│   └── vps-agent/
+│   └── vacps/
 │       ├── src/
 │       │   ├── server/
 │       │   ├── queue/
@@ -1439,7 +1439,7 @@ vps-agent-platform/
 
 ```text
 control-worker
-vps-agent
+vacps
 contracts
 ```
 
@@ -1502,7 +1502,7 @@ https://agent.example.com/mcp
 一个代码包、一个 systemd 服务：
 
 ```text
-vps-agent.service
+vacps.service
 ```
 
 运行内容：
@@ -1524,8 +1524,8 @@ BACKEND_SHARED_TOKEN
 LISTEN_HOST=127.0.0.1
 LISTEN_PORT=3100
 REDIS_URL=rediss://...
-DATABASE_PATH=/var/lib/vps-agent/agent.db
-LOG_DIR=/var/lib/vps-agent/logs
+DATABASE_PATH=/var/lib/vacps/agent.db
+LOG_DIR=/var/lib/vacps/logs
 WORKER_CONCURRENCY=1
 PI_COMMAND=pi
 DEFAULT_PROFILE=full
@@ -1583,7 +1583,7 @@ https://la-agent.example.com
 
 ## 22. 推荐实现顺序
 
-### 阶段 1：VPS Agent 最小闭环
+### 阶段 1：VACPS 最小闭环
 
 ```text
 /health
@@ -1699,7 +1699,7 @@ Cloudflare Workers
 D1
 负责控制面的永久定义和索引
 
-VPS Agent Backend
+VACPS Backend
 负责接收目标节点任务并操作本节点队列
 
 BullMQ

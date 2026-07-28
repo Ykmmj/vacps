@@ -4,7 +4,7 @@ import {
   type BackendStatus,
   type CreateBackendInput,
   type UpdateBackendInput,
-} from '@vps-agent/contracts';
+} from '@vacps/contracts';
 
 import { AppError } from '../lib/http.js';
 

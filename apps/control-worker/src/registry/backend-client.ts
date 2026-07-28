@@ -3,7 +3,7 @@ import type {
   BackendHealth,
   BackendMetrics,
   BackendStatusResponse,
-} from '@vps-agent/contracts';
+} from '@vacps/contracts';
 
 import { AppError } from '../lib/http.js';
 import { createControlPlaneSignatureHeaders } from '../security/request-signatures.js';

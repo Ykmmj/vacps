@@ -105,7 +105,7 @@ describe('MCP OAuth authorize page', () => {
     expect(response.headers.get('location')).toBe(
       'https://client.example/callback?code=auth-code&state=state-xyz',
     );
-    expect(response.headers.get('set-cookie')).toContain('vps_agent_control_session=');
+    expect(response.headers.get('set-cookie')).toContain('vacps_control_session=');
   });
 
   it('completes authorization with an existing session and no password', async () => {

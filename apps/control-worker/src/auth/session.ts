@@ -1,7 +1,7 @@
 import type { Env } from '../env.js';
 import { AppError } from '../lib/http.js';
 
-const SESSION_COOKIE = 'vps_agent_control_session';
+const SESSION_COOKIE = 'vacps_control_session';
 export const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
 const encoder = new TextEncoder();
 

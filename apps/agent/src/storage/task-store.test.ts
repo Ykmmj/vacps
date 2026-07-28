@@ -19,7 +19,7 @@ afterEach(async () => {
 
 describe('TaskStore', () => {
   it('persists a task and its audited command', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'vps-agent-store-'));
+    const directory = await mkdtemp(join(tmpdir(), 'vacps-store-'));
     temporaryDirectories.push(directory);
     const taskId = randomUUID();
     const store = new TaskStore(join(directory, 'agent.db'));
@@ -59,7 +59,7 @@ describe('TaskStore', () => {
   });
 
   it('persists accepted control-plane nonces to reject a replay after restart', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'vps-agent-store-'));
+    const directory = await mkdtemp(join(tmpdir(), 'vacps-store-'));
     temporaryDirectories.push(directory);
     const databasePath = join(directory, 'agent.db');
     const expiresAt = new Date(Date.now() + 60_000).toISOString();

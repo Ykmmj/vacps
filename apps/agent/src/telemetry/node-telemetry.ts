@@ -1,7 +1,7 @@
 import { readFile, statfs } from 'node:fs/promises';
 import os from 'node:os';
 
-import type { BackendStatus, BackendSystem } from '@vps-agent/contracts';
+import type { BackendStatus, BackendSystem } from '@vacps/contracts';
 
 import type { AgentConfig } from '../config.js';
 import type { PiRuntime } from '../pi/pi-runtime.js';

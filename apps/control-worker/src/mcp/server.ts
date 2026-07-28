@@ -5,7 +5,7 @@ import {
   taskStatuses,
   type CreateScheduleInput,
   type CreateTaskInput,
-} from '@vps-agent/contracts';
+} from '@vacps/contracts';
 import { z } from 'zod';
 
 import type { Env } from '../env.js';
@@ -103,7 +103,7 @@ export function createMcpServer(env: Env): McpServer {
   const client = new BackendClient(env.CONTROL_PLANE_SIGNING_PRIVATE_KEY);
   const tasks = new TaskService(env.DB, backends, client);
   const schedules = new ScheduleService(env.DB, backends, client, tasks);
-  const server = new McpServer({ name: 'vps-agent-platform', version: '0.1.0' });
+  const server = new McpServer({ name: 'vacps', version: '0.1.0' });
   const respond = (value: unknown) => ({
     structuredContent: value as Record<string, unknown>,
     content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],

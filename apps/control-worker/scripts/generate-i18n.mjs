@@ -7,7 +7,7 @@ await compile({
   project: fileURLToPath(new URL('project.inlang', packageRoot)),
   outdir: fileURLToPath(new URL('ui/src/paraglide', packageRoot)),
   strategy: ['localStorage', 'preferredLanguage', 'baseLocale'],
-  localStorageKey: 'vps-agent-locale',
+  localStorageKey: 'vacps-locale',
   emitTsDeclarations: true,
   silent: true,
 });

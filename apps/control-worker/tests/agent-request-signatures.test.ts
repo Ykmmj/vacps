@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createAgentSignatureHeaders,
   verifyControlPlaneRequest,
-} from '../../vps-agent/src/security/request-signatures.js';
+} from '../../agent/src/security/request-signatures.js';
 import {
   createControlPlaneSignatureHeaders,
   verifyAgentRequestSignature,

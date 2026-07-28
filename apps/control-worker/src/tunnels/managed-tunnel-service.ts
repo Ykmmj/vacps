@@ -454,7 +454,7 @@ export function isManagedBackendId(value: string): boolean {
 export function parseBackendIdFromTunnelName(name: string): string | undefined {
   const trimmed = name.trim();
   if (isManagedBackendId(trimmed)) return trimmed;
-  // Legacy display names: "VPS Agent vps-715f765653e6"
+  // Legacy display names: "VACPS vps-715f765653e6"
   const embedded = trimmed.match(/\b((?:vacps|vps)-[a-f0-9]{12})\b/i);
   if (embedded?.[1]) return embedded[1].toLowerCase();
   return undefined;

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { createTaskSchema, taskDispatchSchema } from '@vps-agent/contracts';
+import { createTaskSchema, taskDispatchSchema } from '@vacps/contracts';
 import type { AgentConfig } from '../config.js';
 import type { PiRuntime } from '../pi/pi-runtime.js';
 import type { TaskQueue } from '../queue/task-queue.js';

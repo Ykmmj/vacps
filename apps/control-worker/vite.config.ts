@@ -16,7 +16,7 @@ export default defineConfig({
       project: './project.inlang',
       outdir: './ui/src/paraglide',
       strategy: ['localStorage', 'preferredLanguage', 'baseLocale'],
-      localStorageKey: 'vps-agent-locale',
+      localStorageKey: 'vacps-locale',
       emitTsDeclarations: true,
     }),
     tailwindcss(),

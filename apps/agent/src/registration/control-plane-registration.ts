@@ -2,7 +2,7 @@ import {
   backendTelemetrySchema,
   telemetrySettingsSchema,
   type BackendStatus,
-} from '@vps-agent/contracts';
+} from '@vacps/contracts';
 
 import type { AgentConfig } from '../config.js';
 import { publicInterfaceAddresses } from '../network/public-interface-addresses.js';

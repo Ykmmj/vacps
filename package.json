@@ -1,8 +1,8 @@
 {
-  "name": "vps-agent-platform",
+  "name": "vacps",
   "version": "0.1.0",
   "private": true,
-  "description": "Cloudflare control plane and VPS-resident task agents.",
+  "description": "Cloudflare control plane and VACPS multi-host task agents.",
   "license": "MIT",
   "packageManager": "pnpm@10.14.0",
   "engines": {
@@ -15,14 +15,14 @@
     "check": "pnpm format:check && pnpm typecheck && pnpm test",
     "configure:managed-tunnels": "bash scripts/configure-managed-tunnels.sh",
     "repair:managed-tunnel-account": "bash scripts/configure-managed-tunnel-account.sh",
-    "dev:control": "pnpm --filter @vps-agent/control-worker dev",
-    "dev:agent": "pnpm --filter @vps-agent/vps-agent dev",
+    "dev:control": "pnpm --filter @vacps/control-worker dev",
+    "dev:agent": "pnpm --filter @vacps/agent dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "setup:cloudflare": "node scripts/run-cloudflare-setup.mjs",
     "test": "pnpm -r test",
-    "typecheck": "pnpm --filter @vps-agent/contracts build && pnpm -r typecheck"
+    "typecheck": "pnpm --filter @vacps/contracts build && pnpm -r typecheck"
   },
   "devDependencies": {
     "@eslint/js": "^9.29.0",

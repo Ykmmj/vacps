@@ -1,4 +1,4 @@
-import type { BackendStatus } from '@vps-agent/contracts';
+import type { BackendStatus } from '@vacps/contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import { BackendRepository } from '../src/registry/repository.js';

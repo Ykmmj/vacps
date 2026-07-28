@@ -105,7 +105,7 @@
   "noTask": "任务通过 MCP 或计划工作流提交。",
   "mcpCopied": "MCP 地址已复制",
   "control": "控制台",
-  "footer": "VPS Agent · Cloudflare Worker + D1 + BullMQ",
+  "footer": "VACPS · Cloudflare Worker + D1 + BullMQ",
   "clipboardUnavailable": "剪贴板访问不可用。",
   "cachedTelemetry": "缓存遥测",
   "system": "系统",
