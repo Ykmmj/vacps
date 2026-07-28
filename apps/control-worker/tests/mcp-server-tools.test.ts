@@ -173,7 +173,7 @@ describe('MCP server tools', () => {
     ];
     expect(startPublished.oneOf).toHaveLength(2);
     expect(published.tool_schema_version).toBe('2.0');
-    expect(published.mcp_server_version).toBe('0.4.5');
+    expect(published.mcp_server_version).toBe('0.4.6');
 
     await client.close();
   });

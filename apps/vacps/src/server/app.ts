@@ -137,6 +137,11 @@ export async function createServer(input: {
             message:
               'Stream version changed (log rotated, rebuilt, or replaced). Restart from offset 0 with the new stream_version.',
             current_stream_version: streamVersion,
+            details: {
+              expected_stream_version: expected,
+              current_stream_version: streamVersion,
+              restart_offset: 0,
+            },
           },
         });
       }

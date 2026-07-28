@@ -153,7 +153,7 @@ export function createMcpServer(env: Env): McpServer {
         category: categoryFor(app.code),
         retryable: isRetryable(app.code),
         retry_after_ms: null as number | null,
-        details: {} as Record<string, unknown>,
+        details: app.details ?? {},
       },
     };
     return {

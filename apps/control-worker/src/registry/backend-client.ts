@@ -306,20 +306,36 @@ export class BackendClient {
         },
       });
       const responseBody = (await response.json().catch(() => undefined)) as
-        { error?: { message?: string; code?: string } } | undefined;
+        | {
+            error?: {
+              message?: string;
+              code?: string;
+              current_stream_version?: string;
+              details?: Record<string, unknown>;
+            };
+          }
+        | undefined;
       if (!response.ok) {
-        const detail = responseBody?.error?.message;
+        const err = responseBody?.error;
+        const detail = err?.message;
         const code =
-          responseBody?.error?.code ??
+          err?.code ??
           (response.status === 404
             ? 'backend_not_found'
             : response.status >= 400 && response.status < 500
               ? 'backend_client_error'
               : 'backend_request_failed');
+        const details: Record<string, unknown> = {
+          ...(err?.details ?? {}),
+          ...(err?.current_stream_version
+            ? { current_stream_version: err.current_stream_version }
+            : {}),
+        };
         throw new AppError(
           code,
           detail ?? describeBackendHttpFailure(response.status, targetUrl),
           response.status >= 400 && response.status < 500 ? response.status : 502,
+          details,
         );
       }
       return responseBody;
