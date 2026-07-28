@@ -23,6 +23,7 @@ import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
 import { handleAuthorize } from './mcp/authorize-page.js';
 import { createMcpServer } from './mcp/server.js';
+import { publicToolJsonSchemas } from './mcp/tool-schemas.js';
 import { BackendClient } from './registry/backend-client.js';
 import { CloudflareOAuthRepository } from './registry/cloudflare-oauth-repository.js';
 import { ManagedTunnelRepository } from './registry/managed-tunnel-repository.js';
@@ -146,6 +147,11 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     if (!isAgentRequest) {
       await requireAuthenticated(request, env);
       if (isStateChanging(request)) requireSameOrigin(request);
+    }
+
+    // Operators / CI can verify tools/list contracts without an MCP client cache.
+    if (resource === 'tool-schemas' && request.method === 'GET') {
+      return json({ ok: true, ...publicToolJsonSchemas() });
     }
 
     if (resource === 'dashboard' && request.method === 'GET') {
