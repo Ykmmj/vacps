@@ -1,0 +1,26 @@
+diff --git a/dist/cjs/types.js b/dist/cjs/types.js
+index e41c81c703d74bed1154c3f83d44d32dfbfe0867..040a523b153ad4f9f29011459cfe1913405dfcb4 100644
+--- a/dist/cjs/types.js
++++ b/dist/cjs/types.js
+@@ -41,7 +41,7 @@ exports.JSONRPC_VERSION = '2.0';
+  *
+  * @internal
+  */
+-const AssertObjectSchema = z.custom((v) => v !== null && (typeof v === 'object' || typeof v === 'function'));
++const AssertObjectSchema = z.any();
+ /**
+  * A progress token, used to associate progress notifications with the original request.
+  */
+diff --git a/dist/esm/types.js b/dist/esm/types.js
+index 866da3e68ca0ace1c524e8dcbd9d1370a9e39b84..b1929f83abd57cf698f47077a00a31ebc452039d 100644
+--- a/dist/esm/types.js
++++ b/dist/esm/types.js
+@@ -10,7 +10,7 @@ export const JSONRPC_VERSION = '2.0';
+  *
+  * @internal
+  */
+-const AssertObjectSchema = z.custom((v) => v !== null && (typeof v === 'object' || typeof v === 'function'));
++const AssertObjectSchema = z.any();
+ /**
+  * A progress token, used to associate progress notifications with the original request.
+  */

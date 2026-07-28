@@ -1,5 +1,4 @@
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import {
   createScheduleSchema,
   backendTelemetrySchema,
@@ -22,7 +21,6 @@ import { CloudflareOAuthService } from './cloudflare/oauth-service.js';
 import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
 import { handleAuthorize } from './mcp/authorize-page.js';
-import { createMcpServer } from './mcp/server.js';
 import { publicToolJsonSchemas } from './mcp/tool-schemas.js';
 import { BackendClient } from './registry/backend-client.js';
 import { CloudflareOAuthRepository } from './registry/cloudflare-oauth-repository.js';
@@ -40,9 +38,17 @@ import { ManagedTunnelService } from './tunnels/managed-tunnel-service.js';
 // The Remote MCP endpoint. The OAuth provider validates the bearer token before delegating here, so
 // unlike the cookie-authenticated WebUI there is no session or same-origin check — the token replaces
 // both, and the granted identity is available on `ctx.props`.
+//
+// IMPORTANT: load MCP SDK + server via dynamic import. Static import evaluates MCP types.ts
+// top-level z.custom() during Worker startup; esbuild + Zod v4 then throws
+// "Class2 is not a constructor" (CF error 10021) on deploy validation.
 const mcpApiHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
+      const [{ createMcpServer }, { WebStandardStreamableHTTPServerTransport }] = await Promise.all([
+        import('./mcp/server.js'),
+        import('@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'),
+      ]);
       // MCP SDK >=1.26 requires a fresh server for every stateless request.
       const server = createMcpServer(env);
       const transport = new WebStandardStreamableHTTPServerTransport();
