@@ -78,6 +78,17 @@ describe('MCP server tools', () => {
     const caps = tools.find((tool) => tool.name === 'vacps.capabilities.get');
     expect(caps, 'vacps.capabilities.get must be advertised in tools/list').toBeTruthy();
 
+    // Server version must bump when contracts change (forces client cache refresh).
+    const { publicToolJsonSchemas } = await import('../src/mcp/tool-schemas.js');
+    const published = publicToolJsonSchemas();
+    expect(published.mcp_server_version).toBe('0.3.0');
+    const writePublished = (published.tools as Record<string, { required?: string[] }>)[
+      'vacps.files.write'
+    ];
+    expect(writePublished.required).toEqual(
+      expect.arrayContaining(['backend_id', 'path', 'content', 'mode']),
+    );
+
     await client.close();
   });
 });

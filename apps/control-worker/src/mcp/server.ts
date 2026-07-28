@@ -14,6 +14,15 @@ import { BackendClient } from '../registry/backend-client.js';
 import { BackendRepository } from '../registry/repository.js';
 import { ScheduleService } from '../schedules/schedule-service.js';
 import { TaskService } from '../tasks/task-service.js';
+import {
+  capabilitiesGetInputSchema,
+  commandExecInputSchema,
+  filesWriteInputSchema,
+  MCP_PROTOCOL_VERSION,
+  processStartInputSchema,
+  shellExecInputSchema,
+  TOOL_SCHEMA_REVISION,
+} from './tool-schemas.js';
 
 const SCHEMA_VERSION = '1.0';
 
@@ -29,7 +38,11 @@ export function createMcpServer(env: Env): McpServer {
   const client = new BackendClient(env.CONTROL_PLANE_SIGNING_PRIVATE_KEY);
   const tasks = new TaskService(env.DB, backends, client);
   const schedules = new ScheduleService(env.DB, backends, client, tasks);
-  const server = new McpServer({ name: 'vacps', version: '0.1.0' });
+  // Bump version when tools/list contracts change so MCP clients refresh caches.
+  const server = new McpServer({
+    name: 'vacps',
+    version: MCP_PROTOCOL_VERSION,
+  });
 
   const meta = () => ({
     ok: true as const,
@@ -382,25 +395,16 @@ export function createMcpServer(env: Env): McpServer {
     {
       description:
         'Run a non-interactive program on a backend (argv form, no shell). Uses yield_time_ms for sync wait.',
-      inputSchema: z.object({
-        backend_id: z.string().min(1),
-        program: z.string().min(1),
-        arguments: z.array(z.string()).max(1000).optional(),
-        working_directory: z.string().optional(),
-        environment: z.record(z.string(), z.string()).optional(),
-        timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
-        yield_time_ms: z.number().int().min(1).max(120_000).optional(),
-        stdout_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
-        stderr_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
-        idempotency_key: z.string().optional(),
-      }),
+      inputSchema: commandExecInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
     },
     wrap(
       (value) => `command ${String(value.status)} ${String(value.process_id)}`,
       async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.execCommand(backend, args)) as Record<string, unknown>;
+        const parsed = commandExecInputSchema.parse(args);
+        const backend = await requireBackend(parsed.backend_id);
+        return (await client.execCommand(backend, parsed)) as Record<string, unknown>;
       },
     ),
   );
@@ -410,69 +414,33 @@ export function createMcpServer(env: Env): McpServer {
     {
       description:
         'Run a shell command as the agent user with full login environment (bash -lc, sources ~/.bashrc). Prefer vacps.command.exec for non-shell work. Set load_user_environment=false only for a clean --noprofile --norc shell.',
-      // Full z.object so tools/list JSON Schema matches runtime validation (not raw-shape z4mini wrap).
-      inputSchema: z.object({
-        backend_id: z.string().min(1),
-        command: z.string().min(1),
-        shell: z.enum(['/bin/bash', '/bin/sh']).optional(),
-        working_directory: z.string().optional(),
-        environment: z.record(z.string(), z.string()).optional(),
-        timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
-        yield_time_ms: z.number().int().min(1).max(120_000).optional(),
-        stdout_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
-        stderr_max_bytes: z.number().int().min(0).max(1_048_576).optional(),
-        // Default true at runtime (full agent login env). Explicit false opts out.
-        load_user_environment: z.boolean().optional(),
-        idempotency_key: z.string().optional(),
-      }),
+      inputSchema: shellExecInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
     },
     wrap(
       (value) => `shell ${String(value.status)} ${String(value.process_id)}`,
       async (args) => {
-        const backend = await requireBackend(args.backend_id);
-        return (await client.execShell(backend, args)) as Record<string, unknown>;
+        const parsed = shellExecInputSchema.parse(args);
+        const backend = await requireBackend(parsed.backend_id);
+        return (await client.execShell(backend, parsed)) as Record<string, unknown>;
       },
     ),
   );
-
-  const processStartSchema = z
-    .object({
-      backend_id: z.string().min(1),
-      program: z.string().min(1).optional(),
-      arguments: z.array(z.string()).max(1000).optional(),
-      command: z.string().min(1).optional(),
-      working_directory: z.string().optional(),
-      environment: z.record(z.string(), z.string()).optional(),
-      tty: z.boolean().optional(),
-      timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
-      stdout_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
-      stderr_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
-      idempotency_key: z.string().optional(),
-    })
-    .superRefine((value, context) => {
-      const hasProgram = value.program !== undefined;
-      const hasCommand = value.command !== undefined;
-      if (hasProgram === hasCommand) {
-        context.addIssue({
-          code: 'custom',
-          message: 'Provide exactly one of program or command.',
-        });
-      }
-    });
 
   server.registerTool(
     'vacps.process.start',
     {
       description:
         'Start a long-running or interactive process on a backend. Provide exactly one of program or command (not both, not neither). stdout/stderr_hard_max_bytes are 0..1073741824.',
-      inputSchema: processStartSchema,
+      inputSchema: processStartInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
     },
     wrap(
       (value) => `started ${String(value.process_id)}`,
       async (args) => {
-        const parsed = processStartSchema.parse(args);
+        const parsed = processStartInputSchema.parse(args);
         const backend = await requireBackend(parsed.backend_id);
         return (await client.processStart(backend, parsed)) as Record<string, unknown>;
       },
@@ -692,29 +660,19 @@ export function createMcpServer(env: Env): McpServer {
     ),
   );
 
-  const filesWriteSchema = z.object({
-    backend_id: z.string().min(1),
-    path: z.string().min(1),
-    content: z.string(),
-    // Required — no default. Callers must choose create | overwrite | create_or_overwrite.
-    mode: z.enum(['create', 'overwrite', 'create_or_overwrite']),
-    expected_sha256: z.string().optional(),
-    create_parent_directories: z.boolean().optional(),
-    idempotency_key: z.string().optional(),
-  });
-
   server.registerTool(
     'vacps.files.write',
     {
       description:
         'Write a file on a backend (atomic temp+rename). mode is required: create (fail if exists), overwrite (fail if missing), or create_or_overwrite. Supports idempotency_key + expected_sha256.',
-      inputSchema: filesWriteSchema,
+      inputSchema: filesWriteInputSchema,
       outputSchema: okEnvelope.extend({ path: z.string(), operation: z.string() }).shape,
+      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
     },
     wrap(
       (value) => `Wrote ${String(value.path)} (${String(value.operation)})`,
       async (args) => {
-        const parsed = filesWriteSchema.parse(args);
+        const parsed = filesWriteInputSchema.parse(args);
         const backend = await requireBackend(parsed.backend_id);
         return (await client.writeFile(backend, parsed)) as Record<string, unknown>;
       },
@@ -797,14 +755,16 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.capabilities.get',
     {
       description:
-        'Report backend tool capabilities (e.g. whether ripgrep is installed, grep engine, glob dialect).',
-      inputSchema: { backend_id: z.string() },
+        'Report backend tool capabilities (ripgrep availability, grep engine, glob dialect, shell environment, limits).',
+      inputSchema: capabilitiesGetInputSchema,
       outputSchema: okEnvelope.extend({ features: z.unknown(), executables: z.unknown() }).shape,
+      _meta: { tool_schema_revision: TOOL_SCHEMA_REVISION },
     },
     wrap(
       () => 'capabilities',
       async (args) => {
-        const backend = await requireBackend(args.backend_id);
+        const parsed = capabilitiesGetInputSchema.parse(args);
+        const backend = await requireBackend(parsed.backend_id);
         return (await client.getCapabilities(backend)) as Record<string, unknown>;
       },
     ),
