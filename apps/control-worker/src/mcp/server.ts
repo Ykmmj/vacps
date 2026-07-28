@@ -529,7 +529,8 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.files.read',
     {
-      description: 'Read a file on a backend by absolute path with optional line range and byte cap.',
+      description:
+        'Read a file on a backend by absolute path with optional line range and byte cap.',
       inputSchema: {
         backend_id: z.string(),
         path: z.string(),
@@ -638,7 +639,8 @@ export function createMcpServer(env: Env): McpServer {
       outputSchema: okEnvelope.extend({ matches: z.array(z.unknown()) }).shape,
     },
     wrap(
-      (value) => `Grep ${String(value.match_count ?? (value.matches as unknown[])?.length ?? 0)} hits`,
+      (value) =>
+        `Grep ${String(value.match_count ?? (value.matches as unknown[])?.length ?? 0)} hits`,
       async (args) => {
         const backend = await requireBackend(args.backend_id);
         return (await client.grep(backend, args)) as Record<string, unknown>;
@@ -649,7 +651,8 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.files.edit',
     {
-      description: 'Exact string replacement in a file on a backend (old_text must be unique unless replace_all).',
+      description:
+        'Exact string replacement in a file on a backend (old_text must be unique unless replace_all).',
       inputSchema: {
         backend_id: z.string(),
         path: z.string(),

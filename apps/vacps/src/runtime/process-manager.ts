@@ -277,12 +277,15 @@ export class ProcessManager {
       signal === 'sigkill' ? 'SIGKILL' : signal === 'sigint' ? 'SIGINT' : 'SIGTERM';
     managed.child.kill(nodeSignal);
     if (signal !== 'sigkill') {
-      setTimeout(() => {
-        if (managed.status === 'running') {
-          managed.child.kill('SIGKILL');
-          this.finish(managed, 'cancelled', null, 'SIGKILL', false);
-        }
-      }, clamp(gracePeriodMs, 0, 60_000));
+      setTimeout(
+        () => {
+          if (managed.status === 'running') {
+            managed.child.kill('SIGKILL');
+            this.finish(managed, 'cancelled', null, 'SIGKILL', false);
+          }
+        },
+        clamp(gracePeriodMs, 0, 60_000),
+      );
     } else {
       this.finish(managed, 'cancelled', null, 'SIGKILL', false);
     }

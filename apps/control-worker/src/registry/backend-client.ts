@@ -104,7 +104,10 @@ export class BackendClient {
     });
   }
 
-  async editFile(backend: Pick<Backend, 'baseUrl'>, body: Record<string, unknown>): Promise<unknown> {
+  async editFile(
+    backend: Pick<Backend, 'baseUrl'>,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
     return this.request(backend, '/fs/edit', { method: 'POST', body: JSON.stringify(body) });
   }
 
@@ -130,7 +133,10 @@ export class BackendClient {
     });
   }
 
-  async moveFile(backend: Pick<Backend, 'baseUrl'>, body: Record<string, unknown>): Promise<unknown> {
+  async moveFile(
+    backend: Pick<Backend, 'baseUrl'>,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
     return this.request(backend, '/fs/move', { method: 'POST', body: JSON.stringify(body) });
   }
 
@@ -292,8 +298,7 @@ export class BackendClient {
         },
       });
       const responseBody = (await response.json().catch(() => undefined)) as
-        | { error?: { message?: string; code?: string } }
-        | undefined;
+        { error?: { message?: string; code?: string } } | undefined;
       if (!response.ok) {
         const detail = responseBody?.error?.message;
         throw new AppError(

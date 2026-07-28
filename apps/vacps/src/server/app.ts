@@ -268,7 +268,11 @@ export async function createServer(input: {
 
   app.post('/fs/edit', async (request, reply) => {
     const body = request.body as Record<string, unknown>;
-    if (typeof body.path !== 'string' || typeof body.old_text !== 'string' || typeof body.new_text !== 'string')
+    if (
+      typeof body.path !== 'string' ||
+      typeof body.old_text !== 'string' ||
+      typeof body.new_text !== 'string'
+    )
       return reply.code(400).send({
         error: { code: 'validation_error', message: 'path, old_text, and new_text are required.' },
       });
@@ -281,7 +285,8 @@ export async function createServer(input: {
           oldText: body.old_text,
           newText: body.new_text,
           replaceAll: body.replace_all === true,
-          expectedSha256: typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+          expectedSha256:
+            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
         })),
       };
     } catch (error) {
@@ -307,7 +312,8 @@ export async function createServer(input: {
           path: body.path,
           content: body.content,
           mode,
-          expectedSha256: typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
+          expectedSha256:
+            typeof body.expected_sha256 === 'string' ? body.expected_sha256 : undefined,
           createParentDirectories: body.create_parent_directories !== false,
         })),
       };
@@ -403,10 +409,9 @@ export async function createServer(input: {
     try {
       const result = await processes.exec({
         program: body.program,
-        arguments: Array.isArray(body.arguments)
-          ? body.arguments.map(String)
-          : undefined,
-        workingDirectory: typeof body.working_directory === 'string' ? body.working_directory : undefined,
+        arguments: Array.isArray(body.arguments) ? body.arguments.map(String) : undefined,
+        workingDirectory:
+          typeof body.working_directory === 'string' ? body.working_directory : undefined,
         environment:
           body.environment && typeof body.environment === 'object'
             ? (body.environment as Record<string, string>)
@@ -434,7 +439,8 @@ export async function createServer(input: {
       const result = await processes.exec({
         command: body.command,
         shell: body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash',
-        workingDirectory: typeof body.working_directory === 'string' ? body.working_directory : undefined,
+        workingDirectory:
+          typeof body.working_directory === 'string' ? body.working_directory : undefined,
         environment:
           body.environment && typeof body.environment === 'object'
             ? (body.environment as Record<string, string>)
@@ -497,7 +503,8 @@ export async function createServer(input: {
         program: typeof body.program === 'string' ? body.program : undefined,
         arguments: Array.isArray(body.arguments) ? body.arguments.map(String) : undefined,
         command: typeof body.command === 'string' ? body.command : undefined,
-        workingDirectory: typeof body.working_directory === 'string' ? body.working_directory : undefined,
+        workingDirectory:
+          typeof body.working_directory === 'string' ? body.working_directory : undefined,
         environment:
           body.environment && typeof body.environment === 'object'
             ? (body.environment as Record<string, string>)
@@ -548,7 +555,9 @@ export async function createServer(input: {
     if (typeof body.process_id !== 'string' || typeof body.data !== 'string')
       return reply
         .code(400)
-        .send({ error: { code: 'validation_error', message: 'process_id and data are required.' } });
+        .send({
+          error: { code: 'validation_error', message: 'process_id and data are required.' },
+        });
     try {
       return {
         ok: true,
