@@ -34,8 +34,8 @@ The project provides an interactive control-plane bootstrap and a non-Docker VPS
 ```bash
 read -rsp 'Control panel password: ' CONTROL_PANEL_PASSWORD; echo
 export CONTROL_PANEL_PASSWORD
-# Logs in to Cloudflare, creates/binds D1 and KV, creates Worker secrets and a control-plane
-# Ed25519 signing identity, migrates, and deploys.
+# Logs in to Cloudflare, creates/binds D1 and KV, bootstraps the Worker if missing,
+# creates Worker secrets and a control-plane Ed25519 signing identity, migrates, and deploys.
 pnpm setup:cloudflare
 unset CONTROL_PANEL_PASSWORD
 ```

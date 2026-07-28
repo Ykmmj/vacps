@@ -87,9 +87,11 @@ const databaseId = suppliedDatabaseId ?? (await createDatabase(databaseName));
 await updateDatabaseBinding(databaseId);
 const oauthKvNamespaceId = suppliedOAuthKvNamespaceId ?? (await createKvNamespace('OAUTH_KV'));
 await updateOAuthKvBinding(oauthKvNamespaceId);
+// Secrets can only be stored after the Worker script exists. First-time setup therefore
+// bootstraps an initial deploy (without secrets) when secret list reports the Worker missing.
+const signingSecretNames = await ensureWorkerExistsForSecrets();
 // The control-plane identity signs every Worker -> Agent request. Its public half is intentionally
 // returned with each one-time registration token so an Agent can authenticate the Worker locally.
-const signingSecretNames = await workerSecretNames();
 const hasControlPlanePrivateKey = signingSecretNames.has('CONTROL_PLANE_SIGNING_PRIVATE_KEY');
 const hasControlPlanePublicKey = signingSecretNames.has('CONTROL_PLANE_SIGNING_PUBLIC_KEY');
 if (hasControlPlanePrivateKey !== hasControlPlanePublicKey) {
@@ -274,7 +276,7 @@ async function createManagedTunnelOAuthClient() {
   const client = await cloudflareApi(`/accounts/${cloudflareAccountId}/oauth_clients`, {
     method: 'POST',
     body: JSON.stringify({
-      client_name: 'VACPS Managed Tunnels',
+      client_name: 'Vacps Managed Tunnels',
       grant_types: ['authorization_code', 'refresh_token'],
       redirect_uris: [redirectUrl],
       response_types: ['code'],
@@ -355,32 +357,83 @@ async function putSecret(name, value) {
   );
 }
 
-async function workerSecretNames() {
-  try {
-    const output = await capture('pnpm', [
-      '--filter',
-      '@vacps/control-worker',
-      'exec',
-      'wrangler',
-      'secret',
-      'list',
-    ]);
+/**
+ * Returns secret names when the Worker exists, or `{ exists: false }` when Cloudflare
+ * reports the script is missing. Other failures (auth, network) are rethrown.
+ */
+async function probeWorkerSecrets() {
+  const result = await captureResult(
+    'pnpm',
+    ['--filter', '@vacps/control-worker', 'exec', 'wrangler', 'secret', 'list'],
+    { quiet: true },
+  );
+  if (result.code === 0) {
+    return { exists: true, names: parseSecretNames(`${result.stdout}\n${result.stderr}`) };
+  }
+  const combined = `${result.stdout}\n${result.stderr}\n${result.errorMessage}`;
+  if (isWorkerNotFoundError(combined)) {
+    return { exists: false, names: new Set() };
+  }
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  throw new Error(
+    `pnpm --filter @vacps/control-worker exec wrangler secret list exited with ${result.code}.`,
+  );
+}
+
+function parseSecretNames(output) {
+  const candidates = [output.trim()];
+  const jsonArray = output.match(/\[[\s\S]*\]/);
+  if (jsonArray) candidates.unshift(jsonArray[0]);
+  for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(output);
-      if (Array.isArray(parsed))
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) {
         return new Set(
           parsed
             .map((entry) => (typeof entry?.name === 'string' ? entry.name : undefined))
             .filter(Boolean),
         );
+      }
     } catch {
-      // Fall through to Wrangler's human-readable output.
+      // Try the next candidate / human-readable fallback.
     }
-    return new Set(output.match(/[A-Z][A-Z0-9_]+/g) ?? []);
-  } catch {
-    // `wrangler secret list` fails when the Worker does not exist yet (first-time setup).
-    return new Set();
   }
+  return new Set(output.match(/[A-Z][A-Z0-9_]+/g) ?? []);
+}
+
+function isWorkerNotFoundError(text) {
+  return (
+    /Worker ["'][^"']+["'] not found/i.test(text) ||
+    /\[code:\s*10007\]/i.test(text) ||
+    /script not found/i.test(text)
+  );
+}
+
+async function bootstrapWorkerDeploy() {
+  // Avoid `pnpm deploy`: it runs ensure:control-plane-identity + migrate, which also need
+  // an existing Worker (or secrets). A bare build + wrangler deploy only creates the script.
+  console.log(
+    'Worker script is not deployed yet; performing an initial deploy so secrets can be stored...',
+  );
+  await run('pnpm', ['--filter', '@vacps/control-worker', 'run', 'build:ui']);
+  await run('pnpm', ['--filter', '@vacps/control-worker', 'run', 'copy:installer']);
+  await run('pnpm', ['--filter', '@vacps/control-worker', 'exec', 'wrangler', 'deploy']);
+}
+
+async function ensureWorkerExistsForSecrets() {
+  let probe = await probeWorkerSecrets();
+  if (!probe.exists) {
+    await bootstrapWorkerDeploy();
+    probe = await probeWorkerSecrets();
+    if (!probe.exists) {
+      throw new Error(
+        'Initial Worker deploy finished, but secret list still reports the Worker as missing. Check CLOUDFLARE_ACCOUNT_ID and token permissions (Workers Scripts: Edit).',
+      );
+    }
+    console.log('Worker is ready; continuing with secret configuration.');
+  }
+  return probe.names;
 }
 
 async function generateControlPlaneSigningKeys() {
@@ -415,6 +468,16 @@ function run(command, args, input) {
 }
 
 function capture(command, args) {
+  // quiet: true so output is written once here (not also inside captureResult).
+  return captureResult(command, args, { quiet: true }).then((result) => {
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (result.code === 0) return `${result.stdout}\n${result.stderr}`;
+    throw new Error(`${command} ${args.join(' ')} exited with ${result.code}.`);
+  });
+}
+
+function captureResult(command, args, { quiet = false } = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: rootDirectory,
@@ -429,13 +492,16 @@ function capture(command, args) {
     child.stderr.on('data', (chunk) => (stderr += chunk));
     child.once('error', reject);
     child.once('close', (code) => {
-      process.stdout.write(stdout);
-      process.stderr.write(stderr);
-      if (code === 0) resolvePromise(`${stdout}\n${stderr}`);
-      else
-        reject(
-          new Error(`${command} ${args.join(' ')} exited with ${code ?? 'an unknown signal'}.`),
-        );
+      if (!quiet) {
+        process.stdout.write(stdout);
+        process.stderr.write(stderr);
+      }
+      resolvePromise({
+        code: code ?? 1,
+        stdout,
+        stderr,
+        errorMessage: `${command} ${args.join(' ')} exited with ${code ?? 'an unknown signal'}.`,
+      });
     });
   });
 }
