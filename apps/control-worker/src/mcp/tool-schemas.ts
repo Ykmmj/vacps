@@ -4,8 +4,79 @@ import { z } from 'zod';
  * Canonical tool input schemas. Used both for MCP registerTool (tools/list)
  * and runtime parse — keep a single source of truth.
  */
-export const MCP_PROTOCOL_VERSION = '0.3.0';
-export const TOOL_SCHEMA_REVISION = '2026-07-28-sync-v1';
+export const MCP_PROTOCOL_VERSION = '0.3.1';
+export const TOOL_SCHEMA_REVISION = '2026-07-28-sync-v2';
+
+const processStartSharedFields = {
+  backend_id: z.string().min(1),
+  working_directory: z.string().optional(),
+  environment: z.record(z.string(), z.string()).optional(),
+  tty: z.boolean().optional(),
+  timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
+  stdout_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
+  stderr_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
+  idempotency_key: z.string().optional(),
+};
+
+/** Runtime + CallTool validation (XOR program/command). */
+export const processStartInputSchema = z
+  .object({
+    ...processStartSharedFields,
+    program: z.string().min(1).optional(),
+    arguments: z.array(z.string()).max(1000).optional(),
+    command: z.string().min(1).optional(),
+  })
+  .superRefine((value, context) => {
+    const hasProgram = value.program !== undefined;
+    const hasCommand = value.command !== undefined;
+    if (hasProgram === hasCommand) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Provide exactly one of program or command.',
+      });
+    }
+  });
+
+/**
+ * Advertised JSON Schema for tools/list — oneOf expresses program XOR command.
+ * MCP SDK only auto-converts plain object Zod schemas (superRefine is invisible),
+ * so tools/list is patched to publish this schema explicitly.
+ */
+export const processStartListJsonSchema: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    backend_id: { type: 'string', minLength: 1 },
+    program: { type: 'string', minLength: 1 },
+    arguments: {
+      type: 'array',
+      maxItems: 1000,
+      items: { type: 'string' },
+    },
+    command: { type: 'string', minLength: 1 },
+    working_directory: { type: 'string' },
+    environment: {
+      type: 'object',
+      additionalProperties: { type: 'string' },
+    },
+    tty: { type: 'boolean' },
+    timeout_ms: { type: 'integer', minimum: 1, maximum: 3_600_000 },
+    stdout_hard_max_bytes: { type: 'integer', minimum: 0, maximum: 1_073_741_824 },
+    stderr_hard_max_bytes: { type: 'integer', minimum: 0, maximum: 1_073_741_824 },
+    idempotency_key: { type: 'string' },
+  },
+  required: ['backend_id'],
+  oneOf: [
+    {
+      required: ['program'],
+      not: { required: ['command'] },
+    },
+    {
+      required: ['command'],
+      not: { required: ['program'] },
+    },
+  ],
+  additionalProperties: false,
+};
 
 export const commandExecInputSchema = z.object({
   backend_id: z.string().min(1),
@@ -34,31 +105,6 @@ export const shellExecInputSchema = z.object({
   idempotency_key: z.string().optional(),
 });
 
-export const processStartInputSchema = z
-  .object({
-    backend_id: z.string().min(1),
-    program: z.string().min(1).optional(),
-    arguments: z.array(z.string()).max(1000).optional(),
-    command: z.string().min(1).optional(),
-    working_directory: z.string().optional(),
-    environment: z.record(z.string(), z.string()).optional(),
-    tty: z.boolean().optional(),
-    timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
-    stdout_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
-    stderr_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
-    idempotency_key: z.string().optional(),
-  })
-  .superRefine((value, context) => {
-    const hasProgram = value.program !== undefined;
-    const hasCommand = value.command !== undefined;
-    if (hasProgram === hasCommand) {
-      context.addIssue({
-        code: 'custom',
-        message: 'Provide exactly one of program or command.',
-      });
-    }
-  });
-
 export const filesWriteInputSchema = z.object({
   backend_id: z.string().min(1),
   path: z.string().min(1),
@@ -82,22 +128,7 @@ export function publicToolJsonSchemas(): Record<string, unknown> {
     tools: {
       'vacps.command.exec': z.toJSONSchema(commandExecInputSchema),
       'vacps.shell.exec': z.toJSONSchema(shellExecInputSchema),
-      // Use the inner object shape for list (superRefine does not appear in JSON Schema).
-      'vacps.process.start': z.toJSONSchema(
-        z.object({
-          backend_id: z.string().min(1),
-          program: z.string().min(1).optional(),
-          arguments: z.array(z.string()).max(1000).optional(),
-          command: z.string().min(1).optional(),
-          working_directory: z.string().optional(),
-          environment: z.record(z.string(), z.string()).optional(),
-          tty: z.boolean().optional(),
-          timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
-          stdout_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
-          stderr_hard_max_bytes: z.number().int().min(0).max(1_073_741_824).optional(),
-          idempotency_key: z.string().optional(),
-        }),
-      ),
+      'vacps.process.start': processStartListJsonSchema,
       'vacps.files.write': z.toJSONSchema(filesWriteInputSchema),
       'vacps.capabilities.get': z.toJSONSchema(capabilitiesGetInputSchema),
     },
