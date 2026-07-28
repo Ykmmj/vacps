@@ -225,8 +225,8 @@ normalize_repository_url() {
 install_nvm_node
 if [[ -e $APP_DIRECTORY ]]; then
   if [[ ! -d $APP_DIRECTORY/.git ||
-    ! -f $APP_DIRECTORY/apps/agent/package.json ||
-    ! -f $APP_DIRECTORY/apps/agent/systemd/vacps.service ||
+    ! -f $APP_DIRECTORY/apps/vacps/package.json ||
+    ! -f $APP_DIRECTORY/apps/vacps/systemd/vacps.service ||
     ! -f $APP_DIRECTORY/packages/contracts/package.json ||
     ! -f $ENVIRONMENT_FILE ||
     ! -f /etc/systemd/system/vacps.service ]]; then
@@ -333,12 +333,12 @@ PI_COMMAND_ARGS_JSON=[]
 EOF
 chmod 640 "$ENVIRONMENT_FILE"
 
-install -m 644 "$APP_DIRECTORY/apps/agent/systemd/vacps.service" /etc/systemd/system/vacps.service
+install -m 644 "$APP_DIRECTORY/apps/vacps/systemd/vacps.service" /etc/systemd/system/vacps.service
 NODE_BINARY=$(command -v node)
 cat >/etc/systemd/system/vacps.service.d/node.conf <<EOF
 [Service]
 ExecStart=
-ExecStart=$NODE_BINARY /opt/vacps/apps/agent/dist/main.js
+ExecStart=$NODE_BINARY /opt/vacps/apps/vacps/dist/main.js
 EOF
 
 if [[ $ALLOW_APT == true ]]; then

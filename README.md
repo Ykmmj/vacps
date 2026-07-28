@@ -3,7 +3,7 @@
 Cloudflare Workers control plane for queued Shell and Pi-powered agent work on multiple VPS hosts. It is a TypeScript pnpm monorepo with exactly three workspaces:
 
 - `apps/control-worker` — same-domain Web UI, management API, D1 registry, schedule reconciliation, and Remote MCP.
-- `apps/agent` — the single process deployed to each VPS: Fastify, BullMQ, LangGraph lifecycle, SQLite, Pi adapter, and Shell executor.
+- `apps/vacps` — the single process deployed to each VPS: Fastify, BullMQ, LangGraph lifecycle, SQLite, Pi adapter, and Shell executor.
 - `packages/contracts` — shared Zod schemas and API contracts.
 
 > **Security warning:** v1 deliberately supports arbitrary commands. Deploy it behind Cloudflare Access, keep the control-panel password private, and do not expose a VACPS port directly to the Internet. Each Agent has its own Ed25519 identity; no shared backend bearer secret exists.
@@ -83,7 +83,7 @@ pnpm --filter @vacps/control-worker exec wrangler d1 migrations apply vacps-cont
 
 # Copy and fill the example files before starting either runtime.
 cp apps/control-worker/.dev.vars.example apps/control-worker/.dev.vars
-cp apps/agent/.env.example apps/agent/.env
+cp apps/vacps/.env.example apps/vacps/.env
 ```
 
 Run the control plane with `pnpm dev:control`. Start a local VACPS only after supplying Redis and a safe test directory in its environment: `pnpm dev:agent`.
