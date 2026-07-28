@@ -50,12 +50,17 @@ describe('MCP server tools', () => {
     expect(write).toBeTruthy();
     const writeSchema = write?.inputSchema as {
       required?: string[];
-      properties?: Record<string, { default?: unknown; minimum?: number }>;
+      properties?: Record<string, { default?: unknown; minimum?: number; enum?: string[] }>;
     };
-    expect(writeSchema.required).toContain('mode');
-    expect(writeSchema.required).toContain('path');
-    expect(writeSchema.required).toContain('content');
+    expect(writeSchema.required).toEqual(
+      expect.arrayContaining(['backend_id', 'path', 'content', 'mode']),
+    );
     expect(writeSchema.properties?.mode?.default).toBeUndefined();
+    expect(writeSchema.properties?.mode?.enum).toEqual([
+      'create',
+      'overwrite',
+      'create_or_overwrite',
+    ]);
 
     const start = tools.find((tool) => tool.name === 'vacps.process.start');
     expect(start).toBeTruthy();
@@ -67,6 +72,11 @@ describe('MCP server tools', () => {
     expect(hard?.maximum).toBe(1_073_741_824);
     // Defaults must not advertise a fake "optional overwrite everything" path.
     expect(hard?.minimum).not.toBeLessThan(0);
+    // No bogus MIN_SAFE_INTEGER from raw-shape conversion.
+    expect(hard?.minimum).not.toBe(Number.MIN_SAFE_INTEGER);
+
+    const caps = tools.find((tool) => tool.name === 'vacps.capabilities.get');
+    expect(caps, 'vacps.capabilities.get must be advertised in tools/list').toBeTruthy();
 
     await client.close();
   });

@@ -333,17 +333,13 @@ EOF
 # Create/repair the agent system user with a full login home (required for shell.exec).
 # Idempotent: existing users keep their files; missing homes and bad /home modes are fixed.
 ensure_service_user() {
-  # /home must be traversable (0755 or 0711). ProtectHome bind also needs a real home.
+  # /home MUST be traversable by agent (0755 or 0711). Mode 000 is a hard failure for bash -lc.
   if [[ ! -d /home ]]; then
-    install -d -m 755 /home
-  else
-    # Fix extreme lockdown (e.g. mode 000) so unprivileged users can reach /home/<user>.
-    local home_mode
-    home_mode=$(stat -c '%a' /home 2>/dev/null || echo 000)
-    if [[ $home_mode == 0* || $home_mode == 000 ]]; then
-      chmod 755 /home || true
-    fi
+    install -d -m 755 -o root -g root /home
   fi
+  chown root:root /home 2>/dev/null || true
+  # Always ensure o+x (and preferably 0755). Some images ship /home as 000 or 700.
+  chmod u=rwx,g=rx,o=rx /home 2>/dev/null || chmod 755 /home || true
 
   if ! getent group "$SERVICE_USER" >/dev/null 2>&1; then
     groupadd --system "$SERVICE_USER"
@@ -399,14 +395,33 @@ EOF
     chmod 644 "$home_dir/.bashrc"
   fi
 
-  # Final smoke: agent must be able to traverse /home and its home directory.
-  if ! runuser -u "$SERVICE_USER" -- test -x /home 2>/dev/null && ! su -s /bin/bash "$SERVICE_USER" -c 'test -x /home' 2>/dev/null; then
+  # Final smoke: agent must traverse /home and load a login shell without Permission denied.
+  if ! runuser -u "$SERVICE_USER" -- test -x /home 2>/dev/null; then
     chmod 755 /home || true
   fi
-  if ! runuser -u "$SERVICE_USER" -- test -x "$home_dir" 2>/dev/null && ! su -s /bin/bash "$SERVICE_USER" -c "test -x '$home_dir'" 2>/dev/null; then
+  if ! runuser -u "$SERVICE_USER" -- test -x "$home_dir" 2>/dev/null; then
     chmod 750 "$home_dir" || true
     chown "$SERVICE_USER:$SERVICE_USER" "$home_dir" || true
   fi
+  if ! runuser -u "$SERVICE_USER" -- \
+    env HOME="$home_dir" USER="$SERVICE_USER" LOGNAME="$SERVICE_USER" SHELL=/bin/bash \
+    /bin/bash -lc 'test -x "$HOME" && id -un' >/dev/null 2>&1; then
+    echo "Warning: agent login shell smoke failed. Check: stat /home /home/$SERVICE_USER" >&2
+    stat -c '%U:%G %a %n' /home "$home_dir" 2>/dev/null || true
+    runuser -u "$SERVICE_USER" -- \
+      env HOME="$home_dir" USER="$SERVICE_USER" LOGNAME="$SERVICE_USER" SHELL=/bin/bash \
+      /bin/bash -lc 'id; ls -ld /home "$HOME"' 2>&1 | head -n 20 || true
+  else
+    echo "Agent login environment OK for $SERVICE_USER ($home_dir)."
+  fi
+}
+
+# Optional runtime deps for tools (root provisioning; agent does not need sudo).
+install_agent_runtime_packages() {
+  export DEBIAN_FRONTEND=noninteractive
+  # ripgrep accelerates files.grep/glob; Node fallback remains if install fails.
+  apt-get install -y --no-install-recommends ripgrep 2>/dev/null || \
+    echo 'Note: ripgrep not installed; files.grep will use node_fallback.' >&2
 }
 
 write_systemd_unit() {
@@ -421,7 +436,12 @@ Environment=HOME=/home/$SERVICE_USER
 Environment=USER=$SERVICE_USER
 Environment=LOGNAME=$SERVICE_USER
 Environment=SHELL=/bin/bash
+# Force home visibility even if an older unit drop-in re-enabled ProtectHome.
+ProtectHome=false
 EOF
+
+  # Remove stale drop-ins that might re-hide /home.
+  rm -f /etc/systemd/system/vacps.service.d/protect-home.conf 2>/dev/null || true
 
   if [[ $ALLOW_APT == true ]]; then
     cat >/etc/sudoers.d/vacps-apt <<EOF
@@ -658,6 +678,7 @@ upgrade_agent() {
   fi
 
   ensure_service_user
+  install_agent_runtime_packages
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
   chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
@@ -667,6 +688,16 @@ upgrade_agent() {
   systemctl enable vacps
   systemctl restart vacps
   wait_for_agent_health
+
+  # Prove the service mount namespace can see agent home (not host-only).
+  if systemctl show vacps -p FragmentPath --value >/dev/null 2>&1; then
+    if systemctl show vacps -p Environment --value 2>/dev/null | grep -q "HOME=/home/$SERVICE_USER"; then
+      echo "vacps unit HOME=/home/$SERVICE_USER is set."
+    fi
+    if systemctl show vacps -p ProtectHome --value 2>/dev/null | grep -qi 'yes\|true'; then
+      echo 'Warning: ProtectHome is still enabled on vacps; agent cannot use /home. Check drop-ins under /etc/systemd/system/vacps.service.d/' >&2
+    fi
+  fi
 
   echo "VACPS $BACKEND_ID upgraded successfully (ref: $REPOSITORY_REF)."
   if [[ $ALLOW_APT == true ]]; then
@@ -737,6 +768,7 @@ install_agent() {
   fi
 
   ensure_service_user
+  install_agent_runtime_packages
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
   install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
   install -d /etc/vacps /etc/systemd/system/vacps.service.d

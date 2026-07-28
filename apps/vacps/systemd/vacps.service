@@ -19,9 +19,10 @@ Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
-# ProtectHome=true hides /home (shows as mode 000). Bind the real agent home instead.
-ProtectHome=true
-BindPaths=/home/agent
+# ProtectHome=true replaces /home with an inaccessible mount (mode 000). Path walking
+# still needs +x on /home to reach /home/agent, so BindPaths alone cannot fix shell
+# login env. Agent runs untrusted commands already — allow real home.
+ProtectHome=false
 ReadWritePaths=/var/lib/vacps /home/agent /opt/vacps
 
 [Install]
