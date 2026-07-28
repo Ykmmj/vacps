@@ -151,6 +151,10 @@ export class BackendClient {
     return this.request(backend, '/fs/mkdir', { method: 'POST', body: JSON.stringify(body) });
   }
 
+  async getCapabilities(backend: Pick<Backend, 'baseUrl'>): Promise<unknown> {
+    return this.request(backend, '/capabilities', { method: 'GET' });
+  }
+
   async execCommand(
     backend: Pick<Backend, 'baseUrl'>,
     body: Record<string, unknown>,
