@@ -68,6 +68,9 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotationHints> = {
   'vacps.git.apply': MUTATING_LOCAL,
 
   'vacps.tasks.create': MUTATING_OPEN,
+  'vacps.tasks.create_command': MUTATING_OPEN,
+  'vacps.tasks.create_shell': MUTATING_OPEN,
+  'vacps.tasks.create_agent': MUTATING_OPEN,
   'vacps.tasks.get': READ_ONLY,
   'vacps.tasks.list': READ_ONLY,
   'vacps.tasks.output.read': READ_ONLY,

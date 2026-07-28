@@ -61,9 +61,10 @@ export const taskOutputOptionsSchema = z
   .object({
     captureStdout: z.boolean().default(true),
     captureStderr: z.boolean().default(true),
-    previewMaxBytes: z.number().int().min(0).max(65_536).default(8192),
+    // Schema v2 bounds (no JS safe-integer extremes).
+    previewMaxBytes: z.number().int().min(0).max(1_048_576).default(8192),
     retentionSeconds: z.number().int().min(60).max(2_592_000).default(86_400),
-    hardMaxBytes: z.number().int().min(1024).max(104_857_600).default(10_485_760),
+    hardMaxBytes: z.number().int().min(0).max(1_073_741_824).default(10_485_760),
   })
   .default({
     captureStdout: true,

@@ -79,7 +79,8 @@ export function categoryFor(code: string): ErrorCategory {
     code.includes('disabled') ||
     code.includes('conflict') ||
     code.includes('mismatch') ||
-    code.includes('idempotency')
+    code.includes('idempotency') ||
+    code.includes('revision')
   ) {
     return 'conflict';
   }

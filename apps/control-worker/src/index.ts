@@ -155,13 +155,14 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     }
 
     if (resource === 'dashboard' && request.method === 'GET') {
-      const [backends, tasks, schedules, registrations, telemetry] = await Promise.all([
+      const [backends, tasks, schedulePage, registrations, telemetry] = await Promise.all([
         services.backends.list(),
         services.tasks.list(100),
-        services.schedules.list(),
+        services.schedules.list({ limit: 200 }),
         services.registrations.list(),
         services.telemetrySettings.get(),
       ]);
+      const schedules = schedulePage.schedules;
       const backendById = new Map(backends.map((backend) => [backend.id, backend]));
       const nodes = registrations.map((registration) =>
         inspectNode(
@@ -443,23 +444,64 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     }
 
     if (resource === 'schedules') {
-      if (!id && request.method === 'GET') return json(await services.schedules.list());
+      if (!id && request.method === 'GET') {
+        const page = await services.schedules.list({
+          limit: Number(searchParams.get('limit') ?? 200),
+          ...(searchParams.get('backend_id')
+            ? { backendId: searchParams.get('backend_id')! }
+            : {}),
+        });
+        return json(page.schedules);
+      }
       if (!id && request.method === 'POST')
         return json(
           await services.schedules.create(createScheduleSchema.parse(await readJson(request))),
           { status: 201 },
         );
       if (id && !action && request.method === 'GET') return json(await services.schedules.get(id));
-      if (id && !action && request.method === 'PATCH')
+      if (id && !action && request.method === 'PATCH') {
+        const body = (await readJson(request)) as Record<string, unknown>;
+        // Schema v2 patch shape: { expected_revision?, changes }
+        if (body && typeof body === 'object' && body.changes && typeof body.changes === 'object') {
+          const changes = body.changes as Record<string, unknown>;
+          return json(
+            await services.schedules.patch(id, {
+              ...(typeof body.expected_revision === 'number'
+                ? { expectedRevision: body.expected_revision }
+                : {}),
+              changes: {
+                ...(typeof changes.name === 'string' ? { name: changes.name } : {}),
+                ...(typeof changes.enabled === 'boolean' ? { enabled: changes.enabled } : {}),
+                ...(typeof changes.cron === 'string' ? { cron: changes.cron } : {}),
+                ...(typeof changes.timezone === 'string' ? { timezone: changes.timezone } : {}),
+                ...(changes.task_template
+                  ? {
+                      taskTemplate: createTaskSchema.parse(changes.task_template),
+                    }
+                  : {}),
+              },
+            }),
+          );
+        }
         return json(
-          await services.schedules.update(id, updateScheduleSchema.parse(await readJson(request))),
+          await services.schedules.update(id, updateScheduleSchema.parse(body)),
         );
+      }
       if (id && !action && request.method === 'DELETE') {
         await services.schedules.delete(id);
         return new Response(null, { status: 204 });
       }
-      if (id && action === 'run' && request.method === 'POST')
-        return json(await services.schedules.runNow(id), { status: 202 });
+      if (id && action === 'run' && request.method === 'POST') {
+        const body = (await readJson(request).catch(() => ({}))) as {
+          idempotency_key?: string;
+        };
+        return json(
+          await services.schedules.runNow(id, {
+            ...(body.idempotency_key ? { idempotencyKey: body.idempotency_key } : {}),
+          }),
+          { status: 202 },
+        );
+      }
       if (!id && action === 'reconcile' && request.method === 'POST')
         return json(await services.schedules.reconcile());
     }

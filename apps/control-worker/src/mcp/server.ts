@@ -1,11 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-  createScheduleSchema,
-  createTaskSchema,
-  taskStatuses,
-  type CreateScheduleInput,
-  type CreateTaskInput,
-} from '@vacps/contracts';
+import { taskStatuses } from '@vacps/contracts';
 import { z } from 'zod';
 
 import type { Env } from '../env.js';
@@ -22,6 +16,27 @@ import {
   successMeta,
   toolResultContent,
 } from './schema/envelope.js';
+import {
+  parseLegacyTaskCreate,
+  parseScheduleCreateV2,
+  parseSchedulePatch,
+  schedulesCreateInputSchema,
+  schedulesIdInputSchema,
+  schedulesListInputSchema,
+  schedulesUpdateInputSchema,
+  taskCreateResult,
+  tasksCreateAgentInputSchema,
+  tasksCreateCommandInputSchema,
+  tasksCreateLegacyInputSchema,
+  tasksCreateShellInputSchema,
+  tasksGetInputSchema,
+  tasksIdInputSchema,
+  tasksListInputSchema,
+  tasksOutputReadInputSchema,
+  toCreateAgentTask,
+  toCreateCommandTask,
+  toCreateShellTask,
+} from './task-schedule-adapters.js';
 import {
   backendsGetStatusInputSchema,
   backendsListInputSchema,
@@ -216,253 +231,312 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
-  // ── Layer B: tasks ─────────────────────────────────────────────────
+  // ── Layer B: tasks (Schema v2 split create tools) ──────────────────
+  const taskCreateOutput = okEnvelope.extend({
+    task: z.unknown(),
+    output: z.unknown(),
+    poll: z.unknown(),
+    idempotency: z.unknown().optional(),
+  }).shape;
+
+  server.registerTool(
+    'vacps.tasks.create_command',
+    toolConfig('vacps.tasks.create_command', {
+      description:
+        'Queue a non-interactive argv program task on a backend (preferred over tasks.create).',
+      inputSchema: tasksCreateCommandInputSchema,
+      outputSchema: taskCreateOutput,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksCreateCommandInputSchema.parse(args);
+      const input = toCreateCommandTask(parsed);
+      const created = await tasks.create(input, 'mcp');
+      return taskCreateResult(created, parsed.idempotency_key);
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.create_shell',
+    toolConfig('vacps.tasks.create_shell', {
+      description:
+        'Queue a shell-string task on a backend (bash -lc by default). Prefer create_command when no shell is needed.',
+      inputSchema: tasksCreateShellInputSchema,
+      outputSchema: taskCreateOutput,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksCreateShellInputSchema.parse(args);
+      const input = toCreateShellTask(parsed);
+      const created = await tasks.create(input, 'mcp');
+      return taskCreateResult(created, parsed.idempotency_key);
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.create_agent',
+    toolConfig('vacps.tasks.create_agent', {
+      description: 'Queue an agent prompt task on a backend.',
+      inputSchema: tasksCreateAgentInputSchema,
+      outputSchema: taskCreateOutput,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksCreateAgentInputSchema.parse(args);
+      const input = toCreateAgentTask(parsed);
+      const created = await tasks.create(input, 'mcp');
+      return taskCreateResult(created, parsed.idempotency_key);
+    }),
+  );
+
   server.registerTool(
     'vacps.tasks.create',
-    {
+    toolConfig('vacps.tasks.create', {
       description:
-        'Queue a shell or agent task on a backend. Returns immediately with a small task summary.',
-      inputSchema: taskCreateInputSchema,
-      outputSchema: okEnvelope.extend({
-        task: z.unknown(),
-        output: z.unknown(),
-        poll: z.unknown(),
-        idempotency: z.unknown().optional(),
-      }).shape,
-    },
-    wrap(
-      (value) => {
-        const task = value.task as { id?: string; status?: string };
-        return `Task ${task.id ?? '?'} ${task.status ?? 'queued'}`;
-      },
-      async (raw) => {
-        const input = parseTaskCreateInput(raw);
-        const created = await tasks.create(input, 'mcp');
-        return {
-          task: snakeTask(created),
-          output: {
-            stdout: { available: false, bytes: 0, complete: false },
-            stderr: { available: false, bytes: 0, complete: false },
-          },
-          poll: { tool: 'vacps.tasks.get', recommended_after_ms: 500 },
-          idempotency: {
-            key: input.idempotencyKey ?? null,
-            reused_existing_task: Boolean(created.reusedExistingTask),
-          },
-        };
-      },
-    ),
+        'DEPRECATED: use vacps.tasks.create_command, create_shell, or create_agent. Queue a shell or agent task (legacy combined schema).',
+      inputSchema: tasksCreateLegacyInputSchema,
+      outputSchema: taskCreateOutput,
+    }),
+    wrap(async (raw) => {
+      const parsed = tasksCreateLegacyInputSchema.parse(raw);
+      const input = parseLegacyTaskCreate(parsed);
+      const created = await tasks.create(input, 'mcp');
+      return taskCreateResult(created, parsed.idempotency_key);
+    }),
   );
 
   server.registerTool(
     'vacps.tasks.get',
-    {
+    toolConfig('vacps.tasks.get', {
       description: 'Get task status plus optional command list and output previews.',
-      inputSchema: {
-        task_id: z.string().uuid(),
-        include_commands: z.boolean().default(false),
-        include_output_preview: z.boolean().default(true),
-        preview_max_bytes: z.number().int().min(0).max(65_536).default(8192),
-      },
+      inputSchema: tasksGetInputSchema,
       outputSchema: okEnvelope.extend({
         task: z.unknown(),
         result: z.unknown().optional(),
         output: z.unknown().optional(),
         commands: z.unknown().optional(),
       }).shape,
-    },
-    wrap(
-      (value) => {
-        const task = value.task as { id?: string; status?: string };
-        return `Task ${task.id ?? '?'} is ${task.status ?? 'unknown'}`;
-      },
-      async ({ task_id, include_commands, include_output_preview, preview_max_bytes }) => {
-        const detail = await tasks.detail(String(task_id), {
-          includeCommands: Boolean(include_commands),
-          includeOutputPreview: include_output_preview !== false,
-          previewMaxBytes: typeof preview_max_bytes === 'number' ? preview_max_bytes : 8192,
-        });
-        return {
-          task: snakeTask(detail.task),
-          ...(detail.result !== undefined ? { result: detail.result } : {}),
-          ...(detail.output !== undefined ? { output: detail.output } : {}),
-          ...(detail.commands !== undefined ? { commands: detail.commands } : {}),
-        };
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = tasksGetInputSchema.parse(args);
+      const detail = await tasks.detail(parsed.task_id, {
+        includeCommands: Boolean(parsed.include_commands),
+        includeOutputPreview: parsed.include_output_preview !== false,
+        previewMaxBytes: parsed.preview_max_bytes ?? 8192,
+      });
+      return {
+        task: snakeTask(detail.task),
+        ...(detail.result !== undefined ? { result: detail.result } : {}),
+        ...(detail.output !== undefined ? { output: detail.output } : {}),
+        ...(detail.commands !== undefined ? { commands: detail.commands } : {}),
+      };
+    }),
   );
 
   server.registerTool(
     'vacps.tasks.output.read',
-    {
+    toolConfig('vacps.tasks.output.read', {
       description: 'Read a task stdout/stderr stream by absolute byte offset.',
-      inputSchema: {
-        task_id: z.string().uuid(),
-        stream: z.enum(['stdout', 'stderr']).default('stdout'),
-        offset: z.number().int().min(0).default(0),
-        max_bytes: z.number().int().min(1).max(1_048_576).default(65_536),
-      },
+      inputSchema: tasksOutputReadInputSchema,
       outputSchema: okEnvelope.extend({
         task_id: z.string(),
         stream: z.string(),
-        offset: z.number(),
-        next_offset: z.number(),
-        eof: z.boolean(),
-        data: z.string(),
+        offset: z.number().optional(),
+        next_offset: z.number().optional(),
+        eof: z.boolean().optional(),
+        data: z.string().optional(),
+        content: z.string().optional(),
       }).shape,
-    },
-    wrap(
-      (value) =>
-        `Read ${String(value.stream)} for ${String(value.task_id)} (${String(value.data).length} bytes)`,
-      async ({ task_id, stream, offset, max_bytes }) => {
-        const payload = (await tasks.readOutput(String(task_id), {
-          stream: (stream as 'stdout' | 'stderr') || 'stdout',
-          offset: typeof offset === 'number' ? offset : 0,
-          maxBytes: typeof max_bytes === 'number' ? max_bytes : 65_536,
-        })) as Record<string, unknown>;
-        return payload;
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = tasksOutputReadInputSchema.parse(args);
+      const payload = (await tasks.readOutput(parsed.task_id, {
+        stream: parsed.stream ?? 'stdout',
+        offset: parsed.offset ?? 0,
+        maxBytes: parsed.max_bytes ?? 65_536,
+      })) as Record<string, unknown>;
+      // Normalize content alias for Schema v2 clients.
+      if (payload.data !== undefined && payload.content === undefined) {
+        return { ...payload, content: payload.data, encoding: 'utf-8' };
+      }
+      return payload;
+    }),
   );
 
   server.registerTool(
     'vacps.tasks.list',
-    {
-      description: 'List recent task summaries from the control plane index.',
-      inputSchema: { limit: z.number().int().min(1).max(200).default(50) },
-      outputSchema: okEnvelope.extend({ tasks: z.array(z.unknown()) }).shape,
-    },
-    wrap(
-      (value) => `Tasks: ${(value.tasks as unknown[]).length}`,
-      async ({ limit }) => ({
-        tasks: (await tasks.list(typeof limit === 'number' ? limit : 50)).map(snakeTask),
-      }),
-    ),
+    toolConfig('vacps.tasks.list', {
+      description: 'List task summaries with optional filters and opaque cursor pagination.',
+      inputSchema: tasksListInputSchema,
+      outputSchema: okEnvelope.extend({
+        tasks: z.array(z.unknown()),
+        returned_count: z.number(),
+        next_cursor: z.string().nullable(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksListInputSchema.parse(args);
+      const offset = parsed.cursor ? decodeOffsetCursor(parsed.cursor) : 0;
+      // kind "command" is shell exec tasks — stored as type shell.
+      const type =
+        parsed.kind === 'agent' ? 'agent' : parsed.kind === 'shell' || parsed.kind === 'command'
+          ? 'shell'
+          : undefined;
+      const page = await tasks.listPage({
+        limit: parsed.limit ?? 50,
+        offset,
+        ...(parsed.backend_id ? { backendId: parsed.backend_id } : {}),
+        ...(type ? { type } : {}),
+        ...(parsed.status ? { status: parsed.status } : {}),
+        ...(parsed.created_after ? { createdAfter: parsed.created_after } : {}),
+      });
+      return {
+        tasks: page.tasks.map(snakeTask),
+        returned_count: page.returned_count,
+        next_cursor:
+          page.next_offset !== null ? encodeOffsetCursor(page.next_offset) : null,
+      };
+    }),
   );
 
   server.registerTool(
     'vacps.tasks.cancel',
-    {
+    toolConfig('vacps.tasks.cancel', {
       description: 'Cancel a queued or running task.',
-      inputSchema: { task_id: z.string().uuid() },
+      inputSchema: tasksIdInputSchema,
       outputSchema: okEnvelope.extend({ task: z.unknown() }).shape,
-    },
-    wrap(
-      (value) => {
-        const task = value.task as { id?: string; status?: string };
-        return `Cancelled ${task.id ?? '?'} (${task.status ?? 'cancelled'})`;
-      },
-      async ({ task_id }) => {
-        const result = (await tasks.cancel(String(task_id))) as { task: unknown };
-        return { task: snakeTask(result.task as never) };
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = tasksIdInputSchema.parse(args);
+      const result = (await tasks.cancel(parsed.task_id)) as { task: unknown };
+      return { task: snakeTask(result.task as never) };
+    }),
   );
 
   server.registerTool(
     'vacps.tasks.retry',
-    {
+    toolConfig('vacps.tasks.retry', {
       description: 'Retry a task (creates a new task when possible).',
-      inputSchema: { task_id: z.string().uuid() },
+      inputSchema: tasksIdInputSchema,
       outputSchema: okEnvelope.extend({ task: z.unknown() }).shape,
-    },
-    wrap(
-      (value) => {
-        const task = value.task as { id?: string; status?: string };
-        return `Retry ${task.id ?? '?'} (${task.status ?? 'queued'})`;
-      },
-      async ({ task_id }) => {
-        const result = (await tasks.retry(String(task_id))) as { task: unknown };
-        return { task: snakeTask(result.task as never) };
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = tasksIdInputSchema.parse(args);
+      const result = (await tasks.retry(parsed.task_id)) as { task: unknown };
+      return { task: snakeTask(result.task as never) };
+    }),
   );
 
-  // ── Layer B: schedules ─────────────────────────────────────────────
+  // ── Layer B: schedules (Schema v2 trigger/policy + revision patch) ─
   server.registerTool(
     'vacps.schedules.create',
-    {
-      description: 'Create a cron schedule on a backend.',
-      inputSchema: scheduleCreateInputSchema,
+    toolConfig('vacps.schedules.create', {
+      description:
+        'Create a cron schedule. Prefer trigger/policy/task shape (no nested backend_id in task). Legacy cron+task_template still accepted.',
+      inputSchema: schedulesCreateInputSchema,
       outputSchema: okEnvelope.extend({ schedule: z.unknown() }).shape,
-    },
-    wrap(
-      (value) => `Schedule ${(value.schedule as { id?: string }).id ?? '?'} created`,
-      async (raw) => ({
-        schedule: snakeSchedule(await schedules.create(parseScheduleCreate(raw))),
-      }),
-    ),
+    }),
+    wrap(async (raw) => {
+      // MCP path: Schema v2 trigger/policy/task. Web/API still accepts legacy createScheduleSchema.
+      const parsed = schedulesCreateInputSchema.parse(raw);
+      const created = await schedules.create(parseScheduleCreateV2(parsed));
+      return {
+        schedule: snakeSchedule(created),
+        ...(created.reused
+          ? { idempotency: { key: created.idempotencyKey ?? null, replayed: true } }
+          : {}),
+      };
+    }),
   );
   server.registerTool(
     'vacps.schedules.get',
-    {
-      description: 'Get a schedule definition.',
-      inputSchema: { schedule_id: z.string().uuid() },
+    toolConfig('vacps.schedules.get', {
+      description: 'Get a schedule definition including revision, trigger, and policy.',
+      inputSchema: schedulesIdInputSchema,
       outputSchema: okEnvelope.extend({ schedule: z.unknown() }).shape,
-    },
-    wrap(
-      (value) => `Schedule ${(value.schedule as { id?: string }).id ?? '?'}`,
-      async ({ schedule_id }) => ({
-        schedule: snakeSchedule(await schedules.get(String(schedule_id))),
-      }),
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = schedulesIdInputSchema.parse(args);
+      return { schedule: snakeSchedule(await schedules.get(parsed.schedule_id)) };
+    }),
   );
   server.registerTool(
     'vacps.schedules.list',
-    {
-      description: 'List cron schedules.',
-      outputSchema: okEnvelope.extend({ schedules: z.array(z.unknown()) }).shape,
-    },
-    wrap(
-      (value) => `Schedules: ${(value.schedules as unknown[]).length}`,
-      async () => ({ schedules: (await schedules.list()).map(snakeSchedule) }),
-    ),
+    toolConfig('vacps.schedules.list', {
+      description: 'List cron schedules with optional backend/enabled filters and cursor.',
+      inputSchema: schedulesListInputSchema,
+      outputSchema: okEnvelope.extend({
+        schedules: z.array(z.unknown()),
+        returned_count: z.number(),
+        next_cursor: z.string().nullable(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = schedulesListInputSchema.parse(args);
+      const offset = parsed.cursor ? decodeOffsetCursor(parsed.cursor) : 0;
+      const page = await schedules.list({
+        limit: parsed.limit ?? 50,
+        offset,
+        ...(parsed.backend_id ? { backendId: parsed.backend_id } : {}),
+        ...(typeof parsed.enabled === 'boolean' ? { enabled: parsed.enabled } : {}),
+      });
+      return {
+        schedules: page.schedules.map(snakeSchedule),
+        returned_count: page.returned_count,
+        next_cursor:
+          page.next_offset !== null ? encodeOffsetCursor(page.next_offset) : null,
+      };
+    }),
   );
   server.registerTool(
     'vacps.schedules.update',
-    {
-      description: 'Update a cron schedule.',
-      inputSchema: { schedule_id: z.string().uuid(), ...scheduleCreateInputSchema },
+    toolConfig('vacps.schedules.update', {
+      description:
+        'Patch a schedule (Schema v2). Pass expected_revision for optimistic concurrency; only fields in changes are applied.',
+      inputSchema: schedulesUpdateInputSchema,
       outputSchema: okEnvelope.extend({ schedule: z.unknown() }).shape,
-    },
-    wrap(
-      (value) => `Schedule ${(value.schedule as { id?: string }).id ?? '?'} updated`,
-      async ({ schedule_id, ...raw }) => ({
-        schedule: snakeSchedule(
-          await schedules.update(String(schedule_id), parseScheduleCreate(raw)),
-        ),
-      }),
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = schedulesUpdateInputSchema.parse(args);
+      const current = await schedules.get(parsed.schedule_id);
+      const patch = parseSchedulePatch(parsed, current.backendId);
+      return { schedule: snakeSchedule(await schedules.patch(parsed.schedule_id, patch)) };
+    }),
   );
   server.registerTool(
     'vacps.schedules.delete',
-    {
+    toolConfig('vacps.schedules.delete', {
       description: 'Delete a cron schedule.',
-      inputSchema: { schedule_id: z.string().uuid() },
+      inputSchema: schedulesIdInputSchema,
       outputSchema: okEnvelope.extend({ deleted: z.boolean(), schedule_id: z.string() }).shape,
-    },
-    wrap(
-      (value) => `Deleted schedule ${String(value.schedule_id)}`,
-      async ({ schedule_id }) => {
-        await schedules.delete(String(schedule_id));
-        return { deleted: true, schedule_id: String(schedule_id) };
-      },
-    ),
+    }),
+    wrap(async (args) => {
+      const parsed = schedulesIdInputSchema.parse(args);
+      await schedules.delete(parsed.schedule_id);
+      return { deleted: true, schedule_id: parsed.schedule_id };
+    }),
   );
   server.registerTool(
     'vacps.schedules.run_now',
-    {
-      description: 'Immediately queue a schedule once.',
-      inputSchema: { schedule_id: z.string().uuid() },
-      outputSchema: okEnvelope.extend({ task: z.unknown() }).shape,
-    },
-    wrap(
-      (value) => `Queued ${(value.task as { id?: string }).id ?? 'task'} from schedule`,
-      async ({ schedule_id }) => {
-        const task = await schedules.runNow(String(schedule_id));
-        return { task: snakeTask(task as Parameters<typeof snakeTask>[0]) };
-      },
-    ),
+    toolConfig('vacps.schedules.run_now', {
+      description: 'Immediately queue a schedule once. Supports idempotency_key.',
+      inputSchema: schedulesIdInputSchema,
+      outputSchema: okEnvelope.extend({
+        schedule_id: z.string(),
+        task_id: z.string().optional(),
+        task: z.unknown(),
+        queued: z.boolean(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = schedulesIdInputSchema.parse(args);
+      const result = await schedules.runNow(parsed.schedule_id, {
+        ...(parsed.idempotency_key ? { idempotencyKey: parsed.idempotency_key } : {}),
+      });
+      return {
+        schedule_id: result.scheduleId,
+        task_id: result.task.id,
+        task: snakeTask(result.task),
+        queued: true,
+      };
+    }),
   );
 
   const requireBackend = async (backendId: unknown) => {
@@ -1019,163 +1093,6 @@ function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unk
   };
 }
 
-// ── MCP snake_case input schemas ─────────────────────────────────────
-
-const shellInputSchema = z.object({
-  mode: z.enum(['exec', 'script']),
-  program: z.string().optional(),
-  arguments: z.array(z.string()).optional(),
-  interpreter: z.string().optional(),
-  interpreter_arguments: z.array(z.string()).optional(),
-  content: z.string().optional(),
-});
-
-const agentInputSchema = z.object({
-  prompt: z.string(),
-  profile: z.enum(['restricted', 'diagnostic', 'standard', 'privileged']).optional(),
-  max_steps: z.number().int().optional(),
-  permissions: z
-    .object({
-      shell: z.boolean().optional(),
-      network: z.boolean().optional(),
-      file_write: z.boolean().optional(),
-    })
-    .optional(),
-});
-
-const taskCreateInputSchema = {
-  backend_id: z.string(),
-  type: z.enum(['shell', 'agent']),
-  name: z.string().optional(),
-  working_directory: z.string().optional(),
-  timeout_seconds: z.number().int().min(1).max(86_400),
-  profile: z.string().optional(),
-  idempotency_key: z.string().optional(),
-  labels: z.record(z.string(), z.string()).optional(),
-  environment: z.record(z.string(), z.string()).optional(),
-  shell: shellInputSchema.optional(),
-  agent: agentInputSchema.optional(),
-  output: z
-    .object({
-      capture_stdout: z.boolean().optional(),
-      capture_stderr: z.boolean().optional(),
-      preview_max_bytes: z.number().int().optional(),
-      retention_seconds: z.number().int().optional(),
-      hard_max_bytes: z.number().int().optional(),
-    })
-    .optional(),
-};
-
-const scheduleCreateInputSchema = {
-  backend_id: z.string(),
-  name: z.string(),
-  cron: z.string(),
-  timezone: z.string().default('UTC'),
-  enabled: z.boolean().default(true),
-  task_template: z.object(taskCreateInputSchema),
-};
-
-function parseTaskCreateInput(raw: Record<string, unknown>): CreateTaskInput {
-  const base = {
-    backendId: String(raw.backend_id),
-    type: raw.type,
-    ...(typeof raw.name === 'string' ? { name: raw.name } : {}),
-    cwd: typeof raw.working_directory === 'string' ? raw.working_directory : '/tmp',
-    timeoutSeconds: Number(raw.timeout_seconds),
-    ...(typeof raw.profile === 'string' ? { profile: raw.profile } : {}),
-    ...(typeof raw.idempotency_key === 'string' ? { idempotencyKey: raw.idempotency_key } : {}),
-    ...(raw.labels && typeof raw.labels === 'object'
-      ? { labels: raw.labels as Record<string, string> }
-      : {}),
-    ...(raw.environment && typeof raw.environment === 'object'
-      ? { environment: raw.environment as Record<string, string> }
-      : {}),
-    ...(raw.output && typeof raw.output === 'object'
-      ? {
-          output: mapOutputOptions(raw.output as Record<string, unknown>),
-        }
-      : {}),
-  };
-
-  if (raw.type === 'shell') {
-    const shell = raw.shell as Record<string, unknown> | undefined;
-    if (!shell || typeof shell !== 'object')
-      throw new AppError('validation_error', 'shell is required for type=shell.', 400);
-    if (shell.mode === 'exec') {
-      return createTaskSchema.parse({
-        ...base,
-        type: 'shell',
-        shell: {
-          mode: 'exec',
-          program: String(shell.program ?? ''),
-          arguments: Array.isArray(shell.arguments) ? shell.arguments.map(String) : [],
-        },
-      });
-    }
-    return createTaskSchema.parse({
-      ...base,
-      type: 'shell',
-      shell: {
-        mode: 'script',
-        interpreter: String(shell.interpreter ?? '/bin/bash'),
-        interpreterArguments: Array.isArray(shell.interpreter_arguments)
-          ? shell.interpreter_arguments.map(String)
-          : ['-c'],
-        content: String(shell.content ?? ''),
-      },
-    });
-  }
-
-  if (raw.type === 'agent') {
-    const agent = raw.agent as Record<string, unknown> | undefined;
-    if (!agent || typeof agent !== 'object')
-      throw new AppError('validation_error', 'agent is required for type=agent.', 400);
-    const permissions = (agent.permissions ?? {}) as Record<string, unknown>;
-    return createTaskSchema.parse({
-      ...base,
-      type: 'agent',
-      agent: {
-        prompt: String(agent.prompt ?? ''),
-        ...(typeof agent.profile === 'string' ? { profile: agent.profile } : {}),
-        ...(typeof agent.max_steps === 'number' ? { maxSteps: agent.max_steps } : {}),
-        permissions: {
-          shell: Boolean(permissions.shell),
-          network: Boolean(permissions.network),
-          fileWrite: Boolean(permissions.file_write),
-        },
-      },
-    });
-  }
-
-  throw new AppError('validation_error', 'type must be shell or agent.', 400);
-}
-
-function mapOutputOptions(output: Record<string, unknown>) {
-  return {
-    ...(typeof output.capture_stdout === 'boolean' ? { captureStdout: output.capture_stdout } : {}),
-    ...(typeof output.capture_stderr === 'boolean' ? { captureStderr: output.capture_stderr } : {}),
-    ...(typeof output.preview_max_bytes === 'number'
-      ? { previewMaxBytes: output.preview_max_bytes }
-      : {}),
-    ...(typeof output.retention_seconds === 'number'
-      ? { retentionSeconds: output.retention_seconds }
-      : {}),
-    ...(typeof output.hard_max_bytes === 'number' ? { hardMaxBytes: output.hard_max_bytes } : {}),
-  };
-}
-
-function parseScheduleCreate(raw: Record<string, unknown>): CreateScheduleInput {
-  const templateRaw = (raw.task_template ?? {}) as Record<string, unknown>;
-  return createScheduleSchema.parse({
-    backendId: String(raw.backend_id),
-    name: String(raw.name),
-    cron: String(raw.cron),
-    timezone: typeof raw.timezone === 'string' ? raw.timezone : 'UTC',
-    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : true,
-    taskTemplate: parseTaskCreateInput(templateRaw),
-  });
-}
-
 function snakeTask(task: {
   id: string;
   backendId: string;
@@ -1219,20 +1136,48 @@ function snakeSchedule(schedule: {
   cron: string;
   timezone: string;
   enabled: boolean;
+  revision?: number;
+  policy?: {
+    concurrency: string;
+    misfire: string;
+    maxCatchupRuns: number;
+  };
   taskTemplate: unknown;
+  idempotencyKey?: string | undefined;
   lastRunAt?: string | undefined;
   nextRunAt?: string | undefined;
   createdAt: string;
   updatedAt: string;
+  reused?: boolean;
 }) {
+  const taskKind =
+    schedule.taskTemplate &&
+    typeof schedule.taskTemplate === 'object' &&
+    'type' in schedule.taskTemplate
+      ? String((schedule.taskTemplate as { type: string }).type)
+      : 'unknown';
   return {
     id: schedule.id,
+    revision: schedule.revision ?? 1,
     backend_id: schedule.backendId,
     name: schedule.name,
+    enabled: schedule.enabled,
+    trigger: {
+      type: 'cron' as const,
+      expression: schedule.cron,
+      timezone: schedule.timezone,
+    },
+    policy: {
+      concurrency: schedule.policy?.concurrency ?? 'forbid',
+      misfire: schedule.policy?.misfire ?? 'run_once',
+      max_catchup_runs: schedule.policy?.maxCatchupRuns ?? 1,
+    },
+    task_kind: taskKind,
+    // Legacy fields kept during migration.
     cron: schedule.cron,
     timezone: schedule.timezone,
-    enabled: schedule.enabled,
     task_template: schedule.taskTemplate,
+    ...(schedule.idempotencyKey ? { idempotency_key: schedule.idempotencyKey } : {}),
     ...(schedule.lastRunAt ? { last_run_at: schedule.lastRunAt } : {}),
     ...(schedule.nextRunAt ? { next_run_at: schedule.nextRunAt } : {}),
     created_at: schedule.createdAt,
