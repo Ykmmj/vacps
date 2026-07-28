@@ -34,8 +34,56 @@ export class BackendClient {
     return this.request(backend, `/tasks/${encodeURIComponent(taskId)}`, { method: 'GET' });
   }
 
-  async getLogs(backend: Pick<Backend, 'baseUrl'>, taskId: string): Promise<unknown> {
-    return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/logs`, { method: 'GET' });
+  async getLogs(
+    backend: Pick<Backend, 'baseUrl'>,
+    taskId: string,
+    query: {
+      stream?: 'stdout' | 'stderr';
+      offset?: number;
+      maxBytes?: number;
+      previewMaxBytes?: number;
+    } = {},
+  ): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (query.stream) params.set('stream', query.stream);
+    if (query.offset !== undefined) params.set('offset', String(query.offset));
+    if (query.maxBytes !== undefined) params.set('max_bytes', String(query.maxBytes));
+    if (query.previewMaxBytes !== undefined)
+      params.set('preview_max_bytes', String(query.previewMaxBytes));
+    const suffix = params.size > 0 ? `?${params.toString()}` : '';
+    return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/logs${suffix}`, {
+      method: 'GET',
+    });
+  }
+
+  async readFile(
+    backend: Pick<Backend, 'baseUrl'>,
+    input: { filePath: string; offset?: number; limit?: number },
+  ): Promise<unknown> {
+    const params = new URLSearchParams({ file_path: input.filePath });
+    if (input.offset !== undefined) params.set('offset', String(input.offset));
+    if (input.limit !== undefined) params.set('limit', String(input.limit));
+    return this.request(backend, `/fs/read?${params.toString()}`, { method: 'GET' });
+  }
+
+  async bash(
+    backend: Pick<Backend, 'baseUrl'>,
+    input: {
+      command: string;
+      timeoutMs?: number;
+      cwd?: string;
+      description?: string;
+    },
+  ): Promise<unknown> {
+    return this.request(backend, '/exec/bash', {
+      method: 'POST',
+      body: JSON.stringify({
+        command: input.command,
+        ...(input.timeoutMs !== undefined ? { timeout_ms: input.timeoutMs } : {}),
+        ...(input.cwd ? { cwd: input.cwd } : {}),
+        ...(input.description ? { description: input.description } : {}),
+      }),
+    });
   }
 
   async cancelTask(backend: Pick<Backend, 'baseUrl'>, taskId: string): Promise<unknown> {

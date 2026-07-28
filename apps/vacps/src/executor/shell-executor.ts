@@ -11,6 +11,8 @@ export interface ShellExecutionInput {
   stdoutPath: string;
   stderrPath: string;
   signal?: AbortSignal;
+  /** In-memory capture cap; full output still streams to log files. */
+  hardMaxBytes?: number;
 }
 
 export interface ShellExecutionResult {
@@ -20,7 +22,7 @@ export interface ShellExecutionResult {
   stderr: string;
 }
 
-const MAX_CAPTURE_BYTES = 1024 * 1024;
+const DEFAULT_MAX_CAPTURE_BYTES = 1024 * 1024;
 
 export class ShellExecutor {
   async execute(input: ShellExecutionInput): Promise<ShellExecutionResult> {
@@ -41,8 +43,9 @@ export class ShellExecutor {
     let stderr = '';
     let timedOut = false;
     let cancelled = false;
+    const maxCapture = input.hardMaxBytes ?? DEFAULT_MAX_CAPTURE_BYTES;
     const append = (current: string, chunk: Buffer): string => {
-      const remaining = MAX_CAPTURE_BYTES - Buffer.byteLength(current);
+      const remaining = maxCapture - Buffer.byteLength(current);
       return remaining > 0 ? current + chunk.subarray(0, remaining).toString('utf8') : current;
     };
     const terminate = (reason: 'cancelled' | 'timed_out') => {

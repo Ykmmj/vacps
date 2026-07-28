@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-import type { TaskDispatch, TaskError, TaskStatus } from '@vacps/contracts';
+import {
+  shellToCommand,
+  type TaskDispatch,
+  type TaskError,
+  type TaskStatus,
+} from '@vacps/contracts';
 
 import type { ShellExecutionResult } from '../executor/shell-executor.js';
 import type { ShellExecutor } from '../executor/shell-executor.js';
@@ -115,7 +120,8 @@ export class TaskGraphRunner {
   }
 
   private async authorize(state: TaskGraphState): Promise<Partial<TaskGraphState>> {
-    const command = state.task.type === 'shell' ? state.task.command : '(Pi agent task)';
+    const command =
+      state.task.type === 'shell' ? shellToCommand(state.task.shell) : '(Pi agent task)';
     const decision = await this.policy.authorize({
       taskId: state.task.taskId,
       profile: state.task.profile,
@@ -145,7 +151,7 @@ export class TaskGraphRunner {
         const command = await this.executeCommand(
           state.task,
           state.commandCount + 1,
-          state.task.command,
+          shellToCommand(state.task.shell),
           signal,
         );
         if (command.status !== 'succeeded') {
@@ -153,19 +159,38 @@ export class TaskGraphRunner {
             graphNode: 'execute',
             status: toTaskStatus(command.status),
             error: executionError(command),
+            result: {
+              kind: 'process',
+              exit_code: command.exitCode,
+              signal: null,
+              timed_out: command.status === 'timed_out',
+              failure: {
+                category: 'runtime',
+                message: executionError(command).message,
+                retryable: false,
+              },
+            },
           };
         }
         return {
           graphNode: 'execute',
           output: command.stdout,
-          result: { exitCode: command.exitCode, stdout: command.stdout, stderr: command.stderr },
+          result: {
+            kind: 'process',
+            exit_code: command.exitCode,
+            signal: null,
+            timed_out: false,
+            failure: null,
+            stdout: command.stdout,
+            stderr: command.stderr,
+          },
           commandCount: state.commandCount + 1,
         };
       }
       let piSequence = state.commandCount;
       const result = await this.piRuntime.run({
         taskId: state.task.taskId,
-        prompt: state.task.prompt,
+        prompt: state.task.agent.prompt,
         cwd: state.task.cwd,
         timeoutSeconds: state.task.timeoutSeconds,
         signal,
@@ -273,6 +298,7 @@ export class TaskGraphRunner {
       stdoutPath,
       stderrPath,
       signal,
+      hardMaxBytes: task.output.hardMaxBytes,
     });
     this.store.finishCommand({
       id: commandId,

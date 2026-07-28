@@ -34,9 +34,11 @@ describe('MCP server tools', () => {
       CONTROL_PLANE_SIGNING_PRIVATE_KEY: 'test-key',
     } as unknown as Env;
     const client = await connect(env);
-    const result = await client.callTool({ name: 'backends.list', arguments: {} });
+    const result = await client.callTool({ name: 'vacps.backends.list', arguments: {} });
     expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toEqual({ backends: [] });
+    const body = result.structuredContent as { ok?: boolean; backends?: unknown[] };
+    expect(body.ok).toBe(true);
+    expect(body.backends).toEqual([]);
     await client.close();
   });
 });
