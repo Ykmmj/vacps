@@ -20,12 +20,17 @@ describe('files runtime', () => {
     await writeFile(path, 'alpha\nbeta\ngamma\n');
     const result = await filesRead({ path, startLine: 2, endLine: 3 });
     expect(result.content).toBe('beta\ngamma');
-    expect(result.start_line).toBe(2);
-    expect(result.truncated).toBe(false);
-    expect(result.next_start_line).toBeNull();
+    expect(result.range?.returned_start_line).toBe(2);
+    expect(result.range?.truncated).toBe(false);
+    expect(result.range?.next_start_line).toBeNull();
+    expect(result.range?.complete).toBe(true);
     expect(result.range?.range_complete).toBe(true);
+    // Schema v2: no duplicated top-level total_lines / total_bytes.
+    expect((result as { total_lines?: unknown }).total_lines).toBeUndefined();
     // Trailing newline yields an empty final line from split('\n').
     expect(result.file?.total_lines).toBe(4);
+    expect(result.file?.size_bytes).toBeGreaterThan(0);
+    expect(result.file?.sha256).toBeTruthy();
   });
 
   it('marks truncated only when max_bytes cuts a requested range short', async () => {
@@ -33,9 +38,19 @@ describe('files runtime', () => {
     const path = join(dir, 'big.txt');
     await writeFile(path, `${'a'.repeat(100)}\n${'b'.repeat(100)}\n`);
     const result = await filesRead({ path, startLine: 1, endLine: 2, maxBytes: 50 });
-    expect(result.truncated).toBe(true);
-    expect(result.truncation_reason).toBe('max_bytes');
-    expect(result.next_start_line).not.toBeNull();
+    expect(result.range?.truncated).toBe(true);
+    expect(result.range?.truncation_reason).toBe('max_bytes');
+    expect(result.range?.next_start_line).not.toBeNull();
+  });
+
+  it('rejects end_line < start_line with invalid_line_range', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'vacps-files-'));
+    const path = join(dir, 'a.txt');
+    await writeFile(path, 'a\nb\n');
+    await expect(filesRead({ path, startLine: 3, endLine: 1 })).rejects.toMatchObject({
+      code: 'invalid_line_range',
+      statusCode: 400,
+    });
   });
 
   it('matches root files with **/*.txt globstar dialect', async () => {

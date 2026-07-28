@@ -30,6 +30,8 @@ export interface ProcessSnapshot {
   duration_ms: number | null;
   stdin_available: boolean;
   tty: boolean;
+  /** Opaque cursor for process.read; null means start from the beginning. */
+  output_cursor: string | null;
   stdout: OutputDescriptor;
   stderr: OutputDescriptor;
   idempotency?: { key: string; replayed: boolean; request_hash: string };
@@ -151,6 +153,15 @@ export class ProcessManager {
     let child: ChildProcessWithoutNullStreams;
     if (input.command) {
       const shell = input.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
+      // /bin/sh has no portable login+rc load; reject claiming full user environment.
+      if (shell === '/bin/sh' && loadUserEnvironment) {
+        throw Object.assign(
+          new Error(
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or set load_user_environment=false.',
+          ),
+          { code: 'validation_error', statusCode: 400 },
+        );
+      }
       // Login shell (-lc) sources profile/bashrc for the real agent user environment.
       // Opt out with load_user_environment=false → --noprofile --norc -c.
       const shellArgs =
@@ -411,6 +422,8 @@ export class ProcessManager {
       duration_ms: finished ? finished - managed.startedAt : Date.now() - managed.startedAt,
       stdin_available: managed.status === 'running' && managed.stdinOpen,
       tty: managed.tty,
+      // process.start/command.exec share the same snapshot; clients pass cursor opaquely to process.read.
+      output_cursor: null,
       stdout: describeOutput(managed.stdout, limits.stdoutMax ?? 16_384, {
         complete: managed.status !== 'running',
         processId: managed.id,
