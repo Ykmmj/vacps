@@ -17,17 +17,16 @@ import {
   toolResultContent,
 } from './schema/envelope.js';
 import {
-  parseLegacyTaskCreate,
-  parseScheduleCreateV2,
+  parseScheduleCreate,
   parseSchedulePatch,
   schedulesCreateInputSchema,
+  schedulesGetInputSchema,
   schedulesIdInputSchema,
   schedulesListInputSchema,
   schedulesUpdateInputSchema,
   taskCreateResult,
   tasksCreateAgentInputSchema,
   tasksCreateCommandInputSchema,
-  tasksCreateLegacyInputSchema,
   tasksCreateShellInputSchema,
   tasksGetInputSchema,
   tasksIdInputSchema,
@@ -58,8 +57,8 @@ import {
   gitStatusInputSchema,
   MCP_PROTOCOL_VERSION,
   processReadInputSchema,
-  processStartInputSchema,
-  processStartListJsonSchema,
+  processStartCommandInputSchema,
+  processStartShellInputSchema,
   processTerminateInputSchema,
   processWriteInputSchema,
   shellExecInputSchema,
@@ -87,11 +86,11 @@ function toolConfig(
   return {
     ...config,
     annotations: annotationsFor(name),
-    // Schema v2: do not opt into experimental MCP protocol tasks yet (vacps.tasks.* is the model).
+    // Schema v3: do not opt into experimental MCP protocol tasks yet (vacps.tasks.* is the model).
     execution: { taskSupport: 'forbidden' as const },
     _meta: {
       tool_schema_revision: TOOL_SCHEMA_REVISION,
-      tool_schema_version: '2.0',
+      tool_schema_version: '3.0',
       ...(config._meta ?? {}),
     },
   } as never;
@@ -237,7 +236,7 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
-  // ── Layer B: tasks (Schema v2 split create tools) ──────────────────
+  // ── Layer B: tasks (Schema v3 split create tools only) ─────────────
   const taskCreateOutput = okEnvelope.extend({
     task: z.unknown(),
     output: z.unknown(),
@@ -248,8 +247,7 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.tasks.create_command',
     toolConfig('vacps.tasks.create_command', {
-      description:
-        'Queue a non-interactive argv program task on a backend (preferred over tasks.create).',
+      description: 'Queue a non-interactive argv program task on a backend.',
       inputSchema: tasksCreateCommandInputSchema,
       outputSchema: taskCreateOutput,
     }),
@@ -289,22 +287,6 @@ export function createMcpServer(env: Env): McpServer {
       const input = toCreateAgentTask(parsed);
       const created = await tasks.create(input, 'mcp', undefined, 'agent');
       return taskCreateResult(created, parsed.idempotency_key, 'agent');
-    }),
-  );
-
-  server.registerTool(
-    'vacps.tasks.create',
-    toolConfig('vacps.tasks.create', {
-      description:
-        'DEPRECATED: use vacps.tasks.create_command, create_shell, or create_agent. Queue a shell or agent task (legacy combined schema).',
-      inputSchema: tasksCreateLegacyInputSchema,
-      outputSchema: taskCreateOutput,
-    }),
-    wrap(async (raw) => {
-      const parsed = tasksCreateLegacyInputSchema.parse(raw);
-      const input = parseLegacyTaskCreate(parsed);
-      const created = await tasks.create(input, 'mcp');
-      return taskCreateResult(created, parsed.idempotency_key);
     }),
   );
 
@@ -429,19 +411,18 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
-  // ── Layer B: schedules (Schema v2 trigger/policy + revision patch) ─
+  // ── Layer B: schedules (Schema v3 trigger/policy/task only) ────────
   server.registerTool(
     'vacps.schedules.create',
     toolConfig('vacps.schedules.create', {
       description:
-        'Create a cron schedule. Prefer trigger/policy/task shape (no nested backend_id in task). Legacy cron+task_template still accepted.',
+        'Create a cron schedule with trigger, policy, and task (kind command|shell|agent). Task inherits schedule backend_id.',
       inputSchema: schedulesCreateInputSchema,
       outputSchema: okEnvelope.extend({ schedule: z.unknown() }).shape,
     }),
     wrap(async (raw) => {
-      // MCP path: Schema v2 trigger/policy/task. Web/API still accepts legacy createScheduleSchema.
       const parsed = schedulesCreateInputSchema.parse(raw);
-      const created = await schedules.create(parseScheduleCreateV2(parsed));
+      const created = await schedules.create(parseScheduleCreate(parsed));
       return {
         schedule: snakeSchedule(created),
         idempotency: {
@@ -456,11 +437,11 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.schedules.get',
     toolConfig('vacps.schedules.get', {
       description: 'Get a schedule definition including revision, trigger, and policy.',
-      inputSchema: schedulesIdInputSchema,
+      inputSchema: schedulesGetInputSchema,
       outputSchema: okEnvelope.extend({ schedule: z.unknown() }).shape,
     }),
     wrap(async (args) => {
-      const parsed = schedulesIdInputSchema.parse(args);
+      const parsed = schedulesGetInputSchema.parse(args);
       return { schedule: snakeSchedule(await schedules.get(parsed.schedule_id)) };
     }),
   );
@@ -496,7 +477,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.schedules.update',
     toolConfig('vacps.schedules.update', {
       description:
-        'Patch a schedule (Schema v2). Pass expected_revision for optimistic concurrency; only fields in changes are applied.',
+        'Patch a schedule (Schema v3). Pass expected_revision for optimistic concurrency; only name/enabled/trigger/policy/task in changes are applied.',
       inputSchema: schedulesUpdateInputSchema,
       outputSchema: okEnvelope.extend({ schedule: z.unknown() }).shape,
     }),
@@ -560,7 +541,7 @@ export function createMcpServer(env: Env): McpServer {
     return backend;
   };
 
-  // ── Command / shell / process (Schema v2) ──────────────────────────
+  // ── Command / shell / process (Schema v3) ──────────────────────────
   server.registerTool(
     'vacps.command.exec',
     toolConfig('vacps.command.exec', {
@@ -591,18 +572,75 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
+  const processStartOutput = okEnvelope.extend({
+    process_id: z.string(),
+    status: z.string(),
+  }).shape;
+
   server.registerTool(
-    'vacps.process.start',
-    toolConfig('vacps.process.start', {
+    'vacps.process.start_command',
+    toolConfig('vacps.process.start_command', {
       description:
-        'Start a long-running or interactive process. mode is required: exec (program+arguments) or shell (command). Returns a full Process Snapshot. stdout/stderr_hard_max_bytes are 0..1073741824.',
-      inputSchema: processStartInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+        'Start a long-running or interactive argv process (program + arguments). Returns a full Process Snapshot.',
+      inputSchema: processStartCommandInputSchema,
+      outputSchema: processStartOutput,
     }),
     wrap(async (args) => {
-      const parsed = processStartInputSchema.parse(args);
+      const parsed = processStartCommandInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.processStart(backend, parsed)) as Record<string, unknown>;
+      // Agent still uses mode=exec on /process/start.
+      return (await client.processStart(backend, {
+        mode: 'exec',
+        backend_id: parsed.backend_id,
+        program: parsed.program,
+        ...(parsed.arguments ? { arguments: parsed.arguments } : {}),
+        ...(parsed.working_directory ? { working_directory: parsed.working_directory } : {}),
+        ...(parsed.environment ? { environment: parsed.environment } : {}),
+        ...(typeof parsed.tty === 'boolean' ? { tty: parsed.tty } : {}),
+        ...(parsed.timeout_ms !== undefined ? { timeout_ms: parsed.timeout_ms } : {}),
+        ...(parsed.stdout_hard_max_bytes !== undefined
+          ? { stdout_hard_max_bytes: parsed.stdout_hard_max_bytes }
+          : {}),
+        ...(parsed.stderr_hard_max_bytes !== undefined
+          ? { stderr_hard_max_bytes: parsed.stderr_hard_max_bytes }
+          : {}),
+        ...(parsed.idempotency_key ? { idempotency_key: parsed.idempotency_key } : {}),
+      })) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.process.start_shell',
+    toolConfig('vacps.process.start_shell', {
+      description:
+        'Start a long-running or interactive shell-string process. Returns a full Process Snapshot.',
+      inputSchema: processStartShellInputSchema,
+      outputSchema: processStartOutput,
+    }),
+    wrap(async (args) => {
+      const parsed = processStartShellInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      // Agent still uses mode=shell on /process/start.
+      return (await client.processStart(backend, {
+        mode: 'shell',
+        backend_id: parsed.backend_id,
+        command: parsed.command,
+        ...(parsed.shell ? { shell: parsed.shell } : {}),
+        ...(typeof parsed.load_user_environment === 'boolean'
+          ? { load_user_environment: parsed.load_user_environment }
+          : {}),
+        ...(parsed.working_directory ? { working_directory: parsed.working_directory } : {}),
+        ...(parsed.environment ? { environment: parsed.environment } : {}),
+        ...(typeof parsed.tty === 'boolean' ? { tty: parsed.tty } : {}),
+        ...(parsed.timeout_ms !== undefined ? { timeout_ms: parsed.timeout_ms } : {}),
+        ...(parsed.stdout_hard_max_bytes !== undefined
+          ? { stdout_hard_max_bytes: parsed.stdout_hard_max_bytes }
+          : {}),
+        ...(parsed.stderr_hard_max_bytes !== undefined
+          ? { stderr_hard_max_bytes: parsed.stderr_hard_max_bytes }
+          : {}),
+        ...(parsed.idempotency_key ? { idempotency_key: parsed.idempotency_key } : {}),
+      })) as Record<string, unknown>;
     }),
   );
 
@@ -648,7 +686,7 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
-  // ── Files (Schema v2) ──────────────────────────────────────────────
+  // ── Files (Schema v3) ──────────────────────────────────────────────
   server.registerTool(
     'vacps.files.read',
     toolConfig('vacps.files.read', {
@@ -705,18 +743,17 @@ export function createMcpServer(env: Env): McpServer {
         includeHidden: parsed.include_hidden === true,
         ...(parsed.cursor ? { cursor: parsed.cursor } : {}),
       })) as Record<string, unknown>;
-      // Normalize legacy matches → entries if an older agent still returns matches.
+      // Schema v3 public output is entries-only (never expose matches).
       const entries = Array.isArray(raw.entries)
         ? raw.entries
         : Array.isArray(raw.matches)
           ? raw.matches
           : [];
-      const { matches: _drop, ...rest } = raw;
       return {
-        ...rest,
         entries,
         returned_count:
           typeof raw.returned_count === 'number' ? raw.returned_count : entries.length,
+        truncated: Boolean(raw.truncated),
         next_cursor: (raw.next_cursor as string | null | undefined) ?? null,
       };
     }),
@@ -952,8 +989,8 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
-  // Schema v2 list patches: process.start oneOf + annotations + schema version meta.
-  applySchemaV2ListPatches(server);
+  // Schema v3 list patches: annotations + schema version meta (no oneOf injection).
+  applySchemaV3ListPatches(server);
 
   return server;
 }
@@ -967,11 +1004,12 @@ export async function computeToolSchemaHash(): Promise<string> {
 }
 
 /**
- * Schema v2 tools/list patches:
- * - inject process.start oneOf (SDK cannot emit superRefine XOR)
+ * Schema v3 tools/list patches:
  * - ensure annotations present on every tool
+ * - stamp tool_schema_version / revision meta
+ * - strip nested $schema keywords from Zod-generated JSON Schema
  */
-function applySchemaV2ListPatches(server: McpServer): void {
+function applySchemaV3ListPatches(server: McpServer): void {
   const host = server as unknown as {
     _registeredTools?: Record<
       string,
@@ -987,7 +1025,11 @@ function applySchemaV2ListPatches(server: McpServer): void {
 
   for (const [name, tool] of Object.entries(host._registeredTools ?? {})) {
     tool.annotations = annotationsFor(name);
-    tool._meta = { tool_schema_revision: TOOL_SCHEMA_REVISION, ...(tool._meta ?? {}) };
+    tool._meta = {
+      tool_schema_revision: TOOL_SCHEMA_REVISION,
+      tool_schema_version: '3.0',
+      ...(tool._meta ?? {}),
+    };
   }
 
   const previous = host.server._requestHandlers.get('tools/list');
@@ -1004,14 +1046,11 @@ function applySchemaV2ListPatches(server: McpServer): void {
       _meta?: Record<string, unknown>;
     };
     for (const tool of result.tools ?? []) {
-      if (tool.name === 'vacps.process.start') {
-        tool.inputSchema = { ...processStartListJsonSchema };
-      }
       if (tool.name) {
         tool.annotations = annotationsFor(tool.name);
         tool._meta = {
           ...(tool._meta ?? {}),
-          tool_schema_version: '2.0',
+          tool_schema_version: '3.0',
           tool_schema_revision: TOOL_SCHEMA_REVISION,
         };
       }
@@ -1020,7 +1059,7 @@ function applySchemaV2ListPatches(server: McpServer): void {
     }
     result._meta = {
       ...(result._meta ?? {}),
-      tool_schema_version: '2.0',
+      tool_schema_version: '3.0',
       tool_schema_revision: TOOL_SCHEMA_REVISION,
       mcp_server_version: MCP_PROTOCOL_VERSION,
     };
@@ -1125,7 +1164,7 @@ function deriveBackendStatus(lastStatus: unknown): 'healthy' | 'unhealthy' | 'un
   return 'unknown';
 }
 
-/** Normalize agent capabilities into Schema v2 nested shape (no dotted feature keys). */
+/** Normalize agent capabilities into Schema v3 nested shape (no dotted feature keys). */
 function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unknown> {
   const featuresRaw = (raw.features ?? {}) as Record<string, unknown>;
   const enginesRaw = (raw.engines ?? {}) as Record<string, unknown>;
@@ -1265,7 +1304,7 @@ function snakeSchedule(schedule: {
   };
 }
 
-/** Map internal CreateTaskInput → Schema v2 public task (kind command|shell|agent). */
+/** Map internal CreateTaskInput → Schema v3 public task (kind command|shell|agent). */
 function publicScheduleTask(template: unknown): Record<string, unknown> {
   if (!template || typeof template !== 'object') {
     return { kind: 'unknown' };
@@ -1359,7 +1398,7 @@ function publicScheduleTask(template: unknown): Record<string, unknown> {
   };
 }
 
-/** Recursively convert object keys to snake_case for Schema v2 status payloads. */
+/** Recursively convert object keys to snake_case for Schema v3 status payloads. */
 function snakeStatus(status: unknown): unknown {
   if (Array.isArray(status)) return status.map((item) => snakeStatus(item));
   if (!status || typeof status !== 'object') return status;

@@ -335,7 +335,7 @@ export class TaskService {
           ? { expectedStreamVersion: input.expectedStreamVersion }
           : {}),
       })) as Record<string, unknown>;
-      // Schema v2: only `content` (never both data and content).
+      // Schema v3: only `content` (never both data and content).
       const body =
         payload.content !== undefined
           ? payload.content

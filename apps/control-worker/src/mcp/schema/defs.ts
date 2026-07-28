@@ -1,9 +1,14 @@
 import { z } from 'zod';
 
 /**
- * Shared field schemas ($defs) for MCP Schema v2.
+ * Shared field schemas ($defs) for MCP Schema v3.
  * Single source for tools/list, runtime parse, and publicToolJsonSchemas.
  */
+
+/** Canonical content hash / stream identity: always `sha256:` + 64 lowercase hex. */
+export const sha256Schema = z
+  .string()
+  .regex(/^sha256:[a-f0-9]{64}$/, 'must be sha256:<64 lowercase hex chars>');
 
 export const backendIdSchema = z
   .string()
@@ -66,17 +71,16 @@ export const listLimitSchema = z.number().int().min(1).max(2000);
 export const pageLimitSchema = z.number().int().min(1).max(200);
 export const maxMatchesSchema = z.number().int().min(1).max(500);
 export const contextLinesSchema = z.number().int().min(0).max(10);
-export const sha256Schema = z
-  .string()
-  .min(1)
-  .max(80)
-  .regex(/^(sha256:)?[a-fA-F0-9]{64}$/, 'invalid sha256');
 
 export const argumentsSchema = z.array(z.string().max(100_000)).max(1000);
 
 /** JSON Schema $defs fragment for docs / public export. */
 export function publicDefsJson(): Record<string, unknown> {
   return {
+    sha256: {
+      type: 'string',
+      pattern: '^sha256:[a-f0-9]{64}$',
+    },
     backend_id: z.toJSONSchema(backendIdSchema),
     path: z.toJSONSchema(pathSchema),
     idempotency_key: z.toJSONSchema(idempotencyKeySchema),

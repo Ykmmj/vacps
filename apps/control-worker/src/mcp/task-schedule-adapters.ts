@@ -1,6 +1,6 @@
 /**
- * Map Schema v2 MCP task/schedule tool inputs → internal CreateTaskInput / CreateScheduleInput.
- * Keeps nested optional-branch tools (create_command / create_shell / create_agent) model-friendly.
+ * Map Schema v3 MCP task/schedule tool inputs → internal CreateTaskInput / CreateScheduleInput.
+ * Split create tools (create_command / create_shell / create_agent) — no legacy combined schema.
  */
 import {
   createScheduleSchema,
@@ -13,7 +13,6 @@ import {
 } from '@vacps/contracts';
 import { z } from 'zod';
 
-import { AppError } from '../lib/http.js';
 import {
   argumentsSchema,
   backendIdSchema,
@@ -26,6 +25,7 @@ import {
   pathSchema,
   programSchema,
   scheduleIdSchema,
+  sha256Schema,
   taskIdSchema,
 } from './schema/defs.js';
 
@@ -80,44 +80,6 @@ export const tasksCreateAgentInputSchema = z.strictObject({
     .optional(),
 });
 
-/** Legacy combined create — kept for one migration cycle. */
-export const tasksCreateLegacyInputSchema = z.strictObject({
-  backend_id: backendIdSchema,
-  type: z.enum(['shell', 'agent']),
-  name: z.string().min(1).max(200).optional(),
-  working_directory: pathSchema.optional(),
-  timeout_seconds: z.number().int().min(1).max(86_400),
-  profile: z.string().min(1).max(64).optional(),
-  idempotency_key: idempotencyKeySchema.optional(),
-  labels: labelsSchema.optional(),
-  environment: environmentSchema.optional(),
-  shell: z
-    .strictObject({
-      mode: z.enum(['exec', 'script']),
-      program: programSchema.optional(),
-      arguments: argumentsSchema.optional(),
-      interpreter: programSchema.optional(),
-      interpreter_arguments: z.array(z.string().max(4096)).max(20).optional(),
-      content: z.string().max(1_048_576).optional(),
-    })
-    .optional(),
-  agent: z
-    .strictObject({
-      prompt: z.string().min(1).max(1_048_576),
-      profile: z.enum(['restricted', 'diagnostic', 'standard', 'privileged']).optional(),
-      max_steps: z.number().int().min(1).max(1000).optional(),
-      permissions: z
-        .strictObject({
-          shell: z.boolean().optional(),
-          network: z.boolean().optional(),
-          file_write: z.boolean().optional(),
-        })
-        .optional(),
-    })
-    .optional(),
-  output: outputOptionsMcp,
-});
-
 export const tasksListInputSchema = z.strictObject({
   backend_id: backendIdSchema.optional(),
   kind: z.enum(['shell', 'agent', 'command']).optional(),
@@ -139,13 +101,10 @@ export const tasksOutputReadInputSchema = z.strictObject({
   stream: z.enum(['stdout', 'stderr']).optional(),
   offset: z.number().int().min(0).optional(),
   max_bytes: z.number().int().min(1).max(1_048_576).optional(),
-  // Opaque stream identity token (sha256:<64 hex>).
-  expected_stream_version: z
-    .string()
-    .regex(/^sha256:[a-fA-F0-9]{64}$/, 'expected_stream_version must be sha256:<64 hex chars>')
-    .optional(),
+  expected_stream_version: sha256Schema.optional(),
 });
 
+/** Mutating task ops (cancel/retry) may carry idempotency_key. */
 export const tasksIdInputSchema = z.strictObject({
   task_id: taskIdSchema,
   idempotency_key: idempotencyKeySchema.optional(),
@@ -223,17 +182,6 @@ export const schedulesCreateInputSchema = z.strictObject({
   idempotency_key: idempotencyKeySchema.optional(),
 });
 
-/** Legacy flat create still accepted during migration. */
-export const schedulesCreateLegacyInputSchema = z.strictObject({
-  backend_id: backendIdSchema,
-  name: z.string().min(1).max(120),
-  cron: z.string().min(1).max(120),
-  timezone: z.string().min(1).max(120).optional(),
-  enabled: z.boolean().optional(),
-  task_template: z.record(z.string(), z.unknown()),
-  idempotency_key: idempotencyKeySchema.optional(),
-});
-
 export const schedulesUpdateInputSchema = z.strictObject({
   schedule_id: scheduleIdSchema,
   expected_revision: z.number().int().min(1).optional(),
@@ -256,10 +204,6 @@ export const schedulesUpdateInputSchema = z.strictObject({
         })
         .optional(),
       task: scheduleTaskSchema.optional(),
-      // Legacy field names still accepted inside changes.
-      cron: z.string().min(1).max(120).optional(),
-      timezone: z.string().min(1).max(120).optional(),
-      task_template: z.record(z.string(), z.unknown()).optional(),
     })
     .refine((value) => Object.keys(value).length > 0, {
       message: 'changes must include at least one field',
@@ -267,6 +211,12 @@ export const schedulesUpdateInputSchema = z.strictObject({
   idempotency_key: idempotencyKeySchema.optional(),
 });
 
+/** Read-only get — no idempotency_key. */
+export const schedulesGetInputSchema = z.strictObject({
+  schedule_id: scheduleIdSchema,
+});
+
+/** Delete / run_now — may carry idempotency_key. */
 export const schedulesIdInputSchema = z.strictObject({
   schedule_id: scheduleIdSchema,
   idempotency_key: idempotencyKeySchema.optional(),
@@ -375,54 +325,6 @@ export function toCreateAgentTask(
   });
 }
 
-/** Legacy vacps.tasks.create parser. */
-export function parseLegacyTaskCreate(raw: z.infer<typeof tasksCreateLegacyInputSchema>): CreateTaskInput {
-  const base = baseTaskFields(raw);
-  if (raw.type === 'shell') {
-    const shell = raw.shell;
-    if (!shell) throw new AppError('validation_error', 'shell is required for type=shell.', 400);
-    if (shell.mode === 'exec') {
-      return createTaskSchema.parse({
-        ...base,
-        type: 'shell',
-        shell: {
-          mode: 'exec',
-          program: shell.program ?? '',
-          arguments: shell.arguments ?? [],
-        },
-      });
-    }
-    return createTaskSchema.parse({
-      ...base,
-      type: 'shell',
-      shell: {
-        mode: 'script',
-        interpreter: shell.interpreter ?? '/bin/bash',
-        interpreterArguments: shell.interpreter_arguments ?? ['-c'],
-        content: shell.content ?? '',
-      },
-    });
-  }
-  const agent = raw.agent;
-  if (!agent) throw new AppError('validation_error', 'agent is required for type=agent.', 400);
-  const permissions = agent.permissions ?? {};
-  return createTaskSchema.parse({
-    ...base,
-    type: 'agent',
-    ...(typeof raw.profile === 'string' ? { profile: raw.profile } : {}),
-    agent: {
-      prompt: agent.prompt,
-      ...(agent.profile ? { profile: agent.profile } : {}),
-      ...(agent.max_steps !== undefined ? { maxSteps: agent.max_steps } : {}),
-      permissions: {
-        shell: Boolean(permissions.shell),
-        network: Boolean(permissions.network),
-        fileWrite: Boolean(permissions.file_write),
-      },
-    },
-  });
-}
-
 function scheduleTaskToCreateTask(
   backendId: string,
   task: z.infer<typeof scheduleTaskSchema>,
@@ -483,7 +385,8 @@ function mapPolicy(
   });
 }
 
-export function parseScheduleCreateV2(
+/** Map Schema v3 schedules.create input → internal CreateScheduleInput. */
+export function parseScheduleCreate(
   input: z.infer<typeof schedulesCreateInputSchema>,
 ): CreateScheduleInput {
   // Task template must not re-specify backend; inherit schedule.backend_id.
@@ -500,38 +403,7 @@ export function parseScheduleCreateV2(
   });
 }
 
-export function parseScheduleCreateLegacy(
-  raw: z.infer<typeof schedulesCreateLegacyInputSchema>,
-): CreateScheduleInput {
-  const templateRaw = { ...raw.task_template } as Record<string, unknown>;
-  // Strip nested backend_id if present; always use top-level.
-  if (templateRaw.backend_id && String(templateRaw.backend_id) !== raw.backend_id) {
-    throw new AppError(
-      'validation_error',
-      'task_template.backend_id must match schedule backend_id or be omitted.',
-      400,
-    );
-  }
-  templateRaw.backend_id = raw.backend_id;
-  const taskTemplate = parseLegacyTaskCreate(
-    tasksCreateLegacyInputSchema.parse({
-      ...templateRaw,
-      backend_id: raw.backend_id,
-      timeout_seconds: Number(templateRaw.timeout_seconds ?? 600),
-      type: templateRaw.type ?? 'shell',
-    }),
-  );
-  return createScheduleSchema.parse({
-    backendId: raw.backend_id,
-    name: raw.name,
-    cron: raw.cron,
-    timezone: raw.timezone ?? 'UTC',
-    enabled: raw.enabled ?? true,
-    taskTemplate,
-    ...(raw.idempotency_key ? { idempotencyKey: raw.idempotency_key } : {}),
-  });
-}
-
+/** Map Schema v3 schedules.update input → internal PatchScheduleInput. */
 export function parseSchedulePatch(
   input: z.infer<typeof schedulesUpdateInputSchema>,
   backendId: string,
@@ -541,8 +413,6 @@ export function parseSchedulePatch(
   if (input.changes.enabled !== undefined) changes.enabled = input.changes.enabled;
   if (input.changes.trigger?.expression) changes.cron = input.changes.trigger.expression;
   if (input.changes.trigger?.timezone) changes.timezone = input.changes.trigger.timezone;
-  if (input.changes.cron) changes.cron = input.changes.cron;
-  if (input.changes.timezone) changes.timezone = input.changes.timezone;
   if (input.changes.policy) {
     changes.policy = {
       ...(input.changes.policy.concurrency
@@ -556,23 +426,6 @@ export function parseSchedulePatch(
   }
   if (input.changes.task) {
     changes.taskTemplate = scheduleTaskToCreateTask(backendId, input.changes.task);
-  } else if (input.changes.task_template) {
-    const templateRaw = { ...input.changes.task_template } as Record<string, unknown>;
-    if (templateRaw.backend_id && String(templateRaw.backend_id) !== backendId) {
-      throw new AppError(
-        'validation_error',
-        'task_template.backend_id must match schedule backend_id or be omitted.',
-        400,
-      );
-    }
-    changes.taskTemplate = parseLegacyTaskCreate(
-      tasksCreateLegacyInputSchema.parse({
-        ...templateRaw,
-        backend_id: backendId,
-        timeout_seconds: Number(templateRaw.timeout_seconds ?? 600),
-        type: templateRaw.type ?? 'shell',
-      }),
-    );
   }
   return {
     ...(input.expected_revision !== undefined
