@@ -22,10 +22,34 @@ PUBLIC_BASE_URL=''
 QUICK_TUNNEL=false
 ALLOW_APT=false
 RESUME_INSTALL=false
+PURGE_DATA=false
+REMOVE_USER=false
+REMOVE_MANAGED_TUNNEL=false
 HEALTH_CHECK_TIMEOUT_SECONDS=90
 HEALTH_CHECK_DELAY_SECONDS=2
 
 usage() {
+  cat <<'EOF'
+Usage: sudo bash agent.sh <command> [options]
+
+Commands:
+  install      Install VACPS on this host (or resume an interrupted install).
+  upgrade      Pull the latest code, rebuild, and restart. Keeps identity, env, and data.
+  reinstall    Remove the service (data preserved by default), then install again.
+  uninstall    Stop and remove the service and local configuration.
+
+Run "sudo bash agent.sh <command> --help" for command-specific options.
+
+Examples:
+  curl -fsSL https://<control-plane>/agent.sh | sudo bash -s -- install --repo ... --registration-token ...
+  curl -fsSL https://<control-plane>/agent.sh | sudo bash -s -- upgrade
+  curl -fsSL https://<control-plane>/agent.sh | sudo bash -s -- upgrade --ref main
+  curl -fsSL https://<control-plane>/agent.sh | sudo bash -s -- reinstall --repo ... --registration-token ...
+  curl -fsSL https://<control-plane>/agent.sh | sudo bash -s -- uninstall
+EOF
+}
+
+install_usage() {
   cat <<'EOF'
 Usage: sudo bash agent.sh install --repo <git-url> --registration-token <token> --redis-url <redis-url> --control-plane-url <url> --control-plane-public-key <key> (--public-url <url> | --quick-tunnel) [options]
 
@@ -50,6 +74,43 @@ Optional:
 EOF
 }
 
+upgrade_usage() {
+  cat <<'EOF'
+Usage: sudo bash agent.sh upgrade [options]
+
+Updates an existing VACPS installation: fetches the selected Git ref, rebuilds
+packages, rewrites the systemd unit from the checkout, and restarts the service.
+Preserves BACKEND_ID, Ed25519 identity, Redis/control-plane settings, task data,
+and logs. A new registration token is not required.
+
+Optional:
+  --ref <git-ref>           Git branch/tag to deploy, default: main.
+  --repo <git-url>          Expected repository URL (must match the existing origin).
+  --control-plane-url <url> Refresh CONTROL_PLANE_URL in the env file.
+  --control-plane-public-key <key>
+                            Refresh CONTROL_PLANE_PUBLIC_KEY in the env file.
+  --allow-apt               Ensure the apt sudoers rule and unit drop-in are present.
+  --help, -h                Show this help message.
+EOF
+}
+
+reinstall_usage() {
+  cat <<'EOF'
+Usage: sudo bash agent.sh reinstall [uninstall-options] --repo <git-url> --registration-token <token> ...
+
+Stops and removes the current service (same defaults as uninstall: data and
+agent user are preserved), then runs a full install with the given options.
+A fresh registration token is required.
+
+Uninstall options (before or mixed with install options):
+  --purge-data              Delete /var/lib/vacps before reinstalling.
+  --remove-user             Delete the agent system user (requires --purge-data).
+  --remove-managed-tunnel   Stop and remove this host's cloudflared system service.
+
+Install options: same as "agent.sh install --help".
+EOF
+}
+
 uninstall_usage() {
   cat <<'EOF'
 Usage: sudo bash agent.sh uninstall [options]
@@ -66,126 +127,32 @@ Options:
 EOF
 }
 
-uninstall_agent() {
-  local purge_data=false remove_user=false remove_managed_tunnel=false
-  while (($#)); do
-    case "$1" in
-      --purge-data) purge_data=true; shift ;;
-      --remove-user) remove_user=true; shift ;;
-      --remove-managed-tunnel) remove_managed_tunnel=true; shift ;;
-      --help|-h) uninstall_usage; return 0 ;;
-      *) echo "Unknown uninstall option: $1" >&2; uninstall_usage >&2; return 2 ;;
-    esac
-  done
+require_root() {
   if ((EUID != 0)); then
-    echo 'Run this uninstaller with sudo.' >&2
+    echo 'Run this command with sudo.' >&2
     return 1
-  fi
-  if [[ $remove_user == true && $purge_data != true ]]; then
-    echo '--remove-user requires --purge-data so no agent-owned data is left behind.' >&2
-    return 2
-  fi
-
-  systemctl disable --now vacps 2>/dev/null || true
-  systemctl disable --now vacps-quick-tunnel 2>/dev/null || true
-  if [[ $remove_managed_tunnel == true ]]; then
-    systemctl disable --now cloudflared 2>/dev/null || true
-    if command -v cloudflared >/dev/null; then cloudflared service uninstall 2>/dev/null || true; fi
-  fi
-
-  rm -f /etc/systemd/system/vacps.service
-  rm -rf /etc/systemd/system/vacps.service.d
-  rm -f /etc/systemd/system/vacps-quick-tunnel.service
-  rm -f /usr/local/lib/vacps/quick-tunnel.sh
-  rm -rf "$NVM_DIR"
-  rmdir /usr/local/lib/vacps 2>/dev/null || true
-  rm -f /etc/sudoers.d/vacps-apt
-  rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
-  if [[ $purge_data == true ]]; then
-    rm -rf "$DATA_DIRECTORY"
-  else
-    echo "Preserved $DATA_DIRECTORY (SQLite task records and logs). Re-run with --purge-data to delete it."
-  fi
-  if [[ $remove_user == true ]] && id "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER"; fi
-  systemctl daemon-reload
-  systemctl reset-failed vacps vacps-quick-tunnel 2>/dev/null || true
-  echo 'VACPS service files have been removed.'
-  if [[ $remove_managed_tunnel != true ]]; then
-    echo 'cloudflared was left installed and unchanged. Use --remove-managed-tunnel only when this host has no other cloudflared service.'
   fi
 }
 
-if [[ ${1:-} == uninstall ]]; then
-  shift
-  uninstall_agent "$@"
-  exit $?
-fi
-if [[ ${1:-} == install ]]; then shift; fi
-
-while (($#)); do
-  case "$1" in
-    --repo) REPOSITORY_URL=${2:?missing value for --repo}; shift 2 ;;
-    --backend-id) BACKEND_ID=${2:?missing value for --backend-id}; shift 2 ;;
-    --registration-token) REGISTRATION_TOKEN=${2:?missing value for --registration-token}; shift 2 ;;
-    --backend-name) BACKEND_NAME=${2:?missing value for --backend-name}; shift 2 ;;
-    --tags) BACKEND_TAGS=${2:?missing value for --tags}; shift 2 ;;
-    --redis-url) REDIS_URL=${2:?missing value for --redis-url}; shift 2 ;;
-    --tunnel-token) TUNNEL_TOKEN=${2:?missing value for --tunnel-token}; shift 2 ;;
-    --control-plane-url) CONTROL_PLANE_URL=${2:?missing value for --control-plane-url}; shift 2 ;;
-    --control-plane-public-key) CONTROL_PLANE_PUBLIC_KEY=${2:?missing value for --control-plane-public-key}; shift 2 ;;
-    --public-url) PUBLIC_BASE_URL=${2:?missing value for --public-url}; shift 2 ;;
-    --quick-tunnel) QUICK_TUNNEL=true; shift ;;
-    --ref) REPOSITORY_REF=${2:?missing value for --ref}; shift 2 ;;
-    --allow-apt) ALLOW_APT=true; shift ;;
-    --help|-h) usage; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+normalize_repository_url() {
+  local value=${1%/}
+  local lowercase
+  value=${value%.git}
+  lowercase=${value,,}
+  case "$lowercase" in
+    https://github.com/*) printf 'github.com/%s\n' "${lowercase#https://github.com/}" ;;
+    http://github.com/*) printf 'github.com/%s\n' "${lowercase#http://github.com/}" ;;
+    ssh://git@github.com/*) printf 'github.com/%s\n' "${lowercase#ssh://git@github.com/}" ;;
+    git@github.com:*) printf 'github.com/%s\n' "${lowercase#git@github.com:}" ;;
+    git://github.com/*) printf 'github.com/%s\n' "${lowercase#git://github.com/}" ;;
+    github.com/*) printf '%s\n' "$lowercase" ;;
+    *) printf '%s\n' "$value" ;;
   esac
-done
+}
 
-if ((EUID != 0)); then
-  echo 'Run this installer with sudo.' >&2
-  exit 1
-fi
-if [[ -z $REPOSITORY_URL || -z $REGISTRATION_TOKEN || -z $REDIS_URL || -z $CONTROL_PLANE_URL || -z $CONTROL_PLANE_PUBLIC_KEY ]]; then
-  echo 'Missing a required option.' >&2
-  usage >&2
-  exit 2
-fi
-if [[ $REDIS_URL != redis://* && $REDIS_URL != rediss://* ]]; then
-  echo 'Redis URL must use redis:// or rediss://.' >&2
-  exit 2
-fi
-if [[ $REDIS_URL == redis://* ]]; then
-  echo 'Warning: redis:// is plaintext. Use it only when Redis is private/restricted and never exposed to the public Internet.' >&2
-fi
-if [[ $CONTROL_PLANE_URL != https://* ]]; then
-  echo 'Control-plane URL must use HTTPS.' >&2
-  exit 2
-fi
-if [[ ! $REGISTRATION_TOKEN =~ ^[A-Za-z0-9_-]{43}$ ]]; then
-  echo 'Registration token must be a base64url 32-byte value.' >&2
-  exit 2
-fi
-if [[ ! $CONTROL_PLANE_PUBLIC_KEY =~ ^[A-Za-z0-9_-]{43}$ ]]; then
-  echo 'Control-plane public key must be a base64url Ed25519 public key.' >&2
-  exit 2
-fi
-if [[ $QUICK_TUNNEL == true && ( -n $PUBLIC_BASE_URL || -n $TUNNEL_TOKEN ) ]]; then
-  echo '--quick-tunnel cannot be combined with --public-url or --tunnel-token.' >&2
-  exit 2
-fi
-if [[ $QUICK_TUNNEL == false && $PUBLIC_BASE_URL != https://* ]]; then
-  echo 'Managed/manual Tunnel mode requires a public Agent URL using HTTPS.' >&2
-  exit 2
-fi
-if [[ -n $BACKEND_ID && ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
-  echo 'Backend ID must match [a-z0-9-]{1,64}.' >&2
-  exit 2
-fi
-if [[ -z $BACKEND_NAME ]]; then BACKEND_NAME=$(hostname -s); fi
-
-apt-get update
-apt-get install -y ca-certificates curl git build-essential python3 sudo
+git_in_app() {
+  git -c "safe.directory=$APP_DIRECTORY" -C "$APP_DIRECTORY" "$@"
+}
 
 install_nvm_node() {
   install -d -m 755 "$NVM_DIR"
@@ -206,66 +173,6 @@ install_nvm_node() {
   corepack enable pnpm
 }
 
-normalize_repository_url() {
-  local value=${1%/}
-  local lowercase
-  value=${value%.git}
-  lowercase=${value,,}
-  case "$lowercase" in
-    https://github.com/*) printf 'github.com/%s\n' "${lowercase#https://github.com/}" ;;
-    http://github.com/*) printf 'github.com/%s\n' "${lowercase#http://github.com/}" ;;
-    ssh://git@github.com/*) printf 'github.com/%s\n' "${lowercase#ssh://git@github.com/}" ;;
-    git@github.com:*) printf 'github.com/%s\n' "${lowercase#git@github.com:}" ;;
-    git://github.com/*) printf 'github.com/%s\n' "${lowercase#git://github.com/}" ;;
-    github.com/*) printf '%s\n' "$lowercase" ;;
-    *) printf '%s\n' "$value" ;;
-  esac
-}
-
-install_nvm_node
-if [[ -e $APP_DIRECTORY ]]; then
-  if [[ ! -d $APP_DIRECTORY/.git ||
-    ! -f $APP_DIRECTORY/apps/vacps/package.json ||
-    ! -f $APP_DIRECTORY/apps/vacps/systemd/vacps.service ||
-    ! -f $APP_DIRECTORY/packages/contracts/package.json ||
-    ! -f $ENVIRONMENT_FILE ||
-    ! -f /etc/systemd/system/vacps.service ]]; then
-    echo "$APP_DIRECTORY exists but is not a resumable VACPS installation; refusing to overwrite it." >&2
-    exit 1
-  fi
-  # The checkout is owned by the unprivileged service user after installation.
-  # Reading its config file directly avoids Git's safe.directory rejection when
-  # this root-run installer resumes a partially completed installation.
-  EXISTING_REPOSITORY_URL=$(git config --file "$APP_DIRECTORY/.git/config" --get remote.origin.url 2>/dev/null || true)
-  NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
-  NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
-  if [[ -z $EXISTING_REPOSITORY_URL || $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
-    echo "$APP_DIRECTORY belongs to a different Git repository; refusing to overwrite it." >&2
-    if [[ $NORMALIZED_EXISTING_REPOSITORY_URL == github.com/* && $NORMALIZED_REQUESTED_REPOSITORY_URL == github.com/* ]]; then
-      echo "Existing repository: $NORMALIZED_EXISTING_REPOSITORY_URL" >&2
-      echo "Requested repository: $NORMALIZED_REQUESTED_REPOSITORY_URL" >&2
-    fi
-    exit 1
-  fi
-  EXISTING_BACKEND_ID=$(sed -n 's/^BACKEND_ID=//p' "$ENVIRONMENT_FILE" | head -n 1)
-  if [[ -z $EXISTING_BACKEND_ID || ! $EXISTING_BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
-    echo "Could not recover a valid Backend ID from $ENVIRONMENT_FILE." >&2
-    exit 1
-  fi
-  if [[ -n $BACKEND_ID && $BACKEND_ID != "$EXISTING_BACKEND_ID" ]]; then
-    echo "Backend ID $BACKEND_ID does not match the existing installation ($EXISTING_BACKEND_ID)." >&2
-    exit 1
-  fi
-  BACKEND_ID=$EXISTING_BACKEND_ID
-  RESUME_INSTALL=true
-  echo "Resuming the existing VACPS installation for $BACKEND_ID."
-else
-  if [[ -z $BACKEND_ID ]]; then
-    BACKEND_ID="vacps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
-  fi
-  git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
-fi
-
 generate_agent_identity() {
   local identity
   identity=$(node --input-type=module -e '
@@ -281,82 +188,6 @@ generate_agent_identity() {
     exit 1
   fi
 }
-
-AGENT_PRIVATE_KEY=''
-AGENT_PUBLIC_KEY=''
-if [[ $RESUME_INSTALL == true ]]; then
-  AGENT_PRIVATE_KEY=$(sed -n 's/^AGENT_PRIVATE_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
-  AGENT_PUBLIC_KEY=$(sed -n 's/^AGENT_PUBLIC_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
-fi
-# Fresh installs never set these above; under `set -u` the regex test must use defaults.
-if [[ ! ${AGENT_PRIVATE_KEY} =~ ^[A-Za-z0-9_-]{64,256}$ || ! ${AGENT_PUBLIC_KEY} =~ ^[A-Za-z0-9_-]{43}$ ]]; then
-  generate_agent_identity
-fi
-
-cd "$APP_DIRECTORY"
-if [[ $RESUME_INSTALL == false ]]; then
-  pnpm --version
-  pnpm install --frozen-lockfile
-  pnpm --filter @vacps/contracts build
-  pnpm --filter @vacps/agent build
-fi
-
-useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
-install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
-install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
-install -d /etc/vacps /etc/systemd/system/vacps.service.d
-chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
-
-install -m 640 -o root -g "$SERVICE_USER" /dev/null "$ENVIRONMENT_FILE"
-cat >"$ENVIRONMENT_FILE" <<EOF
-BACKEND_ID=$BACKEND_ID
-BACKEND_NAME=$BACKEND_NAME
-BACKEND_TAGS=$BACKEND_TAGS
-AGENT_PRIVATE_KEY=$AGENT_PRIVATE_KEY
-AGENT_PUBLIC_KEY=$AGENT_PUBLIC_KEY
-CONTROL_PLANE_PUBLIC_KEY=$CONTROL_PLANE_PUBLIC_KEY
-REGISTRATION_TOKEN=$REGISTRATION_TOKEN
-CONTROL_PLANE_URL=$CONTROL_PLANE_URL
-PUBLIC_BASE_URL=$PUBLIC_BASE_URL
-REGISTRATION_INTERVAL_SECONDS=300
-TELEMETRY_FALLBACK_INTERVAL_SECONDS=120
-LISTEN_HOST=127.0.0.1
-LISTEN_PORT=3100
-REDIS_URL=$REDIS_URL
-DATABASE_PATH=/var/lib/vacps/agent.db
-LOG_DIR=/var/lib/vacps/logs
-WORKER_CONCURRENCY=1
-RUN_MODE=all
-DEFAULT_PROFILE=full
-PI_COMMAND=pi
-PI_COMMAND_ARGS_JSON=[]
-EOF
-chmod 640 "$ENVIRONMENT_FILE"
-
-install -m 644 "$APP_DIRECTORY/apps/vacps/systemd/vacps.service" /etc/systemd/system/vacps.service
-NODE_BINARY=$(command -v node)
-cat >/etc/systemd/system/vacps.service.d/node.conf <<EOF
-[Service]
-ExecStart=
-ExecStart=$NODE_BINARY /opt/vacps/apps/vacps/dist/main.js
-EOF
-
-if [[ $ALLOW_APT == true ]]; then
-  cat >/etc/sudoers.d/vacps-apt <<EOF
-# apt-get can execute package maintainer scripts as root. Treat this as root access.
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get
-EOF
-  chmod 440 /etc/sudoers.d/vacps-apt
-  visudo -cf /etc/sudoers.d/vacps-apt
-  cat >/etc/systemd/system/vacps.service.d/allow-apt.conf <<'EOF'
-[Service]
-NoNewPrivileges=false
-EOF
-fi
-
-systemctl daemon-reload
-systemctl enable vacps
-systemctl restart vacps
 
 wait_for_agent_health() {
   local deadline=$((SECONDS + HEALTH_CHECK_TIMEOUT_SECONDS))
@@ -379,8 +210,6 @@ wait_for_agent_health() {
   journalctl -u vacps -n 50 --no-pager >&2 || true
   return 1
 }
-
-wait_for_agent_health
 
 install_cloudflared() {
   MACHINE_ARCHITECTURE=$(dpkg --print-architecture)
@@ -436,20 +265,451 @@ EOF
   systemctl enable --now vacps-quick-tunnel
 }
 
-if [[ $QUICK_TUNNEL == true ]]; then
-  install_cloudflared
-  install_quick_tunnel_service
-  echo 'Quick Tunnel is starting. It will print a temporary trycloudflare.com URL and register the Agent automatically.'
-elif [[ -n $TUNNEL_TOKEN ]]; then
-  install_cloudflared
-  if ! systemctl is-enabled --quiet cloudflared 2>/dev/null; then
-    cloudflared service install "$TUNNEL_TOKEN"
+write_systemd_unit() {
+  install -d /etc/systemd/system/vacps.service.d
+  install -m 644 "$APP_DIRECTORY/apps/vacps/systemd/vacps.service" /etc/systemd/system/vacps.service
+  NODE_BINARY=$(command -v node)
+  cat >/etc/systemd/system/vacps.service.d/node.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=$NODE_BINARY /opt/vacps/apps/vacps/dist/main.js
+EOF
+
+  if [[ $ALLOW_APT == true ]]; then
+    cat >/etc/sudoers.d/vacps-apt <<EOF
+# apt-get can execute package maintainer scripts as root. Treat this as root access.
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get
+EOF
+    chmod 440 /etc/sudoers.d/vacps-apt
+    visudo -cf /etc/sudoers.d/vacps-apt
+    cat >/etc/systemd/system/vacps.service.d/allow-apt.conf <<'EOF'
+[Service]
+NoNewPrivileges=false
+EOF
   fi
+}
+
+build_agent_packages() {
+  cd "$APP_DIRECTORY"
+  pnpm --version
+  pnpm install --frozen-lockfile
+  pnpm --filter @vacps/contracts build
+  pnpm --filter @vacps/agent build
+}
+
+is_installed_layout() {
+  [[ -d $APP_DIRECTORY/.git &&
+    -f $APP_DIRECTORY/apps/vacps/package.json &&
+    -f $APP_DIRECTORY/apps/vacps/systemd/vacps.service &&
+    -f $APP_DIRECTORY/packages/contracts/package.json &&
+    -f $ENVIRONMENT_FILE &&
+    -f /etc/systemd/system/vacps.service ]]
+}
+
+require_installed() {
+  if ! is_installed_layout; then
+    echo "No VACPS installation found at $APP_DIRECTORY. Run install first." >&2
+    return 1
+  fi
+}
+
+parse_install_options() {
+  while (($#)); do
+    case "$1" in
+      --repo) REPOSITORY_URL=${2:?missing value for --repo}; shift 2 ;;
+      --backend-id) BACKEND_ID=${2:?missing value for --backend-id}; shift 2 ;;
+      --registration-token) REGISTRATION_TOKEN=${2:?missing value for --registration-token}; shift 2 ;;
+      --backend-name) BACKEND_NAME=${2:?missing value for --backend-name}; shift 2 ;;
+      --tags) BACKEND_TAGS=${2:?missing value for --tags}; shift 2 ;;
+      --redis-url) REDIS_URL=${2:?missing value for --redis-url}; shift 2 ;;
+      --tunnel-token) TUNNEL_TOKEN=${2:?missing value for --tunnel-token}; shift 2 ;;
+      --control-plane-url) CONTROL_PLANE_URL=${2:?missing value for --control-plane-url}; shift 2 ;;
+      --control-plane-public-key) CONTROL_PLANE_PUBLIC_KEY=${2:?missing value for --control-plane-public-key}; shift 2 ;;
+      --public-url) PUBLIC_BASE_URL=${2:?missing value for --public-url}; shift 2 ;;
+      --quick-tunnel) QUICK_TUNNEL=true; shift ;;
+      --ref) REPOSITORY_REF=${2:?missing value for --ref}; shift 2 ;;
+      --allow-apt) ALLOW_APT=true; shift ;;
+      --purge-data) PURGE_DATA=true; shift ;;
+      --remove-user) REMOVE_USER=true; shift ;;
+      --remove-managed-tunnel) REMOVE_MANAGED_TUNNEL=true; shift ;;
+      --help|-h) return 100 ;;
+      *) echo "Unknown option: $1" >&2; return 2 ;;
+    esac
+  done
+}
+
+validate_install_options() {
+  if [[ -z $REPOSITORY_URL || -z $REGISTRATION_TOKEN || -z $REDIS_URL || -z $CONTROL_PLANE_URL || -z $CONTROL_PLANE_PUBLIC_KEY ]]; then
+    echo 'Missing a required option.' >&2
+    install_usage >&2
+    return 2
+  fi
+  if [[ $REDIS_URL != redis://* && $REDIS_URL != rediss://* ]]; then
+    echo 'Redis URL must use redis:// or rediss://.' >&2
+    return 2
+  fi
+  if [[ $REDIS_URL == redis://* ]]; then
+    echo 'Warning: redis:// is plaintext. Use it only when Redis is private/restricted and never exposed to the public Internet.' >&2
+  fi
+  if [[ $CONTROL_PLANE_URL != https://* ]]; then
+    echo 'Control-plane URL must use HTTPS.' >&2
+    return 2
+  fi
+  if [[ ! $REGISTRATION_TOKEN =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+    echo 'Registration token must be a base64url 32-byte value.' >&2
+    return 2
+  fi
+  if [[ ! $CONTROL_PLANE_PUBLIC_KEY =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+    echo 'Control-plane public key must be a base64url Ed25519 public key.' >&2
+    return 2
+  fi
+  if [[ $QUICK_TUNNEL == true && ( -n $PUBLIC_BASE_URL || -n $TUNNEL_TOKEN ) ]]; then
+    echo '--quick-tunnel cannot be combined with --public-url or --tunnel-token.' >&2
+    return 2
+  fi
+  if [[ $QUICK_TUNNEL == false && $PUBLIC_BASE_URL != https://* ]]; then
+    echo 'Managed/manual Tunnel mode requires a public Agent URL using HTTPS.' >&2
+    return 2
+  fi
+  if [[ -n $BACKEND_ID && ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
+    echo 'Backend ID must match [a-z0-9-]{1,64}.' >&2
+    return 2
+  fi
+  if [[ -z $BACKEND_NAME ]]; then BACKEND_NAME=$(hostname -s); fi
+}
+
+uninstall_agent() {
+  while (($#)); do
+    case "$1" in
+      --purge-data) PURGE_DATA=true; shift ;;
+      --remove-user) REMOVE_USER=true; shift ;;
+      --remove-managed-tunnel) REMOVE_MANAGED_TUNNEL=true; shift ;;
+      --help|-h) uninstall_usage; return 0 ;;
+      *) echo "Unknown uninstall option: $1" >&2; uninstall_usage >&2; return 2 ;;
+    esac
+  done
+  require_root
+  if [[ $REMOVE_USER == true && $PURGE_DATA != true ]]; then
+    echo '--remove-user requires --purge-data so no agent-owned data is left behind.' >&2
+    return 2
+  fi
+
+  systemctl disable --now vacps 2>/dev/null || true
+  systemctl disable --now vacps-quick-tunnel 2>/dev/null || true
+  if [[ $REMOVE_MANAGED_TUNNEL == true ]]; then
+    systemctl disable --now cloudflared 2>/dev/null || true
+    if command -v cloudflared >/dev/null; then cloudflared service uninstall 2>/dev/null || true; fi
+  fi
+
+  rm -f /etc/systemd/system/vacps.service
+  rm -rf /etc/systemd/system/vacps.service.d
+  rm -f /etc/systemd/system/vacps-quick-tunnel.service
+  rm -f /usr/local/lib/vacps/quick-tunnel.sh
+  rm -rf "$NVM_DIR"
+  rmdir /usr/local/lib/vacps 2>/dev/null || true
+  rm -f /etc/sudoers.d/vacps-apt
+  rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
+  if [[ $PURGE_DATA == true ]]; then
+    rm -rf "$DATA_DIRECTORY"
+  else
+    echo "Preserved $DATA_DIRECTORY (SQLite task records and logs). Re-run with --purge-data to delete it."
+  fi
+  if [[ $REMOVE_USER == true ]] && id "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER"; fi
+  systemctl daemon-reload
+  systemctl reset-failed vacps vacps-quick-tunnel 2>/dev/null || true
+  echo 'VACPS service files have been removed.'
+  if [[ $REMOVE_MANAGED_TUNNEL != true ]]; then
+    echo 'cloudflared was left installed and unchanged. Use --remove-managed-tunnel only when this host has no other cloudflared service.'
+  fi
+}
+
+update_checkout() {
+  local ref=$1
+  echo "Updating checkout to $ref..."
+  # Shallow clones: fetch the requested ref and reset hard onto it.
+  if ! git_in_app fetch --depth 1 origin "$ref"; then
+    echo "Could not fetch $ref from origin. Check network access and that the ref exists." >&2
+    return 1
+  fi
+  if git_in_app rev-parse --verify "origin/$ref" >/dev/null 2>&1; then
+    git_in_app checkout -B "$ref" "origin/$ref"
+  else
+    git_in_app checkout -B "$ref" FETCH_HEAD
+  fi
+}
+
+upgrade_agent() {
+  while (($#)); do
+    case "$1" in
+      --ref) REPOSITORY_REF=${2:?missing value for --ref}; shift 2 ;;
+      --repo) REPOSITORY_URL=${2:?missing value for --repo}; shift 2 ;;
+      --control-plane-url) CONTROL_PLANE_URL=${2:?missing value for --control-plane-url}; shift 2 ;;
+      --control-plane-public-key) CONTROL_PLANE_PUBLIC_KEY=${2:?missing value for --control-plane-public-key}; shift 2 ;;
+      --allow-apt) ALLOW_APT=true; shift ;;
+      --help|-h) upgrade_usage; return 0 ;;
+      *) echo "Unknown upgrade option: $1" >&2; upgrade_usage >&2; return 2 ;;
+    esac
+  done
+  require_root
+  require_installed
+
+  if [[ -n $CONTROL_PLANE_URL && $CONTROL_PLANE_URL != https://* ]]; then
+    echo 'Control-plane URL must use HTTPS.' >&2
+    return 2
+  fi
+  if [[ -n $CONTROL_PLANE_PUBLIC_KEY && ! $CONTROL_PLANE_PUBLIC_KEY =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+    echo 'Control-plane public key must be a base64url Ed25519 public key.' >&2
+    return 2
+  fi
+
+  EXISTING_REPOSITORY_URL=$(git config --file "$APP_DIRECTORY/.git/config" --get remote.origin.url 2>/dev/null || true)
+  if [[ -z $EXISTING_REPOSITORY_URL ]]; then
+    echo "Could not read origin URL from $APP_DIRECTORY." >&2
+    return 1
+  fi
+  if [[ -n $REPOSITORY_URL ]]; then
+    NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
+    NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
+    if [[ $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
+      echo "$APP_DIRECTORY belongs to a different Git repository; refusing to upgrade." >&2
+      echo "Existing repository: $NORMALIZED_EXISTING_REPOSITORY_URL" >&2
+      echo "Requested repository: $NORMALIZED_REQUESTED_REPOSITORY_URL" >&2
+      return 1
+    fi
+  fi
+
+  BACKEND_ID=$(sed -n 's/^BACKEND_ID=//p' "$ENVIRONMENT_FILE" | head -n 1)
+  if [[ -z $BACKEND_ID || ! $BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
+    echo "Could not recover a valid Backend ID from $ENVIRONMENT_FILE." >&2
+    return 1
+  fi
+
+  echo "Upgrading VACPS installation for $BACKEND_ID (ref: $REPOSITORY_REF)."
+  systemctl stop vacps 2>/dev/null || true
+
+  apt-get update
+  apt-get install -y ca-certificates curl git build-essential python3 sudo
+  install_nvm_node
+  update_checkout "$REPOSITORY_REF"
+  build_agent_packages
+
+  if [[ -n $CONTROL_PLANE_URL ]]; then
+    if grep -q '^CONTROL_PLANE_URL=' "$ENVIRONMENT_FILE"; then
+      sed -i "s|^CONTROL_PLANE_URL=.*|CONTROL_PLANE_URL=$CONTROL_PLANE_URL|" "$ENVIRONMENT_FILE"
+    else
+      printf 'CONTROL_PLANE_URL=%s\n' "$CONTROL_PLANE_URL" >>"$ENVIRONMENT_FILE"
+    fi
+  fi
+  if [[ -n $CONTROL_PLANE_PUBLIC_KEY ]]; then
+    if grep -q '^CONTROL_PLANE_PUBLIC_KEY=' "$ENVIRONMENT_FILE"; then
+      sed -i "s|^CONTROL_PLANE_PUBLIC_KEY=.*|CONTROL_PLANE_PUBLIC_KEY=$CONTROL_PLANE_PUBLIC_KEY|" "$ENVIRONMENT_FILE"
+    else
+      printf 'CONTROL_PLANE_PUBLIC_KEY=%s\n' "$CONTROL_PLANE_PUBLIC_KEY" >>"$ENVIRONMENT_FILE"
+    fi
+  fi
+
+  useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
+  write_systemd_unit
+
+  systemctl daemon-reload
+  systemctl enable vacps
   systemctl restart vacps
-  echo "Managed Tunnel installed for $PUBLIC_BASE_URL."
+  wait_for_agent_health
+
+  echo "VACPS $BACKEND_ID upgraded successfully (ref: $REPOSITORY_REF)."
+  if [[ $ALLOW_APT == true ]]; then
+    echo 'apt enabled: Agent tasks may run sudo apt-get install -y <package>; this is root-equivalent access.'
+  fi
+}
+
+install_agent() {
+  require_root
+  validate_install_options
+
+  apt-get update
+  apt-get install -y ca-certificates curl git build-essential python3 sudo
+  install_nvm_node
+
+  if [[ -e $APP_DIRECTORY ]]; then
+    if ! is_installed_layout; then
+      echo "$APP_DIRECTORY exists but is not a resumable VACPS installation; refusing to overwrite it." >&2
+      echo 'Use "agent.sh reinstall" after uninstall, or remove the directory manually.' >&2
+      exit 1
+    fi
+    # The checkout is owned by the unprivileged service user after installation.
+    # Reading its config file directly avoids Git's safe.directory rejection when
+    # this root-run installer resumes a partially completed installation.
+    EXISTING_REPOSITORY_URL=$(git config --file "$APP_DIRECTORY/.git/config" --get remote.origin.url 2>/dev/null || true)
+    NORMALIZED_EXISTING_REPOSITORY_URL=$(normalize_repository_url "$EXISTING_REPOSITORY_URL")
+    NORMALIZED_REQUESTED_REPOSITORY_URL=$(normalize_repository_url "$REPOSITORY_URL")
+    if [[ -z $EXISTING_REPOSITORY_URL || $NORMALIZED_EXISTING_REPOSITORY_URL != "$NORMALIZED_REQUESTED_REPOSITORY_URL" ]]; then
+      echo "$APP_DIRECTORY belongs to a different Git repository; refusing to overwrite it." >&2
+      if [[ $NORMALIZED_EXISTING_REPOSITORY_URL == github.com/* && $NORMALIZED_REQUESTED_REPOSITORY_URL == github.com/* ]]; then
+        echo "Existing repository: $NORMALIZED_EXISTING_REPOSITORY_URL" >&2
+        echo "Requested repository: $NORMALIZED_REQUESTED_REPOSITORY_URL" >&2
+      fi
+      exit 1
+    fi
+    EXISTING_BACKEND_ID=$(sed -n 's/^BACKEND_ID=//p' "$ENVIRONMENT_FILE" | head -n 1)
+    if [[ -z $EXISTING_BACKEND_ID || ! $EXISTING_BACKEND_ID =~ ^[a-z0-9-]{1,64}$ ]]; then
+      echo "Could not recover a valid Backend ID from $ENVIRONMENT_FILE." >&2
+      exit 1
+    fi
+    if [[ -n $BACKEND_ID && $BACKEND_ID != "$EXISTING_BACKEND_ID" ]]; then
+      echo "Backend ID $BACKEND_ID does not match the existing installation ($EXISTING_BACKEND_ID)." >&2
+      exit 1
+    fi
+    BACKEND_ID=$EXISTING_BACKEND_ID
+    RESUME_INSTALL=true
+    echo "Resuming the existing VACPS installation for $BACKEND_ID."
+  else
+    if [[ -z $BACKEND_ID ]]; then
+      BACKEND_ID="vacps-$(dd if=/dev/urandom bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')"
+    fi
+    git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$APP_DIRECTORY"
+  fi
+
+  AGENT_PRIVATE_KEY=''
+  AGENT_PUBLIC_KEY=''
+  if [[ $RESUME_INSTALL == true ]]; then
+    AGENT_PRIVATE_KEY=$(sed -n 's/^AGENT_PRIVATE_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
+    AGENT_PUBLIC_KEY=$(sed -n 's/^AGENT_PUBLIC_KEY=//p' "$ENVIRONMENT_FILE" | head -n 1)
+  fi
+  # Fresh installs never set these above; under `set -u` the regex test must use defaults.
+  if [[ ! ${AGENT_PRIVATE_KEY} =~ ^[A-Za-z0-9_-]{64,256}$ || ! ${AGENT_PUBLIC_KEY} =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+    generate_agent_identity
+  fi
+
+  if [[ $RESUME_INSTALL == false ]]; then
+    build_agent_packages
+  fi
+
+  useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null || true
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
+  install -d /etc/vacps /etc/systemd/system/vacps.service.d
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
+
+  install -m 640 -o root -g "$SERVICE_USER" /dev/null "$ENVIRONMENT_FILE"
+  cat >"$ENVIRONMENT_FILE" <<EOF
+BACKEND_ID=$BACKEND_ID
+BACKEND_NAME=$BACKEND_NAME
+BACKEND_TAGS=$BACKEND_TAGS
+AGENT_PRIVATE_KEY=$AGENT_PRIVATE_KEY
+AGENT_PUBLIC_KEY=$AGENT_PUBLIC_KEY
+CONTROL_PLANE_PUBLIC_KEY=$CONTROL_PLANE_PUBLIC_KEY
+REGISTRATION_TOKEN=$REGISTRATION_TOKEN
+CONTROL_PLANE_URL=$CONTROL_PLANE_URL
+PUBLIC_BASE_URL=$PUBLIC_BASE_URL
+REGISTRATION_INTERVAL_SECONDS=300
+TELEMETRY_FALLBACK_INTERVAL_SECONDS=120
+LISTEN_HOST=127.0.0.1
+LISTEN_PORT=3100
+REDIS_URL=$REDIS_URL
+DATABASE_PATH=/var/lib/vacps/agent.db
+LOG_DIR=/var/lib/vacps/logs
+WORKER_CONCURRENCY=1
+RUN_MODE=all
+DEFAULT_PROFILE=full
+PI_COMMAND=pi
+PI_COMMAND_ARGS_JSON=[]
+EOF
+  chmod 640 "$ENVIRONMENT_FILE"
+
+  write_systemd_unit
+  systemctl daemon-reload
+  systemctl enable vacps
+  systemctl restart vacps
+  wait_for_agent_health
+
+  if [[ $QUICK_TUNNEL == true ]]; then
+    install_cloudflared
+    install_quick_tunnel_service
+    echo 'Quick Tunnel is starting. It will print a temporary trycloudflare.com URL and register the Agent automatically.'
+  elif [[ -n $TUNNEL_TOKEN ]]; then
+    install_cloudflared
+    if ! systemctl is-enabled --quiet cloudflared 2>/dev/null; then
+      cloudflared service install "$TUNNEL_TOKEN"
+    fi
+    systemctl restart vacps
+    echo "Managed Tunnel installed for $PUBLIC_BASE_URL."
+  fi
+
+  echo "VACPS $BACKEND_ID is running."
+  if [[ $ALLOW_APT == true ]]; then
+    echo 'apt enabled: Agent tasks may run sudo apt-get install -y <package>; this is root-equivalent access.'
+  fi
+}
+
+reinstall_agent() {
+  local parse_status=0
+  parse_install_options "$@" || parse_status=$?
+  if ((parse_status == 100)); then
+    reinstall_usage
+    return 0
+  fi
+  if ((parse_status != 0)); then
+    reinstall_usage >&2
+    return "$parse_status"
+  fi
+  require_root
+  validate_install_options
+
+  echo 'Reinstalling VACPS: removing the current service, then installing again.'
+  # PURGE_DATA / REMOVE_USER / REMOVE_MANAGED_TUNNEL already parsed above.
+  uninstall_args=()
+  if [[ $PURGE_DATA == true ]]; then uninstall_args+=(--purge-data); fi
+  if [[ $REMOVE_USER == true ]]; then uninstall_args+=(--remove-user); fi
+  if [[ $REMOVE_MANAGED_TUNNEL == true ]]; then uninstall_args+=(--remove-managed-tunnel); fi
+  uninstall_agent "${uninstall_args[@]}"
+
+  # Reset flags that install_agent must treat as a fresh install.
+  RESUME_INSTALL=false
+  install_agent
+}
+
+# --- entrypoint ----------------------------------------------------------------
+
+COMMAND=${1:-}
+if [[ $COMMAND == --help || $COMMAND == -h || $COMMAND == help ]]; then
+  usage
+  exit 0
+fi
+if [[ -z $COMMAND || $COMMAND == -* ]]; then
+  # Backward compatible: options without an explicit command mean install.
+  COMMAND=install
+else
+  shift
 fi
 
-echo "VACPS $BACKEND_ID is running."
-if [[ $ALLOW_APT == true ]]; then
-  echo 'apt enabled: Agent tasks may run sudo apt-get install -y <package>; this is root-equivalent access.'
-fi
+case "$COMMAND" in
+  install)
+    parse_status=0
+    parse_install_options "$@" || parse_status=$?
+    if ((parse_status == 100)); then install_usage; exit 0; fi
+    if ((parse_status != 0)); then install_usage >&2; exit "$parse_status"; fi
+    # Reject reinstall-only flags on plain install.
+    if [[ $PURGE_DATA == true || $REMOVE_USER == true || $REMOVE_MANAGED_TUNNEL == true ]]; then
+      echo 'Use "agent.sh reinstall" or "agent.sh uninstall" for --purge-data / --remove-user / --remove-managed-tunnel.' >&2
+      exit 2
+    fi
+    install_agent
+    ;;
+  upgrade)
+    upgrade_agent "$@"
+    ;;
+  reinstall)
+    reinstall_agent "$@"
+    ;;
+  uninstall)
+    uninstall_agent "$@"
+    ;;
+  *)
+    echo "Unknown command: $COMMAND" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

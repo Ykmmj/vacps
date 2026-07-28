@@ -67,7 +67,20 @@ Before copying an installer command, use the Web UI to generate a one-time regis
 
 Each report writes one current snapshot containing CPU, memory, root-disk usage, queue state, operating system, and upload/download byte rates. D1 keeps only the latest snapshot, which makes the UI inexpensive to poll and leaves a clean input for future roll-up charts; it is not raw time-series retention.
 
-To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. The uninstaller preserves `/var/lib/vacps` by default; use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
+Lifecycle commands are all served from the same installer script (`agent.sh`):
+
+- `install` — first-time install (or resume an interrupted install); generate the full command from the Web UI.
+- `upgrade` — pull the latest (or `--ref`) code, rebuild, and restart; keeps identity and data; no new registration token.
+- `reinstall` — uninstall then install again with a fresh registration token (data preserved unless `--purge-data`).
+- `uninstall` — remove the service; preserves `/var/lib/vacps` by default.
+
+Example upgrade:
+
+```bash
+curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- upgrade
+```
+
+To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. Use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
 
 To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
 

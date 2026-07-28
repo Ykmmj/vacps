@@ -114,6 +114,27 @@ Cloudflare records the registration request IP and its geographic metadata, then
 
 `--allow-apt` is optional and grants `agent` passwordless `sudo apt-get`. Package maintainer scripts run as root, so treat this exactly like root access.
 
+## Upgrade a VACPS
+
+On an already installed host, pull a new Git ref, rebuild, and restart without re-registering:
+
+```bash
+curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- upgrade
+```
+
+Optional flags: `--ref <branch-or-tag>` (default `main`), `--repo <git-url>` (must match the existing origin), `--control-plane-url` / `--control-plane-public-key` to refresh those env values, and `--allow-apt`. Identity keys, `BACKEND_ID`, Redis URL, task SQLite data, and logs are preserved. A new registration token is not required.
+
+## Reinstall a VACPS
+
+To remove the service and run a full install again (for example after an identity-auth migration), use `reinstall` with a fresh registration token and the same install flags as a first-time install:
+
+```bash
+curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- reinstall \
+  --repo <git-url> --registration-token <token> ...
+```
+
+By default `/var/lib/vacps` is preserved across reinstall. Pass `--purge-data` (and optionally `--remove-user`) when you want a clean data directory.
+
 ## Uninstall a VACPS
 
 For a Managed Tunnel, first choose **移除节点 / Remove node** on its card in the Web UI. This lets the control plane clean up the registered backend and managed Cloudflare resources. Then run the uninstaller on the VPS:
