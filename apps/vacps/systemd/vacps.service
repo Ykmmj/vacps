@@ -8,14 +8,21 @@ Type=simple
 User=agent
 Group=agent
 WorkingDirectory=/opt/vacps
+# Full agent identity for shell.exec (login env + ~/.bashrc).
+Environment=HOME=/home/agent
+Environment=USER=agent
+Environment=LOGNAME=agent
+Environment=SHELL=/bin/bash
 EnvironmentFile=/etc/vacps/vacps.env
 ExecStart=/usr/bin/node /opt/vacps/apps/vacps/dist/main.js
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
+# ProtectHome=true hides /home (shows as mode 000). Bind the real agent home instead.
 ProtectHome=true
-ReadWritePaths=/var/lib/vacps
+BindPaths=/home/agent
+ReadWritePaths=/var/lib/vacps /home/agent /opt/vacps
 
 [Install]
 WantedBy=multi-user.target

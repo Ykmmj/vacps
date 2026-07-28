@@ -937,17 +937,43 @@ export async function detectCapabilities() {
     }
   }
   return {
+    schema_version: '1.0',
     executables: {
       rg: { available: rgAvailable, version: rgVersion },
     },
     features: {
+      command_exec: true,
+      shell_exec: true,
+      interactive_process: true,
+      file_patch: true,
+      git_tools: true,
       'files.grep': true,
       'files.glob': true,
       'files.grep.engine': rgAvailable ? 'rg' : 'node_fallback',
       'files.glob.dialect': 'globstar',
-      'command.exec': true,
-      'shell.exec': true,
-      'process.start': true,
+    },
+    engines: {
+      grep: {
+        preferred: 'ripgrep',
+        available: rgAvailable,
+        fallback: 'node',
+        engine_features: rgAvailable
+          ? { regex_flavor: 'rust', respects_gitignore: true }
+          : {
+              regex_flavor: 'javascript',
+              respects_gitignore: false,
+              binary_files_skipped: true,
+            },
+      },
+      glob: {
+        globstar: true,
+        respect_gitignore: true,
+      },
+    },
+    limits: {
+      command_timeout_max_ms: 3_600_000,
+      process_output_read_max_bytes: 1_048_576,
+      file_read_max_bytes: 262_144,
     },
   };
 }
