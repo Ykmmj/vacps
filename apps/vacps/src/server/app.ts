@@ -87,6 +87,18 @@ export async function createServer(input: {
         .code(409)
         .send({ error: { code: 'backend_mismatch', message: 'Task targets another backend.' } });
     }
+    if (parsed.data.kind === 'agent') {
+      const pi = await input.piRuntime.availability();
+      if (!pi.available) {
+        return reply.code(409).send({
+          error: {
+            code: 'capability_unavailable',
+            message: 'Agent runtime (Pi) is not available on this backend.',
+            details: { capability: 'agent', pi: pi },
+          },
+        });
+      }
+    }
     await input.queue.enqueue(parsed.data);
     return reply.code(202).send({
       task_id: parsed.data.task_id,
@@ -756,13 +768,23 @@ export async function createServer(input: {
     }
   });
 
-  app.post('/tasks/:id/cancel', async (request) =>
-    input.queue.cancel((request.params as { id: string }).id),
-  );
+  app.post('/tasks/:id/cancel', async (request, reply) => {
+    try {
+      const result = await input.queue.cancel((request.params as { id: string }).id);
+      return { ok: true, task_id: (request.params as { id: string }).id, ...result };
+    } catch (error: unknown) {
+      return reply.code(400).send({
+        error: {
+          code: 'cancel_failed',
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  });
   app.post('/tasks/:id/retry', async (request, reply) => {
     try {
-      await input.queue.retry((request.params as { id: string }).id);
-      return reply.code(202).send({ status: 'queued' });
+      const result = await input.queue.retry((request.params as { id: string }).id);
+      return reply.code(202).send({ ok: true, ...result });
     } catch (error: unknown) {
       return reply.code(404).send({
         error: {
@@ -1085,14 +1107,22 @@ function runtimeError(
     statusCode?: number;
     current_sha256?: string;
     match_count?: number;
+    details?: Record<string, unknown>;
   };
-  const status = err.statusCode ?? fallbackStatus;
+  // Normalize Node errno names to VACPS codes.
+  let code = err.code ?? 'runtime_error';
+  let status = err.statusCode ?? fallbackStatus;
+  if (code === 'ENOENT') {
+    code = 'path_not_found';
+    status = 404;
+  }
   return reply.code(status).send({
     error: {
-      code: err.code ?? 'runtime_error',
+      code,
       message: err.message ?? (error instanceof Error ? error.message : String(error)),
       ...(err.current_sha256 ? { current_sha256: err.current_sha256 } : {}),
       ...(err.match_count !== undefined ? { match_count: err.match_count } : {}),
+      ...(err.details ? { details: err.details } : {}),
     },
   });
 }

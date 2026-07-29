@@ -235,11 +235,18 @@ export class BackendClient {
   }
 
   async cancelTask(backend: Pick<Backend, 'baseUrl'>, taskId: string): Promise<unknown> {
-    return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
+    // Always send JSON body so Content-Type: application/json is valid for the agent parser.
+    return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   }
 
   async retryTask(backend: Pick<Backend, 'baseUrl'>, taskId: string): Promise<unknown> {
-    return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' });
+    return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/retry`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   }
 
   async upsertScheduler(
@@ -316,6 +323,10 @@ export class BackendClient {
               ? 'backend_client_error'
               : 'backend_request_failed');
         const details: Record<string, unknown> = {
+          backend_status: response.status,
+          backend_url: targetUrl,
+          ...(err?.code ? { backend_code: err.code } : {}),
+          ...(err?.message ? { backend_message: err.message } : {}),
           ...(err?.details ?? {}),
           ...(err?.current_stream_version
             ? { current_stream_version: err.current_stream_version }

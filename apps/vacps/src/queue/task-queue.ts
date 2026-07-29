@@ -76,25 +76,61 @@ export class TaskQueue {
     };
   }
 
-  async cancel(taskId: string): Promise<{ cancelled: boolean; state: string }> {
-    if (this.runner.cancel(taskId)) return { cancelled: true, state: 'cancelling' };
+  async cancel(taskId: string): Promise<{
+    cancelled: boolean;
+    state: string;
+    already_terminal?: boolean;
+  }> {
+    const stored = this.store.getTask(taskId);
+    if (stored && ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(stored.status)) {
+      return {
+        cancelled: stored.status === 'cancelled',
+        state: stored.status,
+        already_terminal: true,
+      };
+    }
+    if (this.runner.cancel(taskId)) {
+      this.store.updateTask(taskId, { status: 'cancelled', finishedAt: new Date().toISOString() });
+      return { cancelled: true, state: 'cancelling' };
+    }
     const job = await this.queue.getJob(taskId);
-    if (!job) return { cancelled: false, state: 'not_found' };
+    if (!job) {
+      // Natural idempotency when unknown: treat as already gone.
+      this.store.updateTask(taskId, {
+        status: 'cancelled',
+        finishedAt: new Date().toISOString(),
+      });
+      return { cancelled: true, state: 'not_found', already_terminal: true };
+    }
     const state = await job.getState();
     if (state === 'waiting' || state === 'delayed' || state === 'prioritized') {
       await job.remove();
       this.store.updateTask(taskId, { status: 'cancelled', finishedAt: new Date().toISOString() });
       return { cancelled: true, state: 'cancelled' };
     }
-    return { cancelled: false, state };
+    if (state === 'active') {
+      // Signal graph abort; worker will stop at next checkpoint.
+      this.runner.cancel(taskId);
+      return { cancelled: true, state: 'cancelling' };
+    }
+    // completed / failed jobs — already terminal
+    return { cancelled: false, state, already_terminal: true };
   }
 
-  async retry(taskId: string): Promise<void> {
+  /** Re-enqueue a new task_id copy of a previous task (Schema v3). */
+  async retry(taskId: string): Promise<{ task_id: string; status: 'queued'; retry_of_task_id: string }> {
     const stored = this.store.getTask(taskId);
     if (!stored) throw new Error('Task not found.');
-    const job = await this.queue.getJob(taskId);
-    if (job) await job.remove();
-    await this.enqueue(stored.task);
+    const newId = randomUUID();
+    const { task_id: _old, schedule_id, ...rest } = stored.task;
+    const next = {
+      ...rest,
+      task_id: newId,
+      source: stored.task.source ?? 'api',
+      ...(schedule_id ? { schedule_id } : {}),
+    } as typeof stored.task;
+    await this.enqueue(next);
+    return { task_id: newId, status: 'queued', retry_of_task_id: taskId };
   }
 
   async metrics(): Promise<{ waiting: number; active: number; failed: number }> {

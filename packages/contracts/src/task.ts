@@ -99,19 +99,13 @@ export const createTaskSchema = z.discriminatedUnion('kind', [
 ]);
 
 /**
- * Schedule embedded task — same as createTask but backend_id is optional
- * (inherited from the schedule when omitted).
+ * Schedule embedded task — inherits schedule.backend_id.
+ * No nested backend_id or idempotency_key (schedule-level only).
  */
 export const scheduleTaskSchema = z.discriminatedUnion('kind', [
-  commandTaskSchema.omit({ backend_id: true }).extend({
-    backend_id: backendIdSchema.optional(),
-  }),
-  shellTaskSchema.omit({ backend_id: true }).extend({
-    backend_id: backendIdSchema.optional(),
-  }),
-  agentTaskSchema.omit({ backend_id: true }).extend({
-    backend_id: backendIdSchema.optional(),
-  }),
+  commandTaskSchema.omit({ backend_id: true, idempotency_key: true }),
+  shellTaskSchema.omit({ backend_id: true, idempotency_key: true }),
+  agentTaskSchema.omit({ backend_id: true, idempotency_key: true }),
 ]);
 
 export const taskDispatchSchema = createTaskSchema.and(

@@ -55,15 +55,7 @@ const createScheduleBaseSchema = z.object({
   idempotency_key: z.string().trim().min(1).max(200).optional(),
 });
 
-export const createScheduleSchema = createScheduleBaseSchema.superRefine((value, ctx) => {
-  if (value.task.backend_id && value.task.backend_id !== value.backend_id) {
-    ctx.addIssue({
-      code: 'custom',
-      message: 'task.backend_id must match schedule backend_id or be omitted.',
-      path: ['task', 'backend_id'],
-    });
-  }
-});
+export const createScheduleSchema = createScheduleBaseSchema;
 
 /** Partial update of schedule fields (backend_id is immutable). */
 export const updateScheduleSchema = createScheduleBaseSchema.omit({ backend_id: true }).partial();

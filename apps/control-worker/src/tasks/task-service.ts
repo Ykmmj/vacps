@@ -104,8 +104,8 @@ export class TaskService {
         .bind(
           taskId,
           input.backend_id,
-          // type column stores kind (Schema v3); kept for backward column name.
-          kind,
+          // D1 CHECK still allows only shell|agent on `type`; public kind is `command|shell|agent`.
+          kind === 'agent' ? 'agent' : 'shell',
           kind,
           source,
           input.profile,
@@ -118,7 +118,7 @@ export class TaskService {
           now,
         )
         .run();
-    } catch {
+    } catch (error) {
       if (input.idempotency_key) {
         const raced = await this.findByIdempotency(input.backend_id, input.idempotency_key);
         if (raced) {
@@ -136,7 +136,11 @@ export class TaskService {
           };
         }
       }
-      throw new AppError('internal_error', 'Could not create task index.', 500);
+      throw new AppError(
+        'internal_error',
+        `Could not create task index.${error instanceof Error ? ` ${error.message}` : ''}`,
+        500,
+      );
     }
 
     await this.setStatus(taskId, 'dispatching');
@@ -352,26 +356,70 @@ export class TaskService {
 
   async cancel(id: string): Promise<unknown> {
     const task = await this.get(id);
-    if (
-      ['succeeded', 'failed', 'cancelled', 'timed_out', 'dispatch_failed'].includes(task.status)
-    ) {
-      throw new AppError(
-        'task_state_conflict',
-        `Task '${id}' is ${task.status} and cannot be cancelled.`,
-        409,
-      );
+    // Natural idempotency: already terminal → stable cancelled-like result.
+    if (task.status === 'cancelled') {
+      return { task, already_terminal: true };
     }
-    const result = await this.client.cancelTask(await this.backends.get(task.backendId), id);
-    await this.setStatus(id, 'cancelled');
+    if (['succeeded', 'failed', 'timed_out', 'dispatch_failed'].includes(task.status)) {
+      return { task, already_terminal: true, cancelled: false };
+    }
+    const result = (await this.client.cancelTask(
+      await this.backends.get(task.backendId),
+      id,
+    )) as { cancelled?: boolean; state?: string };
+    // Mark cancelled when agent accepted or reported cancelling/cancelled.
+    if (result?.cancelled !== false) {
+      await this.setStatus(id, 'cancelled');
+    }
     return { task: await this.get(id), result };
   }
 
   async retry(id: string): Promise<unknown> {
     const original = await this.get(id);
     const backend = await this.backends.get(original.backendId);
-    const result = await this.client.retryTask(backend, id);
+    // Agent creates a new task_id; CP records a fresh index row from that result when possible.
+    const result = (await this.client.retryTask(backend, id)) as {
+      task_id?: string;
+      status?: string;
+    };
+    if (typeof result?.task_id === 'string' && result.task_id !== id) {
+      // Best-effort: insert a lightweight index pointer for the new task.
+      const now = new Date().toISOString();
+      await this.db
+        .prepare(
+          `INSERT OR IGNORE INTO tasks (
+             id, backend_id, type, kind, source, profile, name, summary, status, schedule_id,
+             retry_of_task_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'mcp', ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+        )
+        .bind(
+          result.task_id,
+          original.backendId,
+          original.kind === 'agent' ? 'agent' : 'shell',
+          original.kind,
+          original.profile,
+          original.name ?? null,
+          original.summary ?? null,
+          original.scheduleId ?? null,
+          id,
+          now,
+          now,
+        )
+        .run()
+        .catch(() => undefined);
+      return {
+        task: await this.get(result.task_id).catch(() => ({
+          ...original,
+          id: result.task_id!,
+          status: 'queued' as const,
+          retryOfTaskId: id,
+        })),
+        result,
+        retry_of_task_id: id,
+      };
+    }
     await this.setStatus(id, 'queued');
-    return { task: original, result, retry_of_task_id: id };
+    return { task: await this.get(id), result, retry_of_task_id: id };
   }
 
   private async findByIdempotency(

@@ -78,7 +78,7 @@ export const tasksGetInputSchema = z.strictObject({
 export const tasksOutputReadInputSchema = z.strictObject({
   task_id: taskIdSchema,
   stream: z.enum(['stdout', 'stderr']).optional(),
-  offset: z.number().int().min(0).optional(),
+  offset: z.number().int().min(0).max(107_374_182_400).optional(),
   max_bytes: z.number().int().min(1).max(1_048_576).optional(),
   expected_stream_version: sha256Schema.optional(),
 });

@@ -12,12 +12,14 @@ import {
   sha256Schema,
 } from './defs.js';
 
+const lineNumberSchema = z.number().int().min(1).max(2_147_483_647);
+
 export const filesReadInputSchema = z
   .object({
     backend_id: backendIdSchema,
     path: pathSchema,
-    start_line: z.number().int().min(1).optional(),
-    end_line: z.number().int().min(1).optional(),
+    start_line: lineNumberSchema.optional(),
+    end_line: lineNumberSchema.optional(),
     max_bytes: fileMaxBytesSchema.optional(),
     encoding: z.enum(['utf-8', 'base64']).optional(),
   })
