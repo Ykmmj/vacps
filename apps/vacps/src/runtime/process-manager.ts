@@ -467,7 +467,8 @@ export class ProcessManager {
       observed_at: new Date().toISOString(),
     });
     if (managed.chunks.length > 2000) managed.chunks.splice(0, managed.chunks.length - 2000);
-    for (const wake of managed.waiters.splice(0)) wake();
+    // Notify waiters without clearing — yield waiters only resolve when status !== running.
+    for (const wake of [...managed.waiters]) wake();
   }
 
   private finish(
@@ -584,22 +585,24 @@ function buildExecEnvironment(
   return base;
 }
 
+/**
+ * Wait until process exits or ms elapses.
+ * Must not drop waiters on intermediate stdout — that left only the full-timeout timer.
+ */
 function waitFor(managed: ManagedProcess, ms: number): Promise<void> {
   if (managed.status !== 'running' || ms <= 0) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-    const wake = () => {
-      if (managed.status !== 'running') {
-        cleanup();
-        resolve();
-      }
-    };
-    const cleanup = () => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       managed.waiters = managed.waiters.filter((item) => item !== wake);
+      resolve();
+    };
+    const timer = setTimeout(settle, ms);
+    const wake = () => {
+      if (managed.status !== 'running') settle();
     };
     managed.waiters.push(wake);
   });
