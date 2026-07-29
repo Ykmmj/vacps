@@ -37,9 +37,12 @@ import {
 } from './schedules.js';
 import { shellExecInputSchema } from './shell.js';
 import {
+  tasksCleanupPreviewInputSchema,
+  tasksCleanupRunInputSchema,
   tasksCreateAgentInputSchema,
   tasksCreateCommandInputSchema,
   tasksCreateShellInputSchema,
+  tasksDeleteInputSchema,
   tasksGetInputSchema,
   tasksIdInputSchema,
   tasksListInputSchema,
@@ -87,6 +90,9 @@ export function publicToolJsonSchemas(): Record<string, unknown> {
       'vacps.tasks.output.read': z.toJSONSchema(tasksOutputReadInputSchema),
       'vacps.tasks.cancel': z.toJSONSchema(tasksIdInputSchema),
       'vacps.tasks.retry': z.toJSONSchema(tasksIdInputSchema),
+      'vacps.tasks.delete': z.toJSONSchema(tasksDeleteInputSchema),
+      'vacps.tasks.cleanup.preview': z.toJSONSchema(tasksCleanupPreviewInputSchema),
+      'vacps.tasks.cleanup.run': z.toJSONSchema(tasksCleanupRunInputSchema),
       'vacps.schedules.create': z.toJSONSchema(schedulesCreateInputSchema),
       'vacps.schedules.get': z.toJSONSchema(schedulesGetInputSchema),
       'vacps.schedules.list': z.toJSONSchema(schedulesListInputSchema),

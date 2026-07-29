@@ -50,6 +50,9 @@ const EXPECTED_TOOLS = [
   'vacps.tasks.output.read',
   'vacps.tasks.cancel',
   'vacps.tasks.retry',
+  'vacps.tasks.delete',
+  'vacps.tasks.cleanup.preview',
+  'vacps.tasks.cleanup.run',
   'vacps.schedules.create',
   'vacps.schedules.get',
   'vacps.schedules.list',
@@ -75,6 +78,7 @@ const READ_ONLY_TOOLS = [
   'vacps.tasks.get',
   'vacps.tasks.list',
   'vacps.tasks.output.read',
+  'vacps.tasks.cleanup.preview',
   'vacps.schedules.get',
   'vacps.schedules.list',
 ] as const;

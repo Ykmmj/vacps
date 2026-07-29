@@ -92,6 +92,8 @@ export default {
       Promise.all([
         services.registrationTokens.purgeExpired(),
         services.agentSignatures.purgeExpired(),
+        // Soft-delete expired test tasks; hard-delete soft-deleted past grace.
+        services.tasks.purgeExpired(),
       ]),
     );
     // Best-effort cleanup of expired OAuth grants/tokens from KV.
@@ -433,14 +435,50 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     }
 
     if (resource === 'tasks') {
-      if (!id && request.method === 'GET')
-        return json(await services.tasks.list(Number(searchParams.get('limit') ?? 50)));
+      if (!id && request.method === 'GET') {
+        return json(
+          await services.tasks.list({
+            limit: Number(searchParams.get('limit') ?? 50),
+            ...(searchParams.get('backend_id')
+              ? { backendId: searchParams.get('backend_id')! }
+              : {}),
+            ...(searchParams.get('status') ? { status: searchParams.get('status')! } : {}),
+            ...(searchParams.get('environment')
+              ? { environment: searchParams.get('environment')! }
+              : {}),
+            ...(searchParams.get('source') ? { source: searchParams.get('source')! } : {}),
+            ...(searchParams.get('hide_test') === '1' || searchParams.get('hide_test') === 'true'
+              ? { hideTest: true }
+              : {}),
+            ...(searchParams.get('include_deleted') === '1' ||
+            searchParams.get('include_deleted') === 'true'
+              ? { includeDeleted: true }
+              : {}),
+            ...(searchParams.get('created_after')
+              ? { createdAfter: searchParams.get('created_after')! }
+              : {}),
+          }),
+        );
+      }
       if (!id && request.method === 'POST')
         return json(
           await services.tasks.create(createTaskSchema.parse(await readJson(request)), 'web'),
           { status: 202 },
         );
       if (id && !action && request.method === 'GET') return json(await services.tasks.detail(id));
+      if (id && !action && request.method === 'DELETE') {
+        const body = (await readJson(request).catch(() => ({}))) as {
+          mode?: 'soft' | 'hard';
+          reason?: string;
+        };
+        return json(
+          await services.tasks.delete(id, {
+            ...(body.mode ? { mode: body.mode } : {}),
+            ...(body.reason ? { reason: body.reason } : {}),
+            deletedBy: 'web',
+          }),
+        );
+      }
       if (id && action === 'logs' && request.method === 'GET')
         return json(await services.tasks.logs(id));
       if (id && action === 'cancel' && request.method === 'POST')

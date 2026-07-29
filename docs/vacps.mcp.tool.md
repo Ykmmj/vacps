@@ -73,7 +73,7 @@ Wire: **nested JSON**, **snake_case** keys, **snake_case** enums.
 
 ---
 
-## 最终 Tool 集（38）
+## 最终 Tool 集（41）
 
 ```text
 vacps.backends.list
@@ -113,6 +113,9 @@ vacps.tasks.list
 vacps.tasks.output.read
 vacps.tasks.cancel
 vacps.tasks.retry
+vacps.tasks.delete
+vacps.tasks.cleanup.preview
+vacps.tasks.cleanup.run
 
 vacps.schedules.create
 vacps.schedules.get
@@ -304,9 +307,30 @@ capabilities.get
 process.read
 files.stat / read / list / glob / grep
 git.status / diff
-tasks.get / list / output.read
+tasks.get / list / output.read / cleanup.preview
 schedules.get / list
 ```
+
+### Task 保留 / 清理（Phase 0–1）
+
+| Tool | 作用 |
+|------|------|
+| `tasks.list` | 过滤：`environment`、`source`、`labels`、`terminal`、`hide_test`、`include_deleted` 等；默认隐藏软删除 |
+| `tasks.delete` | 终态任务软删（默认）/ 硬删；活跃 → `task_not_terminal` |
+| `tasks.cleanup.preview` | 按 filter 统计可清理终态任务 |
+| `tasks.cleanup.run` | 批量软删；`expected_matched_count` 防范围漂移 |
+
+测试任务建议标签：
+
+```json
+{
+  "environment": "test",
+  "suite": "mcp-regression",
+  "purpose": "acceptance-test"
+}
+```
+
+控制面 cron 仅自动软删 **过期测试任务**（`environment=test` 或 `retention_class=test`），并对超过 24h 软删宽限的任务硬删。生产自动保留期需后续 Dry Run 后再开。
 
 ### 文件分页字段
 

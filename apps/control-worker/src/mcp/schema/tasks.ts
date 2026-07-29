@@ -63,9 +63,61 @@ export const tasksListInputSchema = z.strictObject({
   backend_id: backendIdSchema.optional(),
   kind: z.enum(['shell', 'agent', 'command']).optional(),
   status: z.string().min(1).max(64).optional(),
+  source: z.enum(['mcp', 'web', 'schedule', 'api']).optional(),
+  environment: z.string().min(1).max(64).optional(),
+  schedule_id: z.string().uuid().optional(),
+  /** When true, only terminal statuses; when false, only active. */
+  terminal: z.boolean().optional(),
+  /** Exact label matches (AND). Prefer environment/suite/purpose for tests. */
+  labels: z.record(z.string().min(1).max(64), z.string().max(256)).optional(),
   created_after: z.string().min(1).max(64).optional(),
+  created_before: z.string().min(1).max(64).optional(),
+  terminal_before: z.string().min(1).max(64).optional(),
+  expires_before: z.string().min(1).max(64).optional(),
+  /** Soft-deleted rows are hidden by default. */
+  include_deleted: z.boolean().optional(),
+  /** Hide environment=test / retention_class=test. */
+  hide_test: z.boolean().optional(),
   limit: pageLimitSchema.optional(),
   cursor: cursorSchema.optional(),
+});
+
+const cleanupFiltersSchema = z.strictObject({
+  backend_id: backendIdSchema.optional(),
+  schedule_id: z.string().uuid().optional(),
+  status: z.string().min(1).max(64).optional(),
+  source: z.enum(['mcp', 'web', 'schedule', 'api']).optional(),
+  environment: z.string().min(1).max(64).optional(),
+  labels: z.record(z.string().min(1).max(64), z.string().max(256)).optional(),
+  created_before: z.string().min(1).max(64).optional(),
+  created_after: z.string().min(1).max(64).optional(),
+  terminal_before: z.string().min(1).max(64).optional(),
+  expires_before: z.string().min(1).max(64).optional(),
+  expired_only: z.boolean().optional(),
+  test_only: z.boolean().optional(),
+  include_deleted: z.boolean().optional(),
+  deleted_before: z.string().min(1).max(64).optional(),
+});
+
+export const tasksDeleteInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+  mode: z.enum(['soft', 'hard']).optional(),
+  reason: z.string().min(1).max(500).optional(),
+  idempotency_key: idempotencyKeySchema.optional(),
+});
+
+export const tasksCleanupPreviewInputSchema = z.strictObject({
+  filters: cleanupFiltersSchema.optional(),
+  limit: z.number().int().min(1).max(5_000).optional(),
+});
+
+export const tasksCleanupRunInputSchema = z.strictObject({
+  filters: cleanupFiltersSchema.optional(),
+  mode: z.enum(['soft', 'hard']).optional(),
+  reason: z.string().min(1).max(500).optional(),
+  expected_matched_count: z.number().int().min(0).max(1_000_000).optional(),
+  limit: z.number().int().min(1).max(5_000).optional(),
+  idempotency_key: idempotencyKeySchema.optional(),
 });
 
 export const tasksGetInputSchema = z.strictObject({
