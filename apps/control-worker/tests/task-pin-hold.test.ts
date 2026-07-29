@@ -87,13 +87,37 @@ describe('task pin / legal hold', () => {
       status: 403,
     });
 
-    // Not in cleanup candidates while held
+    // Held tasks appear in matched/protected, not deletable samples
     const previewHeld = await tasks.cleanupPreview({ expiredOnly: true }, { limit: 100 });
     expect(previewHeld.sample_task_ids.includes(String(row.id))).toBe(false);
+    expect(previewHeld.sample_protected_ids.includes(String(row.id))).toBe(true);
+    expect(previewHeld.protected_count).toBeGreaterThanOrEqual(1);
+    expect(previewHeld.matched_count).toBe(
+      previewHeld.deletable_count + previewHeld.protected_count,
+    );
 
     await tasks.clearLegalHold(String(row.id));
     const del = await tasks.delete(String(row.id), { mode: 'soft' });
     expect(del.deleted).toBe(true);
+  });
+
+  it('preview splits pin + hold + plain into matched/deletable/protected', async () => {
+    const db = new FakeD1();
+    const plain = seed(db, 'succeeded');
+    const pinned = seed(db, 'failed');
+    const held = seed(db, 'cancelled');
+    const tasks = svc(db);
+    await tasks.pin(String(pinned.id), { pinnedBy: 'ops' });
+    await tasks.setLegalHold(String(held.id), { reason: 'audit', heldBy: 'admin' });
+
+    const preview = await tasks.cleanupPreview({ expiredOnly: true }, { limit: 100 });
+    expect(preview.matched_count).toBe(3);
+    expect(preview.deletable_count).toBe(1);
+    expect(preview.protected_count).toBe(2);
+    expect(preview.sample_task_ids).toEqual([String(plain.id)]);
+    expect(preview.sample_protected_ids.sort()).toEqual(
+      [String(pinned.id), String(held.id)].sort(),
+    );
   });
 
   it('maps task_legal_hold to permission category', async () => {

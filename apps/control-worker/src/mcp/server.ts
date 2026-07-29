@@ -597,6 +597,7 @@ export function createMcpServer(env: Env): McpServer {
         protected_count: z.number(),
         status_breakdown: z.record(z.string(), z.number()),
         sample_task_ids: z.array(z.string()),
+        sample_protected_ids: z.array(z.string()),
       }).shape,
     }),
     wrap(async (args) => {
@@ -612,7 +613,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.tasks.cleanup.run',
     toolConfig('vacps.tasks.cleanup.run', {
       description:
-        'Soft-delete (default) terminal tasks matching filters. Pass expected_matched_count from preview to guard against scope drift. Use test_only or environment=test first.',
+        'Soft-delete (default) terminal tasks matching filters. Pass expected_matched_count = preview.deletable_count (not matched_count; protected pin/hold rows are skipped). Use test_only or environment=test first.',
       inputSchema: tasksCleanupRunInputSchema,
       outputSchema: okEnvelope.extend({
         matched_count: z.number(),
