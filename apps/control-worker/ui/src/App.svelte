@@ -73,6 +73,7 @@
   let loadingCloudflareZones = $state(false);
   let selectingCloudflareZone = $state(false);
   let dashboardRequestInFlight = $state(false);
+  let cleaningTestHistory = $state(false);
 
   let text = $derived.by(() => {
     locale;
@@ -180,6 +181,15 @@
       download: m.download(),
       upload: m.upload(),
       unavailable: m.unavailable(),
+      recentFailures: m.recentFailures(),
+      recentFailuresHint: m.recentFailuresHint({ days: '{days}' }),
+      noRecentFailures: m.noRecentFailures(),
+      clearTestHistory: m.clearTestHistory({ count: '{count}' }),
+      clearingTestHistory: m.clearingTestHistory(),
+      confirmClearTestHistory: m.confirmClearTestHistory({ count: '{count}' }),
+      clearTestHistoryOk: m.clearTestHistoryOk({ count: '{count}' }),
+      clearTestHistoryNone: m.clearTestHistoryNone(),
+      clearTestHistoryFailed: m.clearTestHistoryFailed(),
     };
   });
   const tokenExpiry = $derived(registrationToken ? Date.parse(registrationToken.expiresAt) : 0);
@@ -514,6 +524,47 @@
       actingId = undefined;
     }
   }
+  async function clearTestHistory() {
+    if (cleaningTestHistory) return;
+    cleaningTestHistory = true;
+    try {
+      const preview = await api<{
+        matched_count: number;
+        deletable_count: number;
+      }>('/api/tasks/cleanup/preview', {
+        method: 'POST',
+        body: JSON.stringify({ filters: { test_only: true }, limit: 5000 }),
+      });
+      const count = preview.deletable_count ?? preview.matched_count ?? 0;
+      if (count <= 0) {
+        notice(text.clearTestHistoryNone);
+        await refresh();
+        return;
+      }
+      if (!confirm(text.confirmClearTestHistory.replace('{count}', String(count)))) return;
+      const result = await api<{ deleted_count: number }>('/api/tasks/cleanup/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          filters: { test_only: true },
+          mode: 'soft',
+          reason: 'dashboard_clear_test_history',
+          expected_matched_count: count,
+          limit: 5000,
+          idempotency_key: `dashboard-clear-test-${Date.now()}`,
+        }),
+      });
+      notice(
+        text.clearTestHistoryOk.replace('{count}', String(result.deleted_count ?? count)),
+        'success',
+      );
+      await refresh();
+    } catch (error) {
+      if (!isAuthenticationRequired(error))
+        notice(`${text.clearTestHistoryFailed}${messageOf(error)}`, 'error');
+    } finally {
+      cleaningTestHistory = false;
+    }
+  }
   function toggleTheme() {
     theme = theme === 'light' ? 'dark' : 'light';
     localStorage.setItem('vacps-theme', theme);
@@ -784,10 +835,12 @@
           {loading}
           bind:filter
           {actingId}
+          {cleaningTestHistory}
           {approve}
           {reject}
           {testBackend}
           {deleteBackend}
+          {clearTestHistory}
           {refresh}
           {copyToClipboard}
         />

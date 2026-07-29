@@ -111,5 +111,14 @@
   "system": "System",
   "download": "Download",
   "upload": "Upload",
-  "unavailable": "Unavailable"
+  "unavailable": "Unavailable",
+  "recentFailures": "Recent failures",
+  "recentFailuresHint": "Last {days} days · test tasks hidden · soft-deleted hidden",
+  "noRecentFailures": "No recent non-test failures in this window.",
+  "clearTestHistory": "Clear test history ({count})",
+  "clearingTestHistory": "Clearing…",
+  "confirmClearTestHistory": "Soft-delete {count} terminal test task(s)? They stay recoverable for 24 hours, then auto hard-delete.",
+  "clearTestHistoryOk": "Cleared {count} test task(s)",
+  "clearTestHistoryNone": "No terminal test tasks to clear",
+  "clearTestHistoryFailed": "Test history cleanup failed: "
 }
