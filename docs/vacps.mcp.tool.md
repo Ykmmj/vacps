@@ -65,11 +65,11 @@ Wire: **nested JSON**, **snake_case** keys, **snake_case** enums.
 
 ### 错误三层
 
-| 层 | 何时 | isError |
-|----|------|---------|
-| 协议 / 校验 | 未知 tool、参数非法 | true |
-| 业务 | backend 不可达、冲突、不存在 | true |
-| 进程结果 | 命令非 0 / 超时 | **false**（用 status / exit_code） |
+| 层          | 何时                         | isError                            |
+| ----------- | ---------------------------- | ---------------------------------- |
+| 协议 / 校验 | 未知 tool、参数非法          | true                               |
+| 业务        | backend 不可达、冲突、不存在 | true                               |
+| 进程结果    | 命令非 0 / 超时              | **false**（用 status / exit_code） |
 
 ---
 
@@ -138,13 +138,13 @@ vacps.process.start
 
 每个 Tool 显式四 Hint（不依赖默认值）。
 
-| 类别 | readOnly | destructive | idempotent | openWorld | Tools |
-|------|----------|-------------|------------|-----------|-------|
-| 只读 | true | false | true | false | backends.*, capabilities.get, process.read, files.stat/read/list/glob/grep, git.status/diff, tasks.get/list/output.read, schedules.get/list |
-| 命令执行 | false | true | false | true | command.exec, shell.exec, process.start_*, tasks.create_*, tasks.retry, schedules.run_now |
-| 本地修改 | false | true | false | false | process.write, files.write/edit/move/delete/apply_patch, git.apply, schedules.create/update |
-| mkdir | false | false | true | false | files.mkdir |
-| 幂等破坏 | false | true | true | false | process.terminate, tasks.cancel, schedules.delete |
+| 类别     | readOnly | destructive | idempotent | openWorld | Tools                                                                                                                                       |
+| -------- | -------- | ----------- | ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| 只读     | true     | false       | true       | false     | backends.*, capabilities.get, process.read, files.stat/read/list/glob/grep, git.status/diff, tasks.get/list/output.read, schedules.get/list |
+| 命令执行 | false    | true        | false      | true      | command.exec, shell.exec, process.start__, tasks.create__, tasks.retry, schedules.run_now                                                   |
+| 本地修改 | false    | true        | false      | false     | process.write, files.write/edit/move/delete/apply_patch, git.apply, schedules.create/update                                                 |
+| mkdir    | false    | false       | true       | false     | files.mkdir                                                                                                                                 |
+| 幂等破坏 | false    | true        | true       | false     | process.terminate, tasks.cancel, schedules.delete                                                                                           |
 
 ---
 
@@ -313,12 +313,12 @@ schedules.get / list
 
 ### Task 保留 / 清理（Phase 0–1）
 
-| Tool | 作用 |
-|------|------|
-| `tasks.list` | 过滤：`environment`、`source`、`labels`、`terminal`、`hide_test`、`include_deleted` 等；默认隐藏软删除 |
-| `tasks.delete` | 终态任务软删（默认）/ 硬删；活跃 → `task_not_terminal` |
-| `tasks.cleanup.preview` | 按 filter 统计可清理终态任务 |
-| `tasks.cleanup.run` | 批量软删；`expected_matched_count` 防范围漂移 |
+| Tool                    | 作用                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| `tasks.list`            | 过滤：`environment`、`source`、`labels`、`terminal`、`hide_test`、`include_deleted` 等；默认隐藏软删除 |
+| `tasks.delete`          | 终态任务软删（默认）/ 硬删；活跃 → `task_not_terminal`                                                 |
+| `tasks.cleanup.preview` | 按 filter 统计可清理终态任务                                                                           |
+| `tasks.cleanup.run`     | 批量软删；`expected_matched_count` 防范围漂移                                                          |
 
 测试任务建议标签：
 
@@ -334,8 +334,8 @@ schedules.get / list
 
 ### 文件分页字段
 
-| Tool | 列表字段 |
-|------|----------|
+| Tool         | 列表字段           |
+| ------------ | ------------------ |
 | `files.list` | **`entries`** only |
 | `files.glob` | **`matches`** only |
 | `files.grep` | **`matches`** only |
@@ -414,12 +414,12 @@ revision: 1..2147483647
 
 ## 必须失败的旧调用
 
-| 旧调用 | 结果 |
-|--------|------|
-| `vacps.tasks.create` + `type`/`shell.mode` | unknown tool |
-| `vacps.process.start` + `mode` | unknown tool |
-| schedule `{ cron, task_template }` | invalid_arguments / validation |
-| 只读 tool 传 `idempotency_key` | validation（additionalProperties / unknown field） |
+| 旧调用                                     | 结果                                               |
+| ------------------------------------------ | -------------------------------------------------- |
+| `vacps.tasks.create` + `type`/`shell.mode` | unknown tool                                       |
+| `vacps.process.start` + `mode`             | unknown tool                                       |
+| schedule `{ cron, task_template }`         | invalid_arguments / validation                     |
+| 只读 tool 传 `idempotency_key`             | validation（additionalProperties / unknown field） |
 
 ---
 

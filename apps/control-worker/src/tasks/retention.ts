@@ -74,7 +74,10 @@ export function retentionClassFor(
   return 'default';
 }
 
-export function retentionDaysFor(retentionClass: RetentionClass, status: TaskStatus | string): number {
+export function retentionDaysFor(
+  retentionClass: RetentionClass,
+  status: TaskStatus | string,
+): number {
   if (retentionClass === 'test') return RETENTION_DAYS.test;
   if (status === 'succeeded') return RETENTION_DAYS.succeeded;
   if (status === 'cancelled') return RETENTION_DAYS.cancelled;

@@ -193,8 +193,7 @@ export class TaskGraphRunner {
         cwd,
         timeoutSeconds: state.task.timeout_seconds,
         signal,
-        execute: (command) =>
-          this.executeShellString(state.task, ++piSequence, command, signal),
+        execute: (command) => this.executeShellString(state.task, ++piSequence, command, signal),
       });
       return {
         graphNode: 'execute',

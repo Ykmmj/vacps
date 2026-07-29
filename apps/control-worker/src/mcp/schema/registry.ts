@@ -4,7 +4,11 @@
  */
 import { z } from 'zod';
 
-import { backendsGetStatusInputSchema, backendsListInputSchema, capabilitiesGetInputSchema } from './backends.js';
+import {
+  backendsGetStatusInputSchema,
+  backendsListInputSchema,
+  capabilitiesGetInputSchema,
+} from './backends.js';
 import { commandExecInputSchema } from './command.js';
 import { MCP_PROTOCOL_VERSION, TOOL_SCHEMA_REVISION, publicDefsJson } from './common.js';
 import {

@@ -174,9 +174,7 @@ export function createMcpServer(env: Env): McpServer {
     run: (args: Record<string, unknown>) => Promise<T>,
   ): (args: Record<string, unknown>) => Promise<ReturnType<typeof ok> | ReturnType<typeof fail>>;
   function wrap<T extends Record<string, unknown>>(
-    summaryOrRun:
-      | ((value: T) => string)
-      | ((args: Record<string, unknown>) => Promise<T>),
+    summaryOrRun: ((value: T) => string) | ((args: Record<string, unknown>) => Promise<T>),
     maybeRun?: (args: Record<string, unknown>) => Promise<T>,
   ) {
     const run = (maybeRun ?? summaryOrRun) as (args: Record<string, unknown>) => Promise<T>;
@@ -398,16 +396,13 @@ export function createMcpServer(env: Env): McpServer {
         ...(parsed.created_before ? { createdBefore: parsed.created_before } : {}),
         ...(parsed.terminal_before ? { terminalBefore: parsed.terminal_before } : {}),
         ...(parsed.expires_before ? { expiresBefore: parsed.expires_before } : {}),
-        ...(parsed.include_deleted !== undefined
-          ? { includeDeleted: parsed.include_deleted }
-          : {}),
+        ...(parsed.include_deleted !== undefined ? { includeDeleted: parsed.include_deleted } : {}),
         ...(parsed.hide_test !== undefined ? { hideTest: parsed.hide_test } : {}),
       });
       return {
         tasks: page.tasks.map(snakeTask),
         returned_count: page.returned_count,
-        next_cursor:
-          page.next_offset !== null ? encodeQueryCursor(page.next_offset, query) : null,
+        next_cursor: page.next_offset !== null ? encodeQueryCursor(page.next_offset, query) : null,
       };
     }),
   );
@@ -607,8 +602,7 @@ export function createMcpServer(env: Env): McpServer {
       return {
         schedules: page.schedules.map(snakeSchedule),
         returned_count: page.returned_count,
-        next_cursor:
-          page.next_offset !== null ? encodeOffsetCursor(page.next_offset) : null,
+        next_cursor: page.next_offset !== null ? encodeOffsetCursor(page.next_offset) : null,
       };
     }),
   );
@@ -1302,8 +1296,7 @@ function pageBackends(
 
   const page = filtered.slice(offset, offset + limit);
   const nextOffset = offset + page.length;
-  const next_cursor =
-    nextOffset < filtered.length ? encodeOffsetCursor(nextOffset) : null;
+  const next_cursor = nextOffset < filtered.length ? encodeOffsetCursor(nextOffset) : null;
 
   return {
     backends: page,
@@ -1345,13 +1338,14 @@ function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unk
   const enginesRaw = (raw.engines ?? {}) as Record<string, unknown>;
   const grepEngine = (enginesRaw.grep ?? {}) as Record<string, unknown>;
   const globEngine = (enginesRaw.glob ?? {}) as Record<string, unknown>;
-  const executables = (raw.executables ?? {}) as Record<string, { available?: boolean; version?: string }>;
+  const executables = (raw.executables ?? {}) as Record<
+    string,
+    { available?: boolean; version?: string }
+  >;
   const rg = executables.rg;
 
   const active =
-    featuresRaw['files.grep.engine'] === 'rg' || grepEngine.available === true
-      ? 'ripgrep'
-      : 'node';
+    featuresRaw['files.grep.engine'] === 'rg' || grepEngine.available === true ? 'ripgrep' : 'node';
 
   return {
     backend_id: raw.backend_id,
@@ -1394,7 +1388,10 @@ function mapCleanupFilters(
 ): import('../tasks/task-service.js').CleanupFilters {
   if (!filters) return {};
   const out: import('../tasks/task-service.js').CleanupFilters = {};
-  const takeStr = (key: string, target: keyof import('../tasks/task-service.js').CleanupFilters) => {
+  const takeStr = (
+    key: string,
+    target: keyof import('../tasks/task-service.js').CleanupFilters,
+  ) => {
     const v = filters[key];
     if (typeof v === 'string' && v.length > 0) {
       (out as Record<string, unknown>)[target] = v;
@@ -1520,11 +1517,7 @@ function snakeSchedule(schedule: {
 /** Strip nested backend_id / idempotency_key from schedule.task public view. */
 function publicScheduleTask(task: unknown): unknown {
   if (!task || typeof task !== 'object') return task;
-  const {
-    backend_id: _b,
-    idempotency_key: _i,
-    ...rest
-  } = task as Record<string, unknown>;
+  const { backend_id: _b, idempotency_key: _i, ...rest } = task as Record<string, unknown>;
   return rest;
 }
 

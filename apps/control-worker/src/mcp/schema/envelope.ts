@@ -50,7 +50,10 @@ export function newIds(): { request_id: string; trace_id: string } {
   };
 }
 
-export function successMeta(extra?: { backend_id?: string; warnings?: string[] }): SuccessEnvelopeBase {
+export function successMeta(extra?: {
+  backend_id?: string;
+  warnings?: string[];
+}): SuccessEnvelopeBase {
   const ids = newIds();
   return {
     ok: true,

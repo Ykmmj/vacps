@@ -45,10 +45,12 @@ import { ManagedTunnelService } from './tunnels/managed-tunnel-service.js';
 const mcpApiHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
-      const [{ createMcpServer }, { WebStandardStreamableHTTPServerTransport }] = await Promise.all([
-        import('./mcp/server.js'),
-        import('@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'),
-      ]);
+      const [{ createMcpServer }, { WebStandardStreamableHTTPServerTransport }] = await Promise.all(
+        [
+          import('./mcp/server.js'),
+          import('@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'),
+        ],
+      );
       // MCP SDK >=1.26 requires a fresh server for every stateless request.
       const server = createMcpServer(env);
       const transport = new WebStandardStreamableHTTPServerTransport();
@@ -491,9 +493,7 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       if (!id && request.method === 'GET') {
         const page = await services.schedules.list({
           limit: Number(searchParams.get('limit') ?? 200),
-          ...(searchParams.get('backend_id')
-            ? { backendId: searchParams.get('backend_id')! }
-            : {}),
+          ...(searchParams.get('backend_id') ? { backendId: searchParams.get('backend_id')! } : {}),
         });
         return json(page.schedules);
       }
@@ -510,9 +510,7 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           const { patchScheduleSchema } = await import('@vacps/contracts');
           return json(await services.schedules.patch(id, patchScheduleSchema.parse(body)));
         }
-        return json(
-          await services.schedules.update(id, updateScheduleSchema.parse(body)),
-        );
+        return json(await services.schedules.update(id, updateScheduleSchema.parse(body)));
       }
       if (id && !action && request.method === 'DELETE') {
         const result = await services.schedules.delete(id);

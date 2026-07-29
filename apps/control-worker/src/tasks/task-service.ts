@@ -155,9 +155,7 @@ export class TaskService {
           pi?: { available?: boolean };
         };
         const pi =
-          caps.pi ??
-          (caps.features as { pi?: { available?: boolean } } | undefined)?.pi ??
-          null;
+          caps.pi ?? (caps.features as { pi?: { available?: boolean } } | undefined)?.pi ?? null;
         const available =
           typeof pi === 'object' && pi && 'available' in pi
             ? Boolean(pi.available)
@@ -783,18 +781,14 @@ export class TaskService {
     );
     const { clauses, binds } = buildCleanupClauses(filters, { forDelete: false });
     // Always only consider terminal for cleanup preview (non-terminal → protected separately).
-    clauses.push(
-      `status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`,
-    );
+    clauses.push(`status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`);
     if (!filters.includeDeleted) {
       clauses.push('deleted_at IS NULL');
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
     const rows = await this.db
-      .prepare(
-        `SELECT id, status FROM tasks ${where} ORDER BY created_at DESC LIMIT ?`,
-      )
+      .prepare(`SELECT id, status FROM tasks ${where} ORDER BY created_at DESC LIMIT ?`)
       .bind(...binds, scanLimit)
       .all<{ id: string; status: string }>();
 
@@ -1088,7 +1082,9 @@ export class TaskService {
     }
 
     const row = await this.db
-      .prepare('SELECT labels_json, environment, terminal_at, retention_class FROM tasks WHERE id = ?')
+      .prepare(
+        'SELECT labels_json, environment, terminal_at, retention_class FROM tasks WHERE id = ?',
+      )
       .bind(id)
       .first<{
         labels_json: string | null;
@@ -1154,13 +1150,9 @@ function buildListClauses(opts: TaskListQuery): { clauses: string[]; binds: unkn
     binds.push(opts.scheduleId);
   }
   if (opts.terminal === true) {
-    clauses.push(
-      `status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`,
-    );
+    clauses.push(`status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`);
   } else if (opts.terminal === false) {
-    clauses.push(
-      `status NOT IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`,
-    );
+    clauses.push(`status NOT IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`);
   }
   if (opts.createdAfter) {
     clauses.push('created_at >= ?');

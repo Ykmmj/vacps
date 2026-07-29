@@ -47,12 +47,14 @@ export class ScheduleService {
     private readonly tasks: TaskService,
   ) {}
 
-  async list(query: {
-    backendId?: string;
-    enabled?: boolean;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<{
+  async list(
+    query: {
+      backendId?: string;
+      enabled?: boolean;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): Promise<{
     schedules: ScheduleRecord[];
     returned_count: number;
     next_offset: number | null;
@@ -224,10 +226,7 @@ export class ScheduleService {
     }
 
     const current = await this.get(id);
-    if (
-      input.expected_revision !== undefined &&
-      input.expected_revision !== current.revision
-    ) {
+    if (input.expected_revision !== undefined && input.expected_revision !== current.revision) {
       throw new AppError(
         'schedule_revision_conflict',
         `Schedule revision mismatch: expected ${input.expected_revision}, current ${current.revision}.`,
@@ -398,10 +397,7 @@ export class ScheduleService {
       result = { deleted: false, already_absent: true, schedule_id: id };
     } else {
       try {
-        await this.client.deleteScheduler(
-          await this.backends.get(existing.backend_id),
-          id,
-        );
+        await this.client.deleteScheduler(await this.backends.get(existing.backend_id), id);
       } catch {
         // Control plane is source of truth for schedule inventory.
       }
@@ -460,7 +456,11 @@ export class ScheduleService {
   async runNow(
     id: string,
     options: { idempotencyKey?: string } = {},
-  ): Promise<{ scheduleId: string; task: Awaited<ReturnType<TaskService['create']>>; queued: true }> {
+  ): Promise<{
+    scheduleId: string;
+    task: Awaited<ReturnType<TaskService['create']>>;
+    queued: true;
+  }> {
     const schedule = await this.get(id);
     const template = createTaskSchema.parse({
       ...schedule.task,
@@ -500,9 +500,7 @@ export class ScheduleService {
     key: string,
   ): Promise<ScheduleRecord | undefined> {
     const row = await this.db
-      .prepare(
-        'SELECT * FROM schedules WHERE backend_id = ? AND idempotency_key = ? LIMIT 1',
-      )
+      .prepare('SELECT * FROM schedules WHERE backend_id = ? AND idempotency_key = ? LIMIT 1')
       .bind(backendId, key)
       .first<ScheduleRow>();
     return row ? toSchedule(row) : undefined;
