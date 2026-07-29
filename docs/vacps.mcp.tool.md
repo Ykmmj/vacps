@@ -324,7 +324,7 @@ schedules.get / list
 | `tasks.pin` / `unpin`            | 固定 / 取消固定；自动清理与默认 bulk 跳过 pinned                                                       |
 | `tasks.legal_hold.set` / `clear` | 合规保留 / 解除；阻止自动 purge 与手工 delete/cleanup                                                  |
 | `tasks.cleanup.preview`          | `matched`=过滤命中；`deletable`=可删；`protected`=pin/hold；`sample_task_ids` 仅可删样本               |
-| `tasks.cleanup.run`              | 批量删除；`expected_matched_count` **= preview.deletable_count**（不是 matched_count）                |
+| `tasks.cleanup.run`              | 批量删除；`expected_matched_count` **= preview.deletable_count**（不是 matched_count）                 |
 
 测试任务建议标签：
 
