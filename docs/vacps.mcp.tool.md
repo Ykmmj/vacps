@@ -337,6 +337,21 @@ schedules.get / list
 - `cleanup.run` 的 `expected_matched_count` 必须与实际匹配数 **完全相等**，否则 `409 cleanup_scope_changed`（不执行任何删除、不写操作幂等成功）。
 - 硬删除任务后保留 `task_create_idempotency` Tombstone；相同 create `idempotency_key` + 相同请求 → `replayed: true` + `resource_deleted: true`；不同请求 → `409 idempotency_conflict`。
 
+**批量 hard 验收（控制面路径）：**
+
+```bash
+pnpm --filter @vacps/control-worker test -- tests/task-hard-cleanup.test.ts
+```
+
+覆盖 preview 精确计数、scope drift 零删除、mixed kind/status hard、list/preview 清空、create tombstone 重放/冲突、cleanup 操作幂等 replay、活跃任务保护。Agent 本地 stdout/command 清理属输出 TTL 阶段。
+
+可选已部署控制面 HTTP 烟测：
+
+```bash
+VACPS_BASE_URL=https://… VACPS_PASSWORD=… VACPS_BACKEND_ID=vacps-… \
+  node scripts/accept-hard-cleanup.mjs
+```
+
 ### 文件分页字段
 
 | Tool         | 列表字段           |
