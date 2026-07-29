@@ -286,6 +286,53 @@ export class FakeD1 {
       return { first: null, all: [] };
     }
 
+    // ── pin / legal hold UPDATE ───────────────────────────────────
+    if (sql.includes('SET pinned_at = ?') && sql.includes('pinned_by = ?')) {
+      const [pinned_at, pinned_by, updated_at, id] = binds;
+      const row = this.tasks.find((t) => t.id === id);
+      if (row) {
+        row.pinned_at = pinned_at;
+        row.pinned_by = pinned_by;
+        row.updated_at = updated_at;
+      }
+      return { first: null, all: [] };
+    }
+    if (sql.includes('SET pinned_at = NULL') && sql.includes('pinned_by = NULL')) {
+      const [expires_at, updated_at, id] = binds;
+      const row = this.tasks.find((t) => t.id === id);
+      if (row) {
+        row.pinned_at = null;
+        row.pinned_by = null;
+        if (expires_at != null) row.expires_at = expires_at;
+        row.updated_at = updated_at;
+      }
+      return { first: null, all: [] };
+    }
+    if (sql.includes('SET legal_hold = 1')) {
+      const [reason, at, by, updated_at, id] = binds;
+      const row = this.tasks.find((t) => t.id === id);
+      if (row) {
+        row.legal_hold = 1;
+        row.legal_hold_reason = reason;
+        row.legal_hold_at = at;
+        row.legal_hold_by = by;
+        row.updated_at = updated_at;
+      }
+      return { first: null, all: [] };
+    }
+    if (sql.includes('SET legal_hold = 0')) {
+      const [updated_at, id] = binds;
+      const row = this.tasks.find((t) => t.id === id);
+      if (row) {
+        row.legal_hold = 0;
+        row.legal_hold_reason = null;
+        row.legal_hold_at = null;
+        row.legal_hold_by = null;
+        row.updated_at = updated_at;
+      }
+      return { first: null, all: [] };
+    }
+
     // ── soft delete UPDATE ────────────────────────────────────────
     if (sql.includes('SET deleted_at = ?') && sql.includes("cleanup_state = 'deleted'")) {
       const [deleted_at, deleted_by, deletion_reason, updated_at, id] = binds;
@@ -341,7 +388,7 @@ export class FakeD1 {
       const parts = sql.split('WHERE')[1]?.split('ORDER BY')[0] ?? '';
       // Extract bind placeholders in order.
       const tokenRe =
-        /(deleted_at IS NULL)|(?:backend_id = \?)|(?:status = \?)|(?:source = \?)|(?:environment = \?)|(?:schedule_id = \?)|(?:\(kind = \? OR type = \?\))|(?:created_at >= \?)|(?:created_at <= \?)|(?:terminal_at IS NOT NULL AND terminal_at <= \?)|(?:expires_at IS NOT NULL AND expires_at <= \?)|(?:status IN \('succeeded','failed','cancelled','timed_out','dispatch_failed'\))|(?:status NOT IN \('succeeded','failed','cancelled','timed_out','dispatch_failed'\))|(?:\(environment IS NULL OR environment != 'test'\) AND \(retention_class IS NULL OR retention_class != 'test'\))|(?:\(environment = 'test' OR retention_class = 'test'\))|(?:deleted_at IS NOT NULL AND deleted_at <= \?)|(?:json_extract\(labels_json, \?\) = \?)/g;
+        /(deleted_at IS NULL)|(?:backend_id = \?)|(?:status = \?)|(?:source = \?)|(?:environment = \?)|(?:schedule_id = \?)|(?:\(kind = \? OR type = \?\))|(?:created_at >= \?)|(?:created_at <= \?)|(?:terminal_at IS NOT NULL AND terminal_at <= \?)|(?:expires_at IS NOT NULL AND expires_at <= \?)|(?:status IN \('succeeded','failed','cancelled','timed_out','dispatch_failed'\))|(?:status NOT IN \('succeeded','failed','cancelled','timed_out','dispatch_failed'\))|(?:\(environment IS NULL OR environment != 'test'\) AND \(retention_class IS NULL OR retention_class != 'test'\))|(?:\(environment = 'test' OR retention_class = 'test'\))|(?:COALESCE\(legal_hold, 0\) = 0)|(?:pinned_at IS NULL)|(?:deleted_at IS NOT NULL AND deleted_at <= \?)|(?:json_extract\(labels_json, \?\) = \?)/g;
       let m: RegExpExecArray | null;
       let bi = 0;
       while ((m = tokenRe.exec(parts))) {
@@ -396,6 +443,10 @@ export class FakeD1 {
           rows = rows.filter((r) => r.environment !== 'test' && r.retention_class !== 'test');
         } else if (tok.includes("environment = 'test' OR retention_class = 'test'")) {
           rows = rows.filter((r) => r.environment === 'test' || r.retention_class === 'test');
+        } else if (tok.includes('COALESCE(legal_hold, 0) = 0')) {
+          rows = rows.filter((r) => !r.legal_hold);
+        } else if (tok === 'pinned_at IS NULL') {
+          rows = rows.filter((r) => !r.pinned_at);
         } else if (tok.includes('deleted_at <= ?')) {
           const v = String(binds[bi++]);
           rows = rows.filter((r) => r.deleted_at && String(r.deleted_at) <= v);

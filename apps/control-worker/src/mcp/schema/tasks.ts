@@ -106,6 +106,26 @@ export const tasksDeleteInputSchema = z.strictObject({
   idempotency_key: idempotencyKeySchema.optional(),
 });
 
+export const tasksPinInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+  pinned_by: z.string().min(1).max(128).optional(),
+});
+
+export const tasksUnpinInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+});
+
+export const tasksLegalHoldSetInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+  reason: z.string().min(1).max(500).optional(),
+  held_by: z.string().min(1).max(128).optional(),
+});
+
+export const tasksLegalHoldClearInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+  cleared_by: z.string().min(1).max(128).optional(),
+});
+
 export const tasksCleanupPreviewInputSchema = z.strictObject({
   filters: cleanupFiltersSchema.optional(),
   limit: z.number().int().min(1).max(5_000).optional(),

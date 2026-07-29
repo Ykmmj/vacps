@@ -54,6 +54,10 @@ interface TaskRow {
   cleanup_state: string | null;
   legal_hold: number | null;
   pinned_at: string | null;
+  pinned_by: string | null;
+  legal_hold_reason: string | null;
+  legal_hold_at: string | null;
+  legal_hold_by: string | null;
   output_expires_at: string | null;
 }
 
@@ -83,6 +87,13 @@ export interface TaskIndex {
   deletedBy?: string;
   deletionReason?: string;
   cleanupState?: string;
+  pinned?: boolean;
+  pinnedAt?: string;
+  pinnedBy?: string;
+  legalHold?: boolean;
+  legalHoldReason?: string;
+  legalHoldAt?: string;
+  legalHoldBy?: string;
   /** True when create-idempotency tombstone exists but task row is gone / hard-deleted. */
   resourceDeleted?: boolean;
 }
@@ -760,6 +771,17 @@ export class TaskService {
         409,
         { task_id: id, status: row.status },
       );
+    } else if (isRetentionProtected(row)) {
+      throw new AppError(
+        'task_legal_hold',
+        `Task '${id}' is protected (legal_hold or pinned) and cannot be deleted.`,
+        403,
+        {
+          task_id: id,
+          legal_hold: Boolean(row.legal_hold),
+          pinned: Boolean(row.pinned_at),
+        },
+      );
     } else if (mode === 'hard') {
       await this.hardDeleteTaskRow(row);
       body = { task_id: id, deleted: true, already_deleted: false, mode: 'hard' };
@@ -991,6 +1013,122 @@ export class TaskService {
       };
     }
     return body;
+  }
+
+  /**
+   * Pin a task so automatic retention (and default bulk cleanup) skips it.
+   * Idempotent when already pinned.
+   */
+  async pin(
+    id: string,
+    options: { pinnedBy?: string } = {},
+  ): Promise<{ task: TaskIndex; pinned: boolean; already_pinned: boolean }> {
+    const row = await this.db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
+    if (!row) throw new AppError('task_not_found', `Task '${id}' was not found.`, 404);
+    if (row.pinned_at) {
+      return { task: toTaskIndex(row), pinned: true, already_pinned: true };
+    }
+    const now = new Date().toISOString();
+    const by = options.pinnedBy?.trim() || 'mcp';
+    await this.db
+      .prepare(`UPDATE tasks SET pinned_at = ?, pinned_by = ?, updated_at = ? WHERE id = ?`)
+      .bind(now, by, now, id)
+      .run();
+    return {
+      task: await this.get(id, { includeDeleted: true }),
+      pinned: true,
+      already_pinned: false,
+    };
+  }
+
+  /**
+   * Unpin a task. If terminal, refresh expires_at from terminal_at using current policy.
+   */
+  async unpin(
+    id: string,
+  ): Promise<{ task: TaskIndex; pinned: boolean; already_unpinned: boolean }> {
+    const row = await this.db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
+    if (!row) throw new AppError('task_not_found', `Task '${id}' was not found.`, 404);
+    if (!row.pinned_at) {
+      return { task: toTaskIndex(row), pinned: false, already_unpinned: true };
+    }
+    const now = new Date().toISOString();
+    const labels = parseLabelsJson(row.labels_json);
+    const environment = row.environment ?? environmentFromLabels(labels);
+    let expiresAt = row.expires_at;
+    if (row.terminal_at && isTerminalTaskStatus(row.status)) {
+      const retentionClass = retentionClassFor(row.status, labels, environment);
+      expiresAt = computeExpiresAt(row.terminal_at, retentionClass, row.status);
+    }
+    await this.db
+      .prepare(
+        `UPDATE tasks
+         SET pinned_at = NULL, pinned_by = NULL, expires_at = COALESCE(?, expires_at), updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(expiresAt, now, id)
+      .run();
+    return {
+      task: await this.get(id, { includeDeleted: true }),
+      pinned: false,
+      already_unpinned: false,
+    };
+  }
+
+  /** Place a legal hold (blocks auto purge and manual delete/cleanup). */
+  async setLegalHold(
+    id: string,
+    options: { reason?: string; heldBy?: string } = {},
+  ): Promise<{ task: TaskIndex; legal_hold: boolean; already_held: boolean }> {
+    const row = await this.db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
+    if (!row) throw new AppError('task_not_found', `Task '${id}' was not found.`, 404);
+    if (row.legal_hold) {
+      return { task: toTaskIndex(row), legal_hold: true, already_held: true };
+    }
+    const now = new Date().toISOString();
+    const by = options.heldBy?.trim() || 'mcp';
+    const reason = options.reason?.trim() || 'legal_hold';
+    await this.db
+      .prepare(
+        `UPDATE tasks
+         SET legal_hold = 1, legal_hold_reason = ?, legal_hold_at = ?, legal_hold_by = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(reason, now, by, now, id)
+      .run();
+    return {
+      task: await this.get(id, { includeDeleted: true }),
+      legal_hold: true,
+      already_held: false,
+    };
+  }
+
+  /** Clear legal hold so retention/cleanup may apply again. */
+  async clearLegalHold(
+    id: string,
+    options: { clearedBy?: string } = {},
+  ): Promise<{ task: TaskIndex; legal_hold: boolean; already_cleared: boolean }> {
+    void options.clearedBy;
+    const row = await this.db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
+    if (!row) throw new AppError('task_not_found', `Task '${id}' was not found.`, 404);
+    if (!row.legal_hold) {
+      return { task: toTaskIndex(row), legal_hold: false, already_cleared: true };
+    }
+    const now = new Date().toISOString();
+    await this.db
+      .prepare(
+        `UPDATE tasks
+         SET legal_hold = 0, legal_hold_reason = NULL, legal_hold_at = NULL, legal_hold_by = NULL,
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(now, id)
+      .run();
+    return {
+      task: await this.get(id, { includeDeleted: true }),
+      legal_hold: false,
+      already_cleared: false,
+    };
   }
 
   /**
@@ -1457,6 +1595,21 @@ function toTaskIndex(row: TaskRow): TaskIndex {
     ...(row.deleted_by ? { deletedBy: row.deleted_by } : {}),
     ...(row.deletion_reason ? { deletionReason: row.deletion_reason } : {}),
     ...(row.cleanup_state ? { cleanupState: row.cleanup_state } : {}),
+    ...(row.pinned_at
+      ? {
+          pinned: true,
+          pinnedAt: row.pinned_at,
+          ...(row.pinned_by ? { pinnedBy: row.pinned_by } : {}),
+        }
+      : { pinned: false }),
+    ...(row.legal_hold
+      ? {
+          legalHold: true,
+          ...(row.legal_hold_reason ? { legalHoldReason: row.legal_hold_reason } : {}),
+          ...(row.legal_hold_at ? { legalHoldAt: row.legal_hold_at } : {}),
+          ...(row.legal_hold_by ? { legalHoldBy: row.legal_hold_by } : {}),
+        }
+      : { legalHold: false }),
   };
 }
 

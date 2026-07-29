@@ -84,6 +84,10 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotationHints> = {
   'vacps.tasks.cancel': IDEMPOTENT_DESTRUCTIVE,
   'vacps.tasks.retry': MUTATING_OPEN,
   'vacps.tasks.delete': IDEMPOTENT_DESTRUCTIVE,
+  'vacps.tasks.pin': IDEMPOTENT_DESTRUCTIVE,
+  'vacps.tasks.unpin': IDEMPOTENT_DESTRUCTIVE,
+  'vacps.tasks.legal_hold.set': IDEMPOTENT_DESTRUCTIVE,
+  'vacps.tasks.legal_hold.clear': IDEMPOTENT_DESTRUCTIVE,
   'vacps.tasks.cleanup.preview': READ_ONLY,
   'vacps.tasks.cleanup.run': IDEMPOTENT_DESTRUCTIVE,
 
