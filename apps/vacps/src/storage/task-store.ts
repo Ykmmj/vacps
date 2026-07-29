@@ -114,6 +114,30 @@ export class TaskStore {
     }
     if (fields.length === 0) return;
     this.db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = @id`).run(values);
+
+    // Keep command rows consistent with task terminal states.
+    const terminal = update.status;
+    if (
+      terminal &&
+      ['succeeded', 'failed', 'cancelled', 'timed_out', 'dispatch_failed'].includes(terminal)
+    ) {
+      const finishedAt = update.finishedAt ?? new Date().toISOString();
+      const cmdStatus =
+        terminal === 'succeeded'
+          ? 'succeeded'
+          : terminal === 'cancelled'
+            ? 'cancelled'
+            : terminal === 'timed_out'
+              ? 'timed_out'
+              : 'failed';
+      this.db
+        .prepare(
+          `UPDATE commands
+           SET status = ?, finished_at = COALESCE(finished_at, ?)
+           WHERE task_id = ? AND finished_at IS NULL`,
+        )
+        .run(cmdStatus, finishedAt, taskId);
+    }
   }
 
   getTask(taskId: string): StoredTask | undefined {

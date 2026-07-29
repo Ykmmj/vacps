@@ -70,6 +70,36 @@ export class TaskService {
       throw new AppError('backend_disabled', `Backend '${backend.id}' is disabled.`, 409);
 
     const kind = input.kind;
+    // Preflight agent capability before writing an index row (avoids orphan dispatch_failed).
+    if (kind === 'agent') {
+      try {
+        const caps = (await this.client.getCapabilities(backend)) as {
+          features?: { pi?: { available?: boolean }; agent?: boolean };
+          pi?: { available?: boolean };
+        };
+        const pi =
+          caps.pi ??
+          (caps.features as { pi?: { available?: boolean } } | undefined)?.pi ??
+          null;
+        const available =
+          typeof pi === 'object' && pi && 'available' in pi
+            ? Boolean(pi.available)
+            : caps.features?.agent === true;
+        // If capability payload is present and pi is explicitly unavailable, fail early.
+        if (pi && typeof pi === 'object' && pi.available === false) {
+          throw new AppError(
+            'capability_unavailable',
+            'Agent runtime (Pi) is not available on this backend.',
+            409,
+            { capability: 'agent', pi: { available: false } },
+          );
+        }
+        void available;
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'capability_unavailable') throw error;
+        // If capabilities endpoint fails, fall through to dispatch (agent will reject).
+      }
+    }
     const requestHash = await hashTaskRequest(input);
     if (input.idempotency_key) {
       const existing = await this.findByIdempotency(input.backend_id, input.idempotency_key);
@@ -154,7 +184,28 @@ export class TaskService {
       });
       await this.setStatus(taskId, 'queued');
     } catch (error) {
+      // Capability preflight failures should not leave orphan index rows.
+      const isCapability =
+        error instanceof AppError &&
+        (error.code === 'capability_unavailable' ||
+          error.details?.backend_code === 'capability_unavailable');
+      if (isCapability) {
+        await this.db.prepare('DELETE FROM tasks WHERE id = ?').bind(taskId).run();
+        if (error instanceof AppError) {
+          throw new AppError(error.code, error.message, error.status, {
+            ...error.details,
+            // No task_id — row was rolled back.
+          });
+        }
+        throw error;
+      }
       await this.setStatus(taskId, 'dispatch_failed');
+      if (error instanceof AppError) {
+        throw new AppError(error.code, error.message, error.status, {
+          ...error.details,
+          task_id: taskId,
+        });
+      }
       throw error;
     }
     const created = await this.get(taskId);

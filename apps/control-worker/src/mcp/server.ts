@@ -936,27 +936,30 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.git.status',
     toolConfig('vacps.git.status', {
-      description: 'git status --short on a backend working tree.',
+      description:
+        'git status --short on a backend working tree. Envelope ok=true means tool ran; check operation_succeeded / exit_code for git success.',
       inputSchema: gitStatusInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
     wrap(async (args) => {
       const parsed = gitStatusInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.execCommand(backend, {
+      const raw = (await client.execCommand(backend, {
         program: 'git',
         arguments: ['status', '--short'],
         working_directory: parsed.working_directory,
         timeout_ms: 60_000,
-        yield_time_ms: 30_000,
+        yield_time_ms: 5_000,
       })) as Record<string, unknown>;
+      return withOperationSucceeded(raw);
     }),
   );
 
   server.registerTool(
     'vacps.git.diff',
     toolConfig('vacps.git.diff', {
-      description: 'git diff on a backend working tree.',
+      description:
+        'git diff on a backend working tree. Envelope ok=true means tool ran; check operation_succeeded / exit_code for git success.',
       inputSchema: gitDiffInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
@@ -964,14 +967,15 @@ export function createMcpServer(env: Env): McpServer {
       const parsed = gitDiffInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
       const arguments_ = parsed.staged === true ? ['diff', '--cached'] : ['diff'];
-      return (await client.execCommand(backend, {
+      const raw = (await client.execCommand(backend, {
         program: 'git',
         arguments: arguments_,
         working_directory: parsed.working_directory,
         timeout_ms: 60_000,
-        yield_time_ms: 30_000,
+        yield_time_ms: 5_000,
         stdout_max_bytes: 65_536,
       })) as Record<string, unknown>;
+      return withOperationSucceeded(raw);
     }),
   );
 
@@ -979,7 +983,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.git.apply',
     toolConfig('vacps.git.apply', {
       description:
-        'Apply a unified diff with git apply on a backend. Supports idempotency_key for safe retries.',
+        'Apply a unified diff with git apply on a backend. Supports idempotency_key for safe retries. Envelope ok=true means the tool ran; check operation_succeeded / exit_code for whether git apply succeeded.',
       inputSchema: gitApplyInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
@@ -1000,16 +1004,17 @@ export function createMcpServer(env: Env): McpServer {
           : {}),
       });
       try {
-        return (await client.execCommand(backend, {
+        const raw = (await client.execCommand(backend, {
           program: 'git',
           arguments: parsed.check === true ? ['apply', '--check', path] : ['apply', path],
           working_directory: parsed.working_directory,
           timeout_ms: 60_000,
-          yield_time_ms: 30_000,
+          yield_time_ms: 5_000,
           ...(parsed.idempotency_key
             ? { idempotency_key: `git-apply:${parsed.idempotency_key}` }
             : {}),
         })) as Record<string, unknown>;
+        return withOperationSucceeded(raw);
       } finally {
         if (!parsed.idempotency_key) {
           await client.deleteFile(backend, { path }).catch(() => undefined);
@@ -1030,6 +1035,25 @@ export async function computeToolSchemaHash(): Promise<string> {
   const payload = JSON.stringify(publicToolJsonSchemas());
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
   return `sha256:${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/**
+ * MCP envelope ok=true means the tool call completed (process ran).
+ * operation_succeeded reflects the underlying git/command exit code.
+ */
+function withOperationSucceeded(raw: Record<string, unknown>): Record<string, unknown> {
+  const exit =
+    typeof raw.exit_code === 'number'
+      ? raw.exit_code
+      : typeof raw.exitCode === 'number'
+        ? raw.exitCode
+        : null;
+  const timedOut = raw.timed_out === true || raw.timedOut === true;
+  return {
+    ...raw,
+    operation_succeeded: !timedOut && exit === 0,
+    ...(exit !== null ? { exit_code: exit } : {}),
+  };
 }
 
 /**
