@@ -15,7 +15,9 @@ import {
   addHours,
   computeExpiresAt,
   computeIdempotencyExpiresAt,
+  computeOutputExpiresAt,
   environmentFromLabels,
+  isRetentionProtected,
   isTerminalTaskStatus,
   isTestTask,
   parseLabelsJson,
@@ -50,6 +52,9 @@ interface TaskRow {
   deleted_by: string | null;
   deletion_reason: string | null;
   cleanup_state: string | null;
+  legal_hold: number | null;
+  pinned_at: string | null;
+  output_expires_at: string | null;
 }
 
 export interface TaskIndex {
@@ -989,8 +994,10 @@ export class TaskService {
   }
 
   /**
-   * Cron: soft-delete expired *test* tasks; hard-delete soft-deleted past grace.
-   * Production auto-retention stays off until Dry Run phase lands.
+   * Daily retention purge (conservative defaults):
+   * - soft-delete expired terminal tasks (any env), skip legal_hold / pinned
+   * - hard-delete soft-deleted past 24h grace (also skip still-protected rows)
+   * Batch size CLEANUP_BATCH_SIZE (500).
    */
   async purgeExpired(): Promise<{
     soft_deleted: number;
@@ -999,34 +1006,34 @@ export class TaskService {
     const now = new Date().toISOString();
     const graceCutoff = addHours(now, -SOFT_DELETE_GRACE_HOURS);
 
-    // Soft-delete expired test terminal tasks only (Phase 0–1 safety).
     const softCandidates = await this.db
       .prepare(
-        `SELECT id FROM tasks
+        `SELECT id, legal_hold, pinned_at FROM tasks
          WHERE deleted_at IS NULL
            AND terminal_at IS NOT NULL
            AND expires_at IS NOT NULL
            AND expires_at <= ?
            AND status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')
-           AND (
-             environment = 'test'
-             OR retention_class = 'test'
-           )
+           AND COALESCE(legal_hold, 0) = 0
+           AND pinned_at IS NULL
          ORDER BY expires_at ASC
          LIMIT ?`,
       )
       .bind(now, CLEANUP_BATCH_SIZE)
-      .all<{ id: string }>();
+      .all<{ id: string; legal_hold: number | null; pinned_at: string | null }>();
 
     let soft_deleted = 0;
     for (const row of softCandidates.results) {
+      if (isRetentionProtected(row)) continue;
       try {
         await this.db
           .prepare(
             `UPDATE tasks
              SET deleted_at = ?, deleted_by = 'system', deletion_reason = 'retention_expired',
                  cleanup_state = 'deleted', updated_at = ?
-             WHERE id = ? AND deleted_at IS NULL`,
+             WHERE id = ? AND deleted_at IS NULL
+               AND COALESCE(legal_hold, 0) = 0
+               AND pinned_at IS NULL`,
           )
           .bind(now, now, row.id)
           .run();
@@ -1036,12 +1043,14 @@ export class TaskService {
       }
     }
 
-    // Hard-delete past soft-delete grace (all environments once soft-deleted).
+    // Hard-delete past soft-delete grace (skip if re-protected).
     const hardCandidates = await this.db
       .prepare(
         `SELECT * FROM tasks
          WHERE deleted_at IS NOT NULL
            AND deleted_at <= ?
+           AND COALESCE(legal_hold, 0) = 0
+           AND pinned_at IS NULL
          ORDER BY deleted_at ASC
          LIMIT ?`,
       )
@@ -1050,6 +1059,7 @@ export class TaskService {
 
     let hard_deleted = 0;
     for (const row of hardCandidates.results) {
+      if (isRetentionProtected(row)) continue;
       try {
         await this.hardDeleteTaskRow(row);
         hard_deleted += 1;
@@ -1265,6 +1275,7 @@ export class TaskService {
     const retentionClass = retentionClassFor(status, labels, environment);
     const terminalAt = row?.terminal_at ?? now;
     const expiresAt = computeExpiresAt(terminalAt, retentionClass, status);
+    const outputExpiresAt = computeOutputExpiresAt(terminalAt);
 
     await this.db
       .prepare(
@@ -1274,6 +1285,7 @@ export class TaskService {
            finished_at = COALESCE(finished_at, ?),
            terminal_at = COALESCE(terminal_at, ?),
            expires_at = COALESCE(expires_at, ?),
+           output_expires_at = COALESCE(output_expires_at, ?),
            retention_class = COALESCE(NULLIF(retention_class, ''), ?),
            cleanup_state = CASE
              WHEN cleanup_state IS NULL OR cleanup_state = 'none' THEN 'eligible'
@@ -1281,7 +1293,7 @@ export class TaskService {
            END
          WHERE id = ?`,
       )
-      .bind(status, now, now, terminalAt, expiresAt, retentionClass, id)
+      .bind(status, now, now, terminalAt, expiresAt, outputExpiresAt, retentionClass, id)
       .run();
   }
 }
@@ -1402,6 +1414,9 @@ function buildCleanupClauses(
   if (filters.testOnly) {
     clauses.push(`(environment = 'test' OR retention_class = 'test')`);
   }
+  // Manual bulk cleanup also skips protected rows by default.
+  clauses.push(`COALESCE(legal_hold, 0) = 0`);
+  clauses.push(`pinned_at IS NULL`);
   if (filters.deletedBefore) {
     clauses.push('deleted_at IS NOT NULL AND deleted_at <= ?');
     binds.push(filters.deletedBefore);

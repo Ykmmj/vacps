@@ -5,16 +5,22 @@
 
 import { isTerminalTaskStatus, type TaskStatus } from '@vacps/contracts';
 
-/** Recommended first-ship defaults (days). */
+/**
+ * Conservative defaults for current Vacps scale (no long dry-run program).
+ * test 3d · success 14d · fail/timeout/cancel 30d · output 7d · soft then 24h hard.
+ */
 export const RETENTION_DAYS = {
   test: 3,
   succeeded: 14,
-  cancelled: 14,
+  cancelled: 30,
   failed: 30,
   dispatch_failed: 30,
   timed_out: 30,
   default: 30,
 } as const;
+
+/** Agent/output TTL target (control plane records output_expires_at; agent purge later). */
+export const OUTPUT_RETENTION_DAYS = 7;
 
 export const SOFT_DELETE_GRACE_HOURS = 24;
 export const CLEANUP_BATCH_SIZE = 500;
@@ -101,6 +107,20 @@ export function computeExpiresAt(
     return new Date(Date.now() + days * 86_400_000).toISOString();
   }
   return new Date(base + days * 86_400_000).toISOString();
+}
+
+export function computeOutputExpiresAt(terminalAtIso: string): string {
+  return addHours(terminalAtIso, OUTPUT_RETENTION_DAYS * 24);
+}
+
+/** Protected rows skip automatic retention purge (and default bulk cleanup). */
+export function isRetentionProtected(row: {
+  legal_hold?: number | boolean | null;
+  pinned_at?: string | null;
+}): boolean {
+  if (row.pinned_at) return true;
+  if (row.legal_hold === true || row.legal_hold === 1) return true;
+  return false;
 }
 
 export function addHours(iso: string, hours: number): string {

@@ -31,6 +31,8 @@
     },
   ],
   "triggers": {
-    "crons": ["*/5 * * * *"],
+    // */5: schedule reconcile + token/nonce purge
+    // 0 3 * * *: daily task retention (soft expired → hard after 24h grace)
+    "crons": ["*/5 * * * *", "0 3 * * *"],
   },
 }
