@@ -87,15 +87,19 @@ const oauthProvider = new OAuthProvider({
 
 export default {
   fetch: (request, env, ctx) => oauthProvider.fetch(request, env, ctx),
-  async scheduled(_controller, env, ctx): Promise<void> {
+  async scheduled(controller, env, ctx): Promise<void> {
     const services = createServices(env);
+    const cron = controller.cron;
+    // Daily retention pass only (keeps batch work off the */5 reconcile tick).
+    if (cron === '0 3 * * *') {
+      ctx.waitUntil(services.tasks.purgeExpired());
+      return;
+    }
     ctx.waitUntil(services.schedules.reconcile());
     ctx.waitUntil(
       Promise.all([
         services.registrationTokens.purgeExpired(),
         services.agentSignatures.purgeExpired(),
-        // Soft-delete expired test tasks; hard-delete soft-deleted past grace.
-        services.tasks.purgeExpired(),
       ]),
     );
     // Best-effort cleanup of expired OAuth grants/tokens from KV.

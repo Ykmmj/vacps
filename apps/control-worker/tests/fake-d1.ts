@@ -262,7 +262,16 @@ export class FakeD1 {
 
     // ── tasks UPDATE terminal setStatus ───────────────────────────
     if (sql.includes('UPDATE tasks SET') && sql.includes('terminal_at = COALESCE')) {
-      const [status, updated_at, finished, terminalAt, expiresAt, retentionClass, id] = binds;
+      const [
+        status,
+        updated_at,
+        finished,
+        terminalAt,
+        expiresAt,
+        outputExpiresAt,
+        retentionClass,
+        id,
+      ] = binds;
       const row = this.tasks.find((t) => t.id === id);
       if (row) {
         row.status = status;
@@ -270,6 +279,7 @@ export class FakeD1 {
         row.finished_at = row.finished_at ?? finished;
         row.terminal_at = row.terminal_at ?? terminalAt;
         row.expires_at = row.expires_at ?? expiresAt;
+        row.output_expires_at = row.output_expires_at ?? outputExpiresAt;
         if (!row.retention_class) row.retention_class = retentionClass;
         if (!row.cleanup_state || row.cleanup_state === 'none') row.cleanup_state = 'eligible';
       }

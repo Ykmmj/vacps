@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  OUTPUT_RETENTION_DAYS,
   RETENTION_DAYS,
   computeExpiresAt,
+  computeOutputExpiresAt,
   environmentFromLabels,
+  isRetentionProtected,
   isTerminalTaskStatus,
   isTestTask,
   parseLabelsJson,
@@ -50,9 +53,14 @@ describe('retention policy', () => {
     expect(retentionClassFor('succeeded', { environment: 'test' }, null)).toBe('test');
   });
 
-  it('keeps failures longer than successes', () => {
+  it('keeps failures/cancels longer than successes', () => {
     expect(retentionDaysFor('failure', 'failed')).toBe(RETENTION_DAYS.failed);
+    expect(retentionDaysFor('cancelled', 'cancelled')).toBe(RETENTION_DAYS.cancelled);
     expect(retentionDaysFor('success', 'succeeded')).toBe(RETENTION_DAYS.succeeded);
+    expect(RETENTION_DAYS.failed).toBe(30);
+    expect(RETENTION_DAYS.cancelled).toBe(30);
+    expect(RETENTION_DAYS.succeeded).toBe(14);
+    expect(RETENTION_DAYS.test).toBe(3);
     expect(RETENTION_DAYS.failed).toBeGreaterThan(RETENTION_DAYS.succeeded);
   });
 
@@ -60,6 +68,20 @@ describe('retention policy', () => {
     const terminalAt = '2026-07-01T00:00:00.000Z';
     const expires = computeExpiresAt(terminalAt, 'test', 'succeeded');
     expect(Date.parse(expires) - Date.parse(terminalAt)).toBe(RETENTION_DAYS.test * 86_400_000);
+  });
+
+  it('computes output_expires_at at 7 days', () => {
+    const terminalAt = '2026-07-01T00:00:00.000Z';
+    const out = computeOutputExpiresAt(terminalAt);
+    expect(Date.parse(out) - Date.parse(terminalAt)).toBe(OUTPUT_RETENTION_DAYS * 86_400_000);
+  });
+
+  it('protects legal_hold and pinned rows', () => {
+    expect(isRetentionProtected({ legal_hold: 1, pinned_at: null })).toBe(true);
+    expect(isRetentionProtected({ legal_hold: 0, pinned_at: '2026-07-01T00:00:00.000Z' })).toBe(
+      true,
+    );
+    expect(isRetentionProtected({ legal_hold: 0, pinned_at: null })).toBe(false);
   });
 
   it('extracts environment from labels', () => {
