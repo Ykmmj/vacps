@@ -393,22 +393,38 @@ export function createMcpServer(env: Env): McpServer {
     }),
     wrap(async (args) => {
       const parsed = tasksIdInputSchema.parse(args);
-      const result = (await tasks.cancel(parsed.task_id)) as { task: unknown };
-      return { task: snakeTask(result.task as never) };
+      const result = await tasks.cancel(parsed.task_id, {
+        ...(parsed.idempotency_key ? { idempotencyKey: parsed.idempotency_key } : {}),
+      });
+      return {
+        task: snakeTask(result.task as never),
+        ...(result.already_terminal !== undefined
+          ? { already_terminal: result.already_terminal }
+          : {}),
+        ...(result.cancelled !== undefined ? { cancelled: result.cancelled } : {}),
+        ...(result.idempotency ? { idempotency: result.idempotency } : {}),
+      };
     }),
   );
 
   server.registerTool(
     'vacps.tasks.retry',
     toolConfig('vacps.tasks.retry', {
-      description: 'Retry a task (creates a new task when possible).',
+      description:
+        'Retry a task (creates a new task when possible). Supports idempotency_key for safe retries of the same original task_id.',
       inputSchema: tasksIdInputSchema,
       outputSchema: okEnvelope.extend({ task: z.unknown() }).shape,
     }),
     wrap(async (args) => {
       const parsed = tasksIdInputSchema.parse(args);
-      const result = (await tasks.retry(parsed.task_id)) as { task: unknown };
-      return { task: snakeTask(result.task as never) };
+      const result = await tasks.retry(parsed.task_id, {
+        ...(parsed.idempotency_key ? { idempotencyKey: parsed.idempotency_key } : {}),
+      });
+      return {
+        task: snakeTask(result.task as never),
+        retry_of_task_id: result.retry_of_task_id,
+        ...(result.idempotency ? { idempotency: result.idempotency } : {}),
+      };
     }),
   );
 
@@ -489,6 +505,7 @@ export function createMcpServer(env: Env): McpServer {
       const updated = await schedules.patch(parsed.schedule_id, patch);
       return {
         schedule: snakeSchedule(updated),
+        ...('changed' in updated ? { changed: updated.changed !== false } : {}),
         idempotency: {
           key: parsed.idempotency_key ?? null,
           replayed: Boolean(updated.reused),

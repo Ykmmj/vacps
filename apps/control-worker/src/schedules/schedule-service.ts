@@ -272,15 +272,37 @@ export class ScheduleService {
       task?: CreateTaskInput;
       policy?: SchedulePolicy;
     },
-  ): Promise<ScheduleRecord> {
-    const task = patch.task ?? current.task;
-    const next: Schedule = {
+  ): Promise<ScheduleRecord & { changed?: boolean }> {
+    const task = createTaskSchema.parse({
+      ...(patch.task ?? current.task),
+      backend_id: current.backend_id,
+    });
+    const nextBase: Schedule = {
       ...current,
       ...(patch.name !== undefined ? { name: patch.name } : {}),
       ...(patch.trigger !== undefined ? { trigger: patch.trigger } : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
-      task: createTaskSchema.parse({ ...task, backend_id: current.backend_id }),
+      task,
       ...(patch.policy !== undefined ? { policy: patch.policy } : {}),
+      revision: current.revision,
+      updated_at: current.updated_at,
+    };
+
+    // No-op patch: return current revision without bumping.
+    if (
+      nextBase.name === current.name &&
+      nextBase.enabled === current.enabled &&
+      nextBase.trigger.expression === current.trigger.expression &&
+      nextBase.trigger.timezone === current.trigger.timezone &&
+      JSON.stringify(nextBase.policy) === JSON.stringify(current.policy) &&
+      JSON.stringify(publicTaskForCompare(nextBase.task)) ===
+        JSON.stringify(publicTaskForCompare(current.task))
+    ) {
+      return { ...current, changed: false };
+    }
+
+    const next: Schedule = {
+      ...nextBase,
       revision: current.revision + 1,
       updated_at: new Date().toISOString(),
     };
@@ -314,7 +336,7 @@ export class ScheduleService {
     }
 
     await this.sync(next, await this.backends.get(next.backend_id));
-    return this.get(current.id);
+    return { ...(await this.get(current.id)), changed: true };
   }
 
   /**
@@ -545,6 +567,16 @@ function toSchedule(row: ScheduleRow): ScheduleRecord {
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+/** Compare schedule tasks without storage-only fields. */
+function publicTaskForCompare(task: CreateTaskInput | Schedule['task']): unknown {
+  const {
+    backend_id: _b,
+    idempotency_key: _i,
+    ...rest
+  } = task as CreateTaskInput & { backend_id?: string; idempotency_key?: string };
+  return rest;
 }
 
 /** Canonical hash of schedule create payload for idempotency_conflict. */
