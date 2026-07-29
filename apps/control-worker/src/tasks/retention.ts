@@ -19,9 +19,12 @@ export const RETENTION_DAYS = {
 export const SOFT_DELETE_GRACE_HOURS = 24;
 export const CLEANUP_BATCH_SIZE = 500;
 export const CLEANUP_MAX_PER_RUN = 5_000;
-/** Allow small drift between preview and run without failing. */
-export const CLEANUP_COUNT_TOLERANCE = 0.1;
-export const CLEANUP_COUNT_ABS_TOLERANCE = 5;
+
+/** Create-idempotency tombstone TTL (days) after create / hard-delete mark. */
+export const IDEMPOTENCY_TTL_DAYS = {
+  test: 7,
+  default: 30,
+} as const;
 
 export type RetentionClass = 'test' | 'success' | 'failure' | 'cancelled' | 'default';
 
@@ -106,11 +109,28 @@ export function addHours(iso: string, hours: number): string {
   return new Date(t + hours * 3_600_000).toISOString();
 }
 
+/**
+ * Preview confirmation guard: expected_matched_count must match exactly.
+ * Any drift (more or fewer rows) aborts cleanup before mutation.
+ */
 export function scopeCountAcceptable(expected: number, actual: number): boolean {
-  const abs = Math.abs(actual - expected);
-  if (abs <= CLEANUP_COUNT_ABS_TOLERANCE) return true;
-  if (expected === 0) return actual === 0;
-  return abs / expected <= CLEANUP_COUNT_TOLERANCE;
+  return expected === actual;
+}
+
+export function idempotencyTtlDays(
+  labels: Record<string, string> | null | undefined,
+  environment: string | null | undefined,
+): number {
+  return isTestTask(labels, environment) ? IDEMPOTENCY_TTL_DAYS.test : IDEMPOTENCY_TTL_DAYS.default;
+}
+
+export function computeIdempotencyExpiresAt(
+  fromIso: string,
+  labels: Record<string, string> | null | undefined,
+  environment: string | null | undefined,
+): string {
+  const days = idempotencyTtlDays(labels, environment);
+  return addHours(fromIso, days * 24);
 }
 
 export { isTerminalTaskStatus };

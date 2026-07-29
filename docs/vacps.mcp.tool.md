@@ -332,6 +332,11 @@ schedules.get / list
 
 控制面 cron 仅自动软删 **过期测试任务**（`environment=test` 或 `retention_class=test`），并对超过 24h 软删宽限的任务硬删。生产自动保留期需后续 Dry Run 后再开。
 
+**安全约束（r6）：**
+
+- `cleanup.run` 的 `expected_matched_count` 必须与实际匹配数 **完全相等**，否则 `409 cleanup_scope_changed`（不执行任何删除、不写操作幂等成功）。
+- 硬删除任务后保留 `task_create_idempotency` Tombstone；相同 create `idempotency_key` + 相同请求 → `replayed: true` + `resource_deleted: true`；不同请求 → `409 idempotency_conflict`。
+
 ### 文件分页字段
 
 | Tool         | 列表字段           |
