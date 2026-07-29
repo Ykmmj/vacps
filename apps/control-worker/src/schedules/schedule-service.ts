@@ -188,8 +188,41 @@ export class ScheduleService {
     });
   }
 
-  /** Schema v3 patch with optional expected_revision optimistic concurrency. */
-  async patch(id: string, input: PatchScheduleInput): Promise<ScheduleRecord> {
+  /**
+   * Schema v3 patch with expected_revision + optional idempotency_key.
+   * Order: request_hash → idempotency lookup → revision check → apply → store result.
+   */
+  async patch(
+    id: string,
+    input: PatchScheduleInput,
+  ): Promise<ScheduleRecord & { reused?: boolean; requestHash?: string }> {
+    const requestHash = await hashOpaque({
+      operation: 'schedules.update',
+      schedule_id: id,
+      expected_revision: input.expected_revision ?? null,
+      changes: input.changes,
+    });
+    const scope = 'schedules.update';
+
+    if (input.idempotency_key) {
+      const cached = await this.loadIdempotency(scope, input.idempotency_key);
+      if (cached) {
+        if (cached.requestHash !== requestHash) {
+          throw new AppError(
+            'idempotency_conflict',
+            'The idempotency key was previously used with different arguments.',
+            409,
+          );
+        }
+        // Replay stored schedule snapshot (do not re-check revision).
+        return {
+          ...(cached.result as ScheduleRecord),
+          reused: true,
+          requestHash,
+        };
+      }
+    }
+
     const current = await this.get(id);
     if (
       input.expected_revision !== undefined &&
@@ -214,7 +247,7 @@ export class ScheduleService {
             timezone: changes.trigger.timezone ?? current.trigger.timezone,
           }
         : undefined;
-    return this.applyUpdate(current, {
+    const updated = await this.applyUpdate(current, {
       ...(changes.name !== undefined ? { name: changes.name } : {}),
       ...(nextTrigger ? { trigger: nextTrigger } : {}),
       ...(changes.enabled !== undefined ? { enabled: changes.enabled } : {}),
@@ -223,6 +256,11 @@ export class ScheduleService {
         : {}),
       ...(nextPolicy ? { policy: nextPolicy } : {}),
     });
+
+    if (input.idempotency_key) {
+      await this.storeIdempotency(scope, input.idempotency_key, requestHash, updated);
+    }
+    return { ...updated, requestHash };
   }
 
   private async applyUpdate(
@@ -405,16 +443,16 @@ export class ScheduleService {
     const template = createTaskSchema.parse({
       ...schedule.task,
       backend_id: schedule.backend_id,
-      ...(options.idempotencyKey && !schedule.task.idempotency_key
-        ? { idempotency_key: options.idempotencyKey }
-        : {}),
+      ...(options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {}),
     });
 
     const task = await this.tasks.create(template, 'schedule', schedule.id);
-    await this.db
-      .prepare('UPDATE schedules SET last_run_at = ?, updated_at = ? WHERE id = ?')
-      .bind(new Date().toISOString(), new Date().toISOString(), id)
-      .run();
+    if (!task.reusedExistingTask) {
+      await this.db
+        .prepare('UPDATE schedules SET last_run_at = ?, updated_at = ? WHERE id = ?')
+        .bind(new Date().toISOString(), new Date().toISOString(), id)
+        .run();
+    }
     return { scheduleId: id, task, queued: true };
   }
 

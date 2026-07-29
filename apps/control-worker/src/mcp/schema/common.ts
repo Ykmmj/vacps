@@ -32,5 +32,5 @@ export {
   yieldTimeMsSchema,
 } from './defs.js';
 
-export const MCP_PROTOCOL_VERSION = '0.5.0';
-export const TOOL_SCHEMA_REVISION = '2026-07-29-schema-v3';
+export const MCP_PROTOCOL_VERSION = '0.5.1';
+export const TOOL_SCHEMA_REVISION = '2026-07-29-schema-v3-r2';

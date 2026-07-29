@@ -8,7 +8,7 @@ import { BackendClient } from '../registry/backend-client.js';
 import { BackendRepository } from '../registry/repository.js';
 import { ScheduleService } from '../schedules/schedule-service.js';
 import { TaskService } from '../tasks/task-service.js';
-import { annotationsFor } from './schema/annotations.js';
+import { annotationsFor, TOOL_ANNOTATIONS } from './schema/annotations.js';
 import {
   categoryFor,
   isRetryable,
@@ -360,7 +360,13 @@ export function createMcpServer(env: Env): McpServer {
     }),
     wrap(async (args) => {
       const parsed = tasksListInputSchema.parse(args);
-      const offset = parsed.cursor ? decodeOffsetCursor(parsed.cursor) : 0;
+      const query = {
+        ...(parsed.backend_id ? { backend_id: parsed.backend_id } : {}),
+        ...(parsed.kind ? { kind: parsed.kind } : {}),
+        ...(parsed.status ? { status: parsed.status } : {}),
+        ...(parsed.created_after ? { created_after: parsed.created_after } : {}),
+      };
+      const offset = parsed.cursor ? decodeQueryCursor(parsed.cursor, query) : 0;
       const page = await tasks.listPage({
         limit: parsed.limit ?? 50,
         offset,
@@ -373,7 +379,7 @@ export function createMcpServer(env: Env): McpServer {
         tasks: page.tasks.map(snakeTask),
         returned_count: page.returned_count,
         next_cursor:
-          page.next_offset !== null ? encodeOffsetCursor(page.next_offset) : null,
+          page.next_offset !== null ? encodeQueryCursor(page.next_offset, query) : null,
       };
     }),
   );
@@ -480,7 +486,15 @@ export function createMcpServer(env: Env): McpServer {
       const parsed = schedulesUpdateInputSchema.parse(args);
       const current = await schedules.get(parsed.schedule_id);
       const patch = parseSchedulePatch(parsed, current.backend_id);
-      return { schedule: snakeSchedule(await schedules.patch(parsed.schedule_id, patch)) };
+      const updated = await schedules.patch(parsed.schedule_id, patch);
+      return {
+        schedule: snakeSchedule(updated),
+        idempotency: {
+          key: parsed.idempotency_key ?? null,
+          replayed: Boolean(updated.reused),
+          request_hash: updated.requestHash ?? null,
+        },
+      };
     }),
   );
   server.registerTool(
@@ -525,6 +539,11 @@ export function createMcpServer(env: Env): McpServer {
         task_id: result.task.id,
         task: snakeTask(result.task),
         queued: true,
+        idempotency: {
+          key: parsed.idempotency_key ?? result.task.idempotencyKey ?? null,
+          replayed: Boolean(result.task.reusedExistingTask),
+          request_hash: result.task.requestHash ?? null,
+        },
       };
     }),
   );
@@ -870,7 +889,15 @@ export function createMcpServer(env: Env): McpServer {
       const parsed = capabilitiesGetInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
       const raw = (await client.getCapabilities(backend)) as Record<string, unknown>;
-      return normalizeCapabilities(raw);
+      const caps = normalizeCapabilities(raw);
+      const tool_schema_hash = await computeToolSchemaHash();
+      return {
+        ...caps,
+        vacps_schema_version: SCHEMA_VERSION,
+        tool_count: Object.keys(TOOL_ANNOTATIONS).length,
+        tool_schema_hash,
+        tool_schema_revision: TOOL_SCHEMA_REVISION,
+      };
     }),
   );
 
@@ -1264,7 +1291,7 @@ function snakeSchedule(schedule: {
     enabled: schedule.enabled,
     trigger: schedule.trigger,
     policy: schedule.policy,
-    task: schedule.task,
+    task: publicScheduleTask(schedule.task),
     ...(schedule.idempotency_key ? { idempotency_key: schedule.idempotency_key } : {}),
     ...(schedule.requestHash ? { request_hash: schedule.requestHash } : {}),
     ...(schedule.last_run_at ? { last_run_at: schedule.last_run_at } : {}),
@@ -1272,6 +1299,17 @@ function snakeSchedule(schedule: {
     created_at: schedule.created_at,
     updated_at: schedule.updated_at,
   };
+}
+
+/** Strip nested backend_id / idempotency_key from schedule.task public view. */
+function publicScheduleTask(task: unknown): unknown {
+  if (!task || typeof task !== 'object') return task;
+  const {
+    backend_id: _b,
+    idempotency_key: _i,
+    ...rest
+  } = task as Record<string, unknown>;
+  return rest;
 }
 
 /** Recursively convert object keys to snake_case for Schema v3 status payloads. */
@@ -1290,23 +1328,54 @@ function snakeStatus(status: unknown): unknown {
 }
 
 function encodeOffsetCursor(offset: number): string {
-  const json = JSON.stringify({ o: offset });
+  return encodeQueryCursor(offset, {});
+}
+
+function decodeOffsetCursor(cursor: string): number {
+  return decodeQueryCursor(cursor, {});
+}
+
+/** Cursor bound to list filters (offset + query fingerprint). */
+function encodeQueryCursor(offset: number, query: Record<string, unknown>): string {
+  const json = JSON.stringify({ o: offset, q: stableQueryKey(query) });
   const bytes = new TextEncoder().encode(json);
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function decodeOffsetCursor(cursor: string): number {
+function decodeQueryCursor(cursor: string, query: Record<string, unknown>): number {
   const padded = cursor.replace(/-/g, '+').replace(/_/g, '/');
   const pad = padded.length % 4 === 0 ? '' : '='.repeat(4 - (padded.length % 4));
   const binary = atob(padded + pad);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  const decoded = JSON.parse(new TextDecoder().decode(bytes)) as { o?: number };
+  const decoded = JSON.parse(new TextDecoder().decode(bytes)) as { o?: number; q?: string };
   if (typeof decoded.o !== 'number' || decoded.o < 0) {
-    throw new Error('invalid cursor');
+    throw new AppError('validation_error', 'Invalid cursor.', 400);
+  }
+  const expected = stableQueryKey(query);
+  // Legacy offset-only cursors (no q) are rejected when filters are present.
+  if (decoded.q !== undefined && decoded.q !== expected) {
+    throw new AppError(
+      'cursor_query_mismatch',
+      'Cursor does not match the current list filters. Restart pagination from the first page.',
+      400,
+      { expected_query: expected, cursor_query: decoded.q },
+    );
+  }
+  if (decoded.q === undefined && Object.keys(query).length > 0) {
+    throw new AppError(
+      'cursor_query_mismatch',
+      'Cursor is missing query binding for filtered list. Restart pagination.',
+      400,
+    );
   }
   return Math.trunc(decoded.o);
+}
+
+function stableQueryKey(query: Record<string, unknown>): string {
+  const keys = Object.keys(query).sort();
+  return keys.map((k) => `${k}=${JSON.stringify(query[k] ?? null)}`).join('&');
 }
 
 // Silence unused import warning if taskStatuses only used historically

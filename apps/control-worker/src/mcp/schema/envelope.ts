@@ -65,19 +65,27 @@ export function successMeta(extra?: { backend_id?: string; warnings?: string[] }
 
 export function categoryFor(code: string): ErrorCategory {
   if (
+    code === 'path_not_found' ||
+    code === 'ENOENT' ||
+    code === 'not_found' ||
+    code.endsWith('_not_found') ||
+    code.includes('not_found')
+  ) {
+    return 'not_found';
+  }
+  if (
     code.includes('validation') ||
     code === 'invalid_request' ||
     code.startsWith('invalid_') ||
     code === 'path_not_allowed' ||
     code === 'path_not_directory' ||
-    code === 'path_not_found' ||
     code === 'invalid_line_range' ||
     code === 'backend_client_error' ||
-    code === 'invalid_scheduler'
+    code === 'invalid_scheduler' ||
+    code === 'cursor_query_mismatch'
   ) {
     return 'validation';
   }
-  if (code.includes('not_found')) return 'not_found';
   if (
     code.includes('disabled') ||
     code.includes('conflict') ||
@@ -94,7 +102,11 @@ export function categoryFor(code: string): ErrorCategory {
   if (code.includes('rate_limit') || code.includes('too_many')) return 'rate_limit';
   if (code.includes('timeout') || code.includes('timed_out')) return 'timeout';
   if (code.includes('dependency')) return 'dependency';
-  if (code.includes('unreachable') || code.includes('unavailable')) {
+  if (
+    code.includes('unreachable') ||
+    code.includes('unavailable') ||
+    code === 'capability_unavailable'
+  ) {
     return 'unavailable';
   }
   // backend_request_failed is typically 5xx / transport — unavailable.

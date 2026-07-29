@@ -19,7 +19,19 @@ import { assertSafeAbsolutePath, resolveWorkspacePath } from './path-guard.js';
 
 export async function filesStat(pathInput: string) {
   const path = assertSafeAbsolutePath(pathInput);
-  const info = await stat(path);
+  let info: Stats;
+  try {
+    info = await stat(path);
+  } catch (error: unknown) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      throw Object.assign(new Error(`Path not found: ${path}`), {
+        code: 'path_not_found',
+        statusCode: 404,
+      });
+    }
+    throw error;
+  }
   let readable = false;
   let writable = false;
   try {
@@ -427,6 +439,24 @@ async function filesGrepWithRg(
   const result = await runCapture('rg', args, cwd, 60_000);
   const matches: Array<Record<string, unknown>> = [];
   let bytes = 0;
+  // rg --json emits context lines as type=context before/after match lines.
+  let pendingBefore: Array<{ line_number: number; line: string }> = [];
+  let lastMatch: {
+    path: string;
+    line_number: number;
+    column_number: number;
+    line: string;
+    before: Array<{ line_number: number; line: string }>;
+    after: Array<{ line_number: number; line: string }>;
+  } | null = null;
+
+  const flushLast = () => {
+    if (lastMatch) {
+      matches.push(lastMatch);
+      lastMatch = null;
+    }
+  };
+
   for (const line of result.stdout.split('\n')) {
     if (!line.trim()) continue;
     let parsed: {
@@ -443,25 +473,45 @@ async function filesGrepWithRg(
     } catch {
       continue;
     }
-    if (parsed.type !== 'match' || !parsed.data) continue;
-    const text = parsed.data.lines?.text ?? '';
+    if (!parsed.data) continue;
+    const text = (parsed.data.lines?.text ?? '').replace(/\n$/, '');
+    const lineNumber = parsed.data.line_number ?? 0;
+    const matchPath = parsed.data.path?.text;
+    const fullPath = matchPath
+      ? matchPath.startsWith('/')
+        ? matchPath
+        : join(cwd, matchPath)
+      : target;
+
+    if (parsed.type === 'context') {
+      if (lastMatch && lineNumber > lastMatch.line_number) {
+        lastMatch.after.push({ line_number: lineNumber, line: text });
+      } else {
+        pendingBefore.push({ line_number: lineNumber, line: text });
+        if (pendingBefore.length > contextBefore) pendingBefore.shift();
+      }
+      continue;
+    }
+    if (parsed.type !== 'match') continue;
+
+    flushLast();
     bytes += Buffer.byteLength(text, 'utf8');
     if (bytes > maxBytes) break;
-    const matchPath = parsed.data.path?.text;
-    matches.push({
-      path: matchPath
-        ? matchPath.startsWith('/')
-          ? matchPath
-          : join(cwd, matchPath)
-        : target,
-      line_number: parsed.data.line_number ?? 0,
+    lastMatch = {
+      path: fullPath,
+      line_number: lineNumber,
       column_number: (parsed.data.submatches?.[0]?.start ?? 0) + 1,
-      line: text.replace(/\n$/, ''),
-      before: [],
+      line: text,
+      before: pendingBefore.slice(-contextBefore),
       after: [],
-    });
-    if (matches.length >= maxMatches) break;
+    };
+    pendingBefore = [];
+    if (matches.length + 1 >= maxMatches) {
+      flushLast();
+      break;
+    }
   }
+  flushLast();
   return {
     matches,
     match_count: matches.length,

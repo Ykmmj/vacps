@@ -68,7 +68,7 @@ export class IdempotencyStore {
 }
 
 export function hashRequest(payload: unknown): string {
-  return createHash('sha256').update(stableStringify(payload)).digest('hex');
+  return `sha256:${createHash('sha256').update(stableStringify(payload)).digest('hex')}`;
 }
 
 function stableStringify(value: unknown): string {

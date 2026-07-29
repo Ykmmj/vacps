@@ -381,9 +381,18 @@ export class ProcessManager {
     processId: string,
     signal: 'sigterm' | 'sigint' | 'sigkill' = 'sigterm',
     gracePeriodMs = 3_000,
-  ): ProcessSnapshot {
+  ): ProcessSnapshot & {
+    termination_requested: boolean;
+    requested_signal: string;
+  } {
     const managed = this.require(processId);
-    if (managed.status !== 'running') return this.snapshot(processId);
+    if (managed.status !== 'running') {
+      return {
+        ...this.snapshot(processId),
+        termination_requested: false,
+        requested_signal: signal,
+      };
+    }
 
     const nodeSignal =
       signal === 'sigkill' ? 'SIGKILL' : signal === 'sigint' ? 'SIGINT' : 'SIGTERM';
@@ -401,7 +410,14 @@ export class ProcessManager {
     } else {
       this.finish(managed, 'cancelled', null, 'SIGKILL', false);
     }
-    return this.snapshot(processId);
+    const snap = this.snapshot(processId);
+    return {
+      ...snap,
+      // Still running immediately after signal is expected for async terminate.
+      status: snap.status === 'running' ? 'running' : snap.status,
+      termination_requested: true,
+      requested_signal: nodeSignal,
+    };
   }
 
   snapshot(
@@ -507,7 +523,7 @@ export function canonicalRequestHash(
     close_stdin: input.closeStdin ?? null,
     load_user_environment: input.loadUserEnvironment ?? false,
   };
-  return createHash('sha256').update(stableStringify(payload)).digest('hex');
+  return `sha256:${createHash('sha256').update(stableStringify(payload)).digest('hex')}`;
 }
 
 function idempotencyStoreKey(toolName: string, key: string): string {
