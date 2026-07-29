@@ -823,7 +823,11 @@ export class TaskService {
     return body;
   }
 
-  /** Preview how many terminal tasks match cleanup filters. */
+  /**
+   * Preview terminal tasks matching cleanup filters.
+   * Includes pin/legal_hold rows in matched/protected counts; sample_task_ids are deletable only.
+   * cleanup.run still only mutates the deletable set (expected_matched_count = deletable_count).
+   */
   async cleanupPreview(
     filters: CleanupFilters = {},
     options: { limit?: number; sampleLimit?: number } = {},
@@ -833,6 +837,7 @@ export class TaskService {
     protected_count: number;
     status_breakdown: Record<string, number>;
     sample_task_ids: string[];
+    sample_protected_ids: string[];
     filters: CleanupFilters;
   }> {
     const sampleLimit = Math.min(Math.max(options.sampleLimit ?? 20, 0), 100);
@@ -840,8 +845,11 @@ export class TaskService {
       Math.max(options.limit ?? CLEANUP_MAX_PER_RUN, 1),
       CLEANUP_MAX_PER_RUN,
     );
-    const { clauses, binds } = buildCleanupClauses(filters, { forDelete: false });
-    // Always only consider terminal for cleanup preview (non-terminal → protected separately).
+    // Include protected rows in the match set so protected_count is accurate.
+    const { clauses, binds } = buildCleanupClauses(filters, {
+      forDelete: false,
+      skipProtected: false,
+    });
     clauses.push(`status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`);
     if (!filters.includeDeleted) {
       clauses.push('deleted_at IS NULL');
@@ -849,21 +857,33 @@ export class TaskService {
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
     const rows = await this.db
-      .prepare(`SELECT id, status FROM tasks ${where} ORDER BY created_at DESC LIMIT ?`)
+      .prepare(
+        `SELECT id, status, legal_hold, pinned_at FROM tasks ${where} ORDER BY created_at DESC LIMIT ?`,
+      )
       .bind(...binds, scanLimit)
-      .all<{ id: string; status: string }>();
+      .all<{
+        id: string;
+        status: string;
+        legal_hold: number | null;
+        pinned_at: string | null;
+      }>();
 
     const status_breakdown: Record<string, number> = {};
+    const deletable: string[] = [];
+    const protectedIds: string[] = [];
     for (const row of rows.results) {
       status_breakdown[row.status] = (status_breakdown[row.status] ?? 0) + 1;
+      if (isRetentionProtected(row)) protectedIds.push(row.id);
+      else deletable.push(row.id);
     }
     const matched_count = rows.results.length;
     return {
       matched_count,
-      deletable_count: matched_count,
-      protected_count: 0,
+      deletable_count: deletable.length,
+      protected_count: protectedIds.length,
       status_breakdown,
-      sample_task_ids: rows.results.slice(0, sampleLimit).map((r) => r.id),
+      sample_task_ids: deletable.slice(0, sampleLimit),
+      sample_protected_ids: protectedIds.slice(0, sampleLimit),
       filters,
     };
   }
@@ -936,8 +956,11 @@ export class TaskService {
       }
     }
 
-    // Count + select in one pass so scope check uses the set we are about to mutate.
-    const { clauses, binds } = buildCleanupClauses(filters, { forDelete: true });
+    // Deletable set only (skip pin/legal_hold). expected_matched_count = preview.deletable_count.
+    const { clauses, binds } = buildCleanupClauses(filters, {
+      forDelete: true,
+      skipProtected: true,
+    });
     clauses.push(`status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`);
     if (mode === 'soft' || !filters.includeDeleted) {
       clauses.push('deleted_at IS NULL');
@@ -957,11 +980,12 @@ export class TaskService {
       // Fail before any mutation; do not store op-idempotency success.
       throw new AppError(
         'cleanup_scope_changed',
-        `Cleanup scope changed: expected ${options.expectedMatchedCount}, found ${actualMatched}.`,
+        `Cleanup scope changed: expected ${options.expectedMatchedCount} deletable, found ${actualMatched}.`,
         409,
         {
           expected_matched_count: options.expectedMatchedCount,
           actual_matched_count: actualMatched,
+          note: 'expected_matched_count must equal cleanup.preview deletable_count (not matched_count).',
         },
       );
     }
@@ -1505,7 +1529,7 @@ function buildListClauses(opts: TaskListQuery): { clauses: string[]; binds: unkn
 
 function buildCleanupClauses(
   filters: CleanupFilters,
-  _opts: { forDelete: boolean },
+  opts: { forDelete: boolean; skipProtected?: boolean },
 ): { clauses: string[]; binds: unknown[] } {
   const clauses: string[] = [];
   const binds: unknown[] = [];
@@ -1552,9 +1576,12 @@ function buildCleanupClauses(
   if (filters.testOnly) {
     clauses.push(`(environment = 'test' OR retention_class = 'test')`);
   }
-  // Manual bulk cleanup also skips protected rows by default.
-  clauses.push(`COALESCE(legal_hold, 0) = 0`);
-  clauses.push(`pinned_at IS NULL`);
+  // Run/purge: exclude protected. Preview: include them so protected_count is accurate.
+  const skipProtected = opts.skipProtected ?? opts.forDelete;
+  if (skipProtected) {
+    clauses.push(`COALESCE(legal_hold, 0) = 0`);
+    clauses.push(`pinned_at IS NULL`);
+  }
   if (filters.deletedBefore) {
     clauses.push('deleted_at IS NOT NULL AND deleted_at <= ?');
     binds.push(filters.deletedBefore);
