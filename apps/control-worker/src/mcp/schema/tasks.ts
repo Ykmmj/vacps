@@ -217,6 +217,7 @@ export function taskCreateResult(
     name?: string;
     summary?: string;
     reusedExistingTask?: boolean;
+    resourceDeleted?: boolean;
     idempotencyKey?: string;
     requestHash?: string;
   },
@@ -224,6 +225,7 @@ export function taskCreateResult(
   publicKind?: 'command' | 'shell' | 'agent',
 ) {
   const kind = publicKind ?? created.kind ?? 'command';
+  const resourceDeleted = Boolean(created.resourceDeleted);
   return {
     task: {
       id: created.id,
@@ -233,19 +235,30 @@ export function taskCreateResult(
       summary: created.summary ?? null,
       status: created.status,
       created_at: created.createdAt,
-      cancellable: !['succeeded', 'failed', 'cancelled', 'timed_out', 'dispatch_failed'].includes(
-        created.status,
-      ),
+      ...(resourceDeleted
+        ? { deleted: true, original_status: created.status }
+        : {
+            cancellable: ![
+              'succeeded',
+              'failed',
+              'cancelled',
+              'timed_out',
+              'dispatch_failed',
+            ].includes(created.status),
+          }),
     },
     output: {
       stdout: { available: false, bytes: 0, complete: false },
       stderr: { available: false, bytes: 0, complete: false },
     },
-    poll: { tool: 'vacps.tasks.get', recommended_after_ms: 500 },
+    poll: resourceDeleted
+      ? { tool: null, recommended_after_ms: 0 }
+      : { tool: 'vacps.tasks.get', recommended_after_ms: 500 },
     idempotency: {
       key: inputKey ?? created.idempotencyKey ?? null,
       replayed: Boolean(created.reusedExistingTask),
       request_hash: created.requestHash ?? null,
+      ...(resourceDeleted ? { resource_deleted: true } : {}),
     },
   };
 }

@@ -14,6 +14,7 @@ import {
   SOFT_DELETE_GRACE_HOURS,
   addHours,
   computeExpiresAt,
+  computeIdempotencyExpiresAt,
   environmentFromLabels,
   isTerminalTaskStatus,
   isTestTask,
@@ -77,6 +78,8 @@ export interface TaskIndex {
   deletedBy?: string;
   deletionReason?: string;
   cleanupState?: string;
+  /** True when create-idempotency tombstone exists but task row is gone / hard-deleted. */
+  resourceDeleted?: boolean;
 }
 
 export type TaskListQuery = {
@@ -184,6 +187,10 @@ export class TaskService {
             'idempotency_conflict',
             'The idempotency key was previously used with different arguments.',
             409,
+            {
+              expected_request_hash: existing.requestHash,
+              actual_request_hash: requestHash,
+            },
           );
         }
         return {
@@ -233,6 +240,20 @@ export class TaskService {
           initialRetentionClass,
         )
         .run();
+      if (input.idempotency_key) {
+        await this.upsertCreateIdempotency({
+          backendId: input.backend_id,
+          idempotencyKey: input.idempotency_key,
+          requestHash,
+          taskId,
+          taskDeleted: false,
+          originalStatus: 'created',
+          originalCreatedAt: now,
+          labels,
+          environment,
+          now,
+        });
+      }
     } catch (error) {
       if (input.idempotency_key) {
         const raced = await this.findByIdempotency(input.backend_id, input.idempotency_key);
@@ -242,6 +263,10 @@ export class TaskService {
               'idempotency_conflict',
               'The idempotency key was previously used with different arguments.',
               409,
+              {
+                expected_request_hash: raced.requestHash,
+                actual_request_hash: requestHash,
+              },
             );
           }
           return {
@@ -276,6 +301,15 @@ export class TaskService {
           error.details?.backend_code === 'capability_unavailable');
       if (isCapability) {
         await this.db.prepare('DELETE FROM tasks WHERE id = ?').bind(taskId).run();
+        if (input.idempotency_key) {
+          await this.db
+            .prepare(
+              'DELETE FROM task_create_idempotency WHERE backend_id = ? AND idempotency_key = ?',
+            )
+            .bind(input.backend_id, input.idempotency_key)
+            .run()
+            .catch(() => undefined);
+        }
         if (error instanceof AppError) {
           throw new AppError(error.code, error.message, error.status, {
             ...error.details,
@@ -722,7 +756,7 @@ export class TaskService {
         { task_id: id, status: row.status },
       );
     } else if (mode === 'hard') {
-      await this.db.prepare('DELETE FROM tasks WHERE id = ?').bind(id).run();
+      await this.hardDeleteTaskRow(row);
       body = { task_id: id, deleted: true, already_deleted: false, mode: 'hard' };
     } else {
       const now = new Date().toISOString();
@@ -875,22 +909,7 @@ export class TaskService {
       }
     }
 
-    const preview = await this.cleanupPreview(filters, { limit: batchLimit });
-    if (
-      options.expectedMatchedCount !== undefined &&
-      !scopeCountAcceptable(options.expectedMatchedCount, preview.matched_count)
-    ) {
-      throw new AppError(
-        'cleanup_scope_changed',
-        `Cleanup scope changed: expected ~${options.expectedMatchedCount}, found ${preview.matched_count}.`,
-        409,
-        {
-          expected_matched_count: options.expectedMatchedCount,
-          actual_matched_count: preview.matched_count,
-        },
-      );
-    }
-
+    // Count + select in one pass so scope check uses the set we are about to mutate.
     const { clauses, binds } = buildCleanupClauses(filters, { forDelete: true });
     clauses.push(`status IN ('succeeded','failed','cancelled','timed_out','dispatch_failed')`);
     if (mode === 'soft' || !filters.includeDeleted) {
@@ -899,9 +918,26 @@ export class TaskService {
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
     const candidates = await this.db
-      .prepare(`SELECT id FROM tasks ${where} ORDER BY created_at ASC LIMIT ?`)
+      .prepare(`SELECT * FROM tasks ${where} ORDER BY created_at ASC LIMIT ?`)
       .bind(...binds, batchLimit)
-      .all<{ id: string }>();
+      .all<TaskRow>();
+
+    const actualMatched = candidates.results.length;
+    if (
+      options.expectedMatchedCount !== undefined &&
+      !scopeCountAcceptable(options.expectedMatchedCount, actualMatched)
+    ) {
+      // Fail before any mutation; do not store op-idempotency success.
+      throw new AppError(
+        'cleanup_scope_changed',
+        `Cleanup scope changed: expected ${options.expectedMatchedCount}, found ${actualMatched}.`,
+        409,
+        {
+          expected_matched_count: options.expectedMatchedCount,
+          actual_matched_count: actualMatched,
+        },
+      );
+    }
 
     const now = new Date().toISOString();
     let deleted_count = 0;
@@ -909,7 +945,7 @@ export class TaskService {
     for (const row of candidates.results) {
       try {
         if (mode === 'hard') {
-          await this.db.prepare('DELETE FROM tasks WHERE id = ?').bind(row.id).run();
+          await this.hardDeleteTaskRow(row);
         } else {
           await this.db
             .prepare(
@@ -930,7 +966,7 @@ export class TaskService {
     }
 
     const body = {
-      matched_count: preview.matched_count,
+      matched_count: actualMatched,
       deleted_count,
       skipped_count: Math.max(0, candidates.results.length - deleted_count),
       mode,
@@ -1003,33 +1039,165 @@ export class TaskService {
     // Hard-delete past soft-delete grace (all environments once soft-deleted).
     const hardCandidates = await this.db
       .prepare(
-        `SELECT id FROM tasks
+        `SELECT * FROM tasks
          WHERE deleted_at IS NOT NULL
            AND deleted_at <= ?
          ORDER BY deleted_at ASC
          LIMIT ?`,
       )
       .bind(graceCutoff, CLEANUP_BATCH_SIZE)
-      .all<{ id: string }>();
+      .all<TaskRow>();
 
     let hard_deleted = 0;
     for (const row of hardCandidates.results) {
       try {
-        await this.db.prepare('DELETE FROM tasks WHERE id = ?').bind(row.id).run();
+        await this.hardDeleteTaskRow(row);
         hard_deleted += 1;
       } catch {
         // continue
       }
     }
 
+    // Best-effort purge of expired create-idempotency tombstones.
+    await this.db
+      .prepare('DELETE FROM task_create_idempotency WHERE expires_at <= ?')
+      .bind(now)
+      .run()
+      .catch(() => undefined);
+
     return { soft_deleted, hard_deleted };
+  }
+
+  /** Mark create-idempotency as deleted tombstone, then remove the task row. */
+  private async hardDeleteTaskRow(row: TaskRow): Promise<void> {
+    if (row.idempotency_key) {
+      const labels = parseLabelsJson(row.labels_json);
+      const environment = row.environment ?? environmentFromLabels(labels);
+      const now = new Date().toISOString();
+      await this.upsertCreateIdempotency({
+        backendId: row.backend_id,
+        idempotencyKey: row.idempotency_key,
+        requestHash: row.request_hash ?? '',
+        taskId: row.id,
+        taskDeleted: true,
+        originalStatus: row.status,
+        originalCreatedAt: row.created_at,
+        labels,
+        environment,
+        now,
+      });
+    }
+    await this.db.prepare('DELETE FROM tasks WHERE id = ?').bind(row.id).run();
+  }
+
+  private async upsertCreateIdempotency(input: {
+    backendId: string;
+    idempotencyKey: string;
+    requestHash: string;
+    taskId: string;
+    taskDeleted: boolean;
+    originalStatus: string;
+    originalCreatedAt: string;
+    labels: Record<string, string>;
+    environment: string | null;
+    now: string;
+  }): Promise<void> {
+    const expiresAt = computeIdempotencyExpiresAt(input.now, input.labels, input.environment);
+    await this.db
+      .prepare(
+        `INSERT INTO task_create_idempotency (
+           backend_id, idempotency_key, request_hash, task_id, task_deleted,
+           original_status, original_created_at, created_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(backend_id, idempotency_key) DO UPDATE SET
+           request_hash = excluded.request_hash,
+           task_id = excluded.task_id,
+           task_deleted = excluded.task_deleted,
+           original_status = excluded.original_status,
+           original_created_at = COALESCE(task_create_idempotency.original_created_at, excluded.original_created_at),
+           expires_at = excluded.expires_at`,
+      )
+      .bind(
+        input.backendId,
+        input.idempotencyKey,
+        input.requestHash,
+        input.taskId,
+        input.taskDeleted ? 1 : 0,
+        input.originalStatus,
+        input.originalCreatedAt,
+        input.now,
+        expiresAt,
+      )
+      .run();
   }
 
   private async findByIdempotency(
     backendId: string,
     idempotencyKey: string,
   ): Promise<TaskIndex | undefined> {
-    // Include soft-deleted so idempotency survives soft delete until hard purge.
+    const now = new Date().toISOString();
+    // Prefer durable create-idempotency (survives hard delete).
+    const tomb = await this.db
+      .prepare(
+        `SELECT backend_id, idempotency_key, request_hash, task_id, task_deleted,
+                original_status, original_created_at, created_at, expires_at
+         FROM task_create_idempotency
+         WHERE backend_id = ? AND idempotency_key = ? AND expires_at > ?
+         LIMIT 1`,
+      )
+      .bind(backendId, idempotencyKey, now)
+      .first<{
+        backend_id: string;
+        idempotency_key: string;
+        request_hash: string;
+        task_id: string | null;
+        task_deleted: number;
+        original_status: string | null;
+        original_created_at: string | null;
+        created_at: string;
+        expires_at: string;
+      }>()
+      .catch(() => null);
+
+    if (tomb?.task_id) {
+      if (tomb.task_deleted) {
+        return {
+          id: tomb.task_id,
+          backendId: tomb.backend_id,
+          kind: 'command',
+          source: 'mcp',
+          profile: 'full',
+          status: (tomb.original_status as TaskStatus) || 'succeeded',
+          ...(tomb.request_hash ? { requestHash: tomb.request_hash } : {}),
+          idempotencyKey: tomb.idempotency_key,
+          createdAt: tomb.original_created_at ?? tomb.created_at,
+          updatedAt: tomb.created_at,
+          resourceDeleted: true,
+          deletedAt: tomb.created_at,
+        };
+      }
+      const live = await this.db
+        .prepare('SELECT * FROM tasks WHERE id = ?')
+        .bind(tomb.task_id)
+        .first<TaskRow>();
+      if (live) return toTaskIndex(live);
+      // Row missing but tombstone not marked deleted — treat as deleted resource.
+      return {
+        id: tomb.task_id,
+        backendId: tomb.backend_id,
+        kind: 'command',
+        source: 'mcp',
+        profile: 'full',
+        status: (tomb.original_status as TaskStatus) || 'succeeded',
+        ...(tomb.request_hash ? { requestHash: tomb.request_hash } : {}),
+        idempotencyKey: tomb.idempotency_key,
+        createdAt: tomb.original_created_at ?? tomb.created_at,
+        updatedAt: tomb.created_at,
+        resourceDeleted: true,
+      };
+    }
+
+    // Fallback for pre-migration rows still on tasks only.
     const row = await this.db
       .prepare('SELECT * FROM tasks WHERE backend_id = ? AND idempotency_key = ? LIMIT 1')
       .bind(backendId, idempotencyKey)

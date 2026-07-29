@@ -80,14 +80,23 @@ describe('parseLabelsJson', () => {
 });
 
 describe('cleanup scope guard', () => {
-  it('accepts small drift', () => {
-    expect(scopeCountAcceptable(100, 104)).toBe(true);
-    expect(scopeCountAcceptable(100, 105)).toBe(true);
-    expect(scopeCountAcceptable(10, 15)).toBe(true);
+  it('requires exact match only', () => {
+    expect(scopeCountAcceptable(2, 2)).toBe(true);
+    expect(scopeCountAcceptable(0, 0)).toBe(true);
+    expect(scopeCountAcceptable(2, 3)).toBe(false);
+    expect(scopeCountAcceptable(100, 104)).toBe(false);
+    expect(scopeCountAcceptable(100, 95)).toBe(false);
   });
+});
 
-  it('rejects large drift', () => {
-    expect(scopeCountAcceptable(100, 130)).toBe(false);
-    expect(scopeCountAcceptable(0, 6)).toBe(false);
+describe('idempotency TTL', () => {
+  it('uses shorter TTL for test tasks', async () => {
+    const { IDEMPOTENCY_TTL_DAYS, computeIdempotencyExpiresAt } =
+      await import('../src/tasks/retention.js');
+    const from = '2026-07-01T00:00:00.000Z';
+    const testExp = computeIdempotencyExpiresAt(from, { environment: 'test' }, null);
+    const prodExp = computeIdempotencyExpiresAt(from, { environment: 'production' }, 'production');
+    expect(Date.parse(testExp) - Date.parse(from)).toBe(IDEMPOTENCY_TTL_DAYS.test * 86_400_000);
+    expect(Date.parse(prodExp) - Date.parse(from)).toBe(IDEMPOTENCY_TTL_DAYS.default * 86_400_000);
   });
 });

@@ -95,7 +95,11 @@ export function categoryFor(code: string): ErrorCategory {
     code.includes('mismatch') ||
     code.includes('idempotency') ||
     code.includes('revision') ||
-    code === 'stream_version_conflict'
+    code === 'stream_version_conflict' ||
+    code === 'task_not_terminal' ||
+    code === 'cleanup_scope_changed' ||
+    code.endsWith('_not_terminal') ||
+    code.endsWith('_scope_changed')
   ) {
     return 'conflict';
   }

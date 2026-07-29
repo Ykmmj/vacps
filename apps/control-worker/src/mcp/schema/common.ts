@@ -33,4 +33,4 @@ export {
 } from './defs.js';
 
 export const MCP_PROTOCOL_VERSION = '0.5.3';
-export const TOOL_SCHEMA_REVISION = '2026-07-29-schema-v3-r5-retention';
+export const TOOL_SCHEMA_REVISION = '2026-07-29-schema-v3-r6-retention-fix';
