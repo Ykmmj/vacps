@@ -111,5 +111,14 @@
   "system": "系统",
   "download": "下载",
   "upload": "上传",
-  "unavailable": "暂不可用"
+  "unavailable": "暂不可用",
+  "recentFailures": "近期失败任务",
+  "recentFailuresHint": "最近 {days} 天 · 默认隐藏测试任务与软删除",
+  "noRecentFailures": "该时间窗内没有非测试失败任务。",
+  "clearTestHistory": "清理测试历史（{count}）",
+  "clearingTestHistory": "清理中…",
+  "confirmClearTestHistory": "将软删除 {count} 条终态测试任务？24 小时内可恢复，之后自动硬删。",
+  "clearTestHistoryOk": "已清理 {count} 条测试任务",
+  "clearTestHistoryNone": "没有可清理的终态测试任务",
+  "clearTestHistoryFailed": "测试历史清理失败："
 }

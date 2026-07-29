@@ -165,9 +165,27 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     }
 
     if (resource === 'dashboard' && request.method === 'GET') {
-      const [backends, tasks, schedulePage, registrations, telemetry] = await Promise.all([
+      // Live queue counts include test tasks (they still consume agent capacity).
+      // History panels hide test noise and soft-deleted rows by default (AC-09).
+      const rangeDays = 7;
+      const createdAfter = new Date(Date.now() - rangeDays * 86_400_000).toISOString();
+      const [
+        backends,
+        liveTasks,
+        recentTasks,
+        testCleanup,
+        schedulePage,
+        registrations,
+        telemetry,
+      ] = await Promise.all([
         services.backends.list(),
-        services.tasks.list(100),
+        services.tasks.list({ limit: 200 }),
+        services.tasks.list({
+          limit: 100,
+          hideTest: true,
+          createdAfter,
+        }),
+        services.tasks.cleanupPreview({ testOnly: true }, { limit: 5_000, sampleLimit: 5 }),
         services.schedules.list({ limit: 200 }),
         services.registrations.list(),
         services.telemetrySettings.get(),
@@ -181,9 +199,11 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           telemetry.intervalSeconds,
         ),
       );
-      const active = tasks.filter((task) => task.status === 'running').length;
-      const queued = tasks.filter((task) => task.status === 'queued').length;
-      const failed = tasks
+      const active = liveTasks.filter((task) => task.status === 'running').length;
+      const queued = liveTasks.filter((task) =>
+        ['queued', 'dispatching', 'created'].includes(task.status),
+      ).length;
+      const failed = recentTasks
         .filter((task) => ['failed', 'dispatch_failed', 'timed_out'].includes(task.status))
         .slice(0, 10);
       return json({
@@ -196,10 +216,22 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           pendingRegistrations: registrations.filter(
             (registration) => registration.status === 'pending',
           ).length,
+          failedRecent: failed.length,
+          testDeletable: testCleanup.deletable_count,
         },
         backends,
         nodes,
         failed,
+        recentTasks: recentTasks.slice(0, 20),
+        retention: {
+          hide_test_by_default: true,
+          hide_deleted_by_default: true,
+          range_days: rangeDays,
+          created_after: createdAfter,
+          test_deletable_count: testCleanup.deletable_count,
+          test_status_breakdown: testCleanup.status_breakdown,
+          test_sample_task_ids: testCleanup.sample_task_ids,
+        },
         telemetry,
       });
     }
@@ -437,7 +469,19 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     }
 
     if (resource === 'tasks') {
+      // Web defaults: hide soft-deleted (service default) + hide test + last 7 days.
+      // Opt out with hide_test=0 / range=all. MCP list keeps explicit filters only.
       if (!id && request.method === 'GET') {
+        const hideTestParam = searchParams.get('hide_test');
+        const hideTest =
+          hideTestParam === null || hideTestParam === ''
+            ? true
+            : hideTestParam === '1' || hideTestParam === 'true';
+        const range = searchParams.get('range');
+        const createdAfterParam = searchParams.get('created_after');
+        const createdAfter =
+          createdAfterParam ??
+          (range === 'all' ? undefined : new Date(Date.now() - 7 * 86_400_000).toISOString());
         return json(
           await services.tasks.list({
             limit: Number(searchParams.get('limit') ?? 50),
@@ -449,16 +493,50 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
               ? { environment: searchParams.get('environment')! }
               : {}),
             ...(searchParams.get('source') ? { source: searchParams.get('source')! } : {}),
-            ...(searchParams.get('hide_test') === '1' || searchParams.get('hide_test') === 'true'
-              ? { hideTest: true }
-              : {}),
+            ...(hideTest ? { hideTest: true } : {}),
             ...(searchParams.get('include_deleted') === '1' ||
             searchParams.get('include_deleted') === 'true'
               ? { includeDeleted: true }
               : {}),
-            ...(searchParams.get('created_after')
-              ? { createdAfter: searchParams.get('created_after')! }
+            ...(createdAfter ? { createdAfter } : {}),
+            ...(searchParams.get('terminal') === '1' || searchParams.get('terminal') === 'true'
+              ? { terminal: true }
+              : searchParams.get('terminal') === '0' || searchParams.get('terminal') === 'false'
+                ? { terminal: false }
+                : {}),
+          }),
+        );
+      }
+      if (id === 'cleanup' && action === 'preview' && request.method === 'POST') {
+        const body = (await readJson(request).catch(() => ({}))) as {
+          filters?: Record<string, unknown>;
+          limit?: number;
+        };
+        return json(
+          await services.tasks.cleanupPreview(mapWebCleanupFilters(body.filters), {
+            ...(typeof body.limit === 'number' ? { limit: body.limit } : {}),
+          }),
+        );
+      }
+      if (id === 'cleanup' && action === 'run' && request.method === 'POST') {
+        const body = (await readJson(request).catch(() => ({}))) as {
+          filters?: Record<string, unknown>;
+          mode?: 'soft' | 'hard';
+          reason?: string;
+          expected_matched_count?: number;
+          limit?: number;
+          idempotency_key?: string;
+        };
+        return json(
+          await services.tasks.cleanupRun(mapWebCleanupFilters(body.filters), {
+            ...(body.mode ? { mode: body.mode } : { mode: 'soft' }),
+            ...(body.reason ? { reason: body.reason } : { reason: 'dashboard_cleanup' }),
+            deletedBy: 'web',
+            ...(typeof body.expected_matched_count === 'number'
+              ? { expectedMatchedCount: body.expected_matched_count }
               : {}),
+            ...(typeof body.limit === 'number' ? { limit: body.limit } : {}),
+            ...(body.idempotency_key ? { idempotencyKey: body.idempotency_key } : {}),
           }),
         );
       }
@@ -663,4 +741,46 @@ function registrationNetwork(request: Request): { ip?: string; ips?: string[]; l
     ...(ip ? { ip, ips: [ip] } : {}),
     ...(location ? { location } : {}),
   };
+}
+
+/** Map dashboard/MCP-style snake_case cleanup filters to TaskService CleanupFilters. */
+function mapWebCleanupFilters(
+  filters: Record<string, unknown> | undefined,
+): import('./tasks/task-service.js').CleanupFilters {
+  if (!filters) return { testOnly: true };
+  const out: import('./tasks/task-service.js').CleanupFilters = {};
+  const takeStr = (key: string, target: keyof import('./tasks/task-service.js').CleanupFilters) => {
+    const v = filters[key];
+    if (typeof v === 'string' && v.length > 0) {
+      (out as Record<string, unknown>)[target] = v;
+    }
+  };
+  const takeBool = (
+    key: string,
+    target: keyof import('./tasks/task-service.js').CleanupFilters,
+  ) => {
+    const v = filters[key];
+    if (typeof v === 'boolean') {
+      (out as Record<string, unknown>)[target] = v;
+    }
+  };
+  takeStr('backend_id', 'backendId');
+  takeStr('schedule_id', 'scheduleId');
+  takeStr('status', 'status');
+  takeStr('source', 'source');
+  takeStr('environment', 'environment');
+  takeStr('created_before', 'createdBefore');
+  takeStr('created_after', 'createdAfter');
+  takeStr('terminal_before', 'terminalBefore');
+  takeStr('expires_before', 'expiresBefore');
+  takeStr('deleted_before', 'deletedBefore');
+  takeBool('expired_only', 'expiredOnly');
+  takeBool('test_only', 'testOnly');
+  takeBool('include_deleted', 'includeDeleted');
+  if (filters.labels && typeof filters.labels === 'object' && !Array.isArray(filters.labels)) {
+    out.labels = filters.labels as Record<string, string>;
+  }
+  // Dashboard one-click cleanup defaults to test-only when no filter keys provided.
+  if (Object.keys(out).length === 0) out.testOnly = true;
+  return out;
 }
