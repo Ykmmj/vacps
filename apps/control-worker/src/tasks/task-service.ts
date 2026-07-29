@@ -354,27 +354,119 @@ export class TaskService {
     return this.client.getLogs(await this.backends.get(task.backendId), id);
   }
 
-  async cancel(id: string): Promise<unknown> {
+  async cancel(
+    id: string,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<{
+    task: TaskIndex;
+    result?: unknown;
+    already_terminal?: boolean;
+    cancelled?: boolean;
+    idempotency?: { key: string; replayed: boolean; request_hash: string };
+  }> {
+    const requestHash = await hashOpaque({ operation: 'tasks.cancel', task_id: id });
+    const scope = 'tasks.cancel';
+
+    if (options.idempotencyKey) {
+      const cached = await this.loadOpIdempotency(scope, options.idempotencyKey);
+      if (cached) {
+        if (cached.requestHash !== requestHash) {
+          throw new AppError(
+            'idempotency_conflict',
+            'The idempotency key was previously used with different arguments.',
+            409,
+          );
+        }
+        return {
+          ...(cached.result as {
+            task: TaskIndex;
+            result?: unknown;
+            already_terminal?: boolean;
+            cancelled?: boolean;
+          }),
+          idempotency: {
+            key: options.idempotencyKey,
+            replayed: true,
+            request_hash: requestHash,
+          },
+        };
+      }
+    }
+
     const task = await this.get(id);
+    let body: {
+      task: TaskIndex;
+      result?: unknown;
+      already_terminal?: boolean;
+      cancelled?: boolean;
+    };
     // Natural idempotency: already terminal → stable cancelled-like result.
     if (task.status === 'cancelled') {
-      return { task, already_terminal: true };
+      body = { task, already_terminal: true, cancelled: true };
+    } else if (['succeeded', 'failed', 'timed_out', 'dispatch_failed'].includes(task.status)) {
+      body = { task, already_terminal: true, cancelled: false };
+    } else {
+      const result = (await this.client.cancelTask(
+        await this.backends.get(task.backendId),
+        id,
+      )) as { cancelled?: boolean; state?: string };
+      if (result?.cancelled !== false) {
+        await this.setStatus(id, 'cancelled');
+      }
+      body = { task: await this.get(id), result, cancelled: result?.cancelled !== false };
     }
-    if (['succeeded', 'failed', 'timed_out', 'dispatch_failed'].includes(task.status)) {
-      return { task, already_terminal: true, cancelled: false };
+
+    if (options.idempotencyKey) {
+      await this.storeOpIdempotency(scope, options.idempotencyKey, requestHash, body);
+      return {
+        ...body,
+        idempotency: {
+          key: options.idempotencyKey,
+          replayed: false,
+          request_hash: requestHash,
+        },
+      };
     }
-    const result = (await this.client.cancelTask(
-      await this.backends.get(task.backendId),
-      id,
-    )) as { cancelled?: boolean; state?: string };
-    // Mark cancelled when agent accepted or reported cancelling/cancelled.
-    if (result?.cancelled !== false) {
-      await this.setStatus(id, 'cancelled');
-    }
-    return { task: await this.get(id), result };
+    return body;
   }
 
-  async retry(id: string): Promise<unknown> {
+  async retry(
+    id: string,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<{
+    task: TaskIndex;
+    result?: unknown;
+    retry_of_task_id: string;
+    idempotency?: { key: string; replayed: boolean; request_hash: string };
+  }> {
+    const requestHash = await hashOpaque({ operation: 'tasks.retry', task_id: id });
+    const scope = 'tasks.retry';
+
+    if (options.idempotencyKey) {
+      const cached = await this.loadOpIdempotency(scope, options.idempotencyKey);
+      if (cached) {
+        if (cached.requestHash !== requestHash) {
+          throw new AppError(
+            'idempotency_conflict',
+            'The idempotency key was previously used with different arguments.',
+            409,
+          );
+        }
+        return {
+          ...(cached.result as {
+            task: TaskIndex;
+            result?: unknown;
+            retry_of_task_id: string;
+          }),
+          idempotency: {
+            key: options.idempotencyKey,
+            replayed: true,
+            request_hash: requestHash,
+          },
+        };
+      }
+    }
+
     const original = await this.get(id);
     const backend = await this.backends.get(original.backendId);
     // Agent creates a new task_id; CP records a fresh index row from that result when possible.
@@ -382,8 +474,8 @@ export class TaskService {
       task_id?: string;
       status?: string;
     };
+    let body: { task: TaskIndex; result?: unknown; retry_of_task_id: string };
     if (typeof result?.task_id === 'string' && result.task_id !== id) {
-      // Best-effort: insert a lightweight index pointer for the new task.
       const now = new Date().toISOString();
       await this.db
         .prepare(
@@ -407,19 +499,33 @@ export class TaskService {
         )
         .run()
         .catch(() => undefined);
-      return {
+      body = {
         task: await this.get(result.task_id).catch(() => ({
           ...original,
           id: result.task_id!,
-          status: 'queued' as const,
+          status: 'queued' as TaskStatus,
           retryOfTaskId: id,
         })),
         result,
         retry_of_task_id: id,
       };
+    } else {
+      await this.setStatus(id, 'queued');
+      body = { task: await this.get(id), result, retry_of_task_id: id };
     }
-    await this.setStatus(id, 'queued');
-    return { task: await this.get(id), result, retry_of_task_id: id };
+
+    if (options.idempotencyKey) {
+      await this.storeOpIdempotency(scope, options.idempotencyKey, requestHash, body);
+      return {
+        ...body,
+        idempotency: {
+          key: options.idempotencyKey,
+          replayed: false,
+          request_hash: requestHash,
+        },
+      };
+    }
+    return body;
   }
 
   private async findByIdempotency(
@@ -431,6 +537,40 @@ export class TaskService {
       .bind(backendId, idempotencyKey)
       .first<TaskRow>();
     return row ? toTaskIndex(row) : undefined;
+  }
+
+  private async loadOpIdempotency(
+    scope: string,
+    key: string,
+  ): Promise<{ requestHash: string; result: unknown } | undefined> {
+    const row = await this.db
+      .prepare(
+        'SELECT request_hash, result_json FROM operation_idempotency WHERE scope = ? AND idempotency_key = ?',
+      )
+      .bind(scope, key)
+      .first<{ request_hash: string; result_json: string }>();
+    if (!row) return undefined;
+    try {
+      return { requestHash: row.request_hash, result: JSON.parse(row.result_json) };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async storeOpIdempotency(
+    scope: string,
+    key: string,
+    requestHash: string,
+    result: unknown,
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT OR REPLACE INTO operation_idempotency
+          (scope, idempotency_key, request_hash, result_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .bind(scope, key, requestHash, JSON.stringify(result), new Date().toISOString())
+      .run();
   }
 
   private async setStatus(id: string, status: TaskStatus): Promise<void> {
@@ -472,7 +612,11 @@ function toTaskIndex(row: TaskRow): TaskIndex {
 /** Canonical SHA-256 of Schema v3 create payload. */
 export async function hashTaskRequest(input: CreateTaskInput): Promise<string> {
   const { idempotency_key: _drop, ...rest } = input;
-  const hex = await sha256Hex(stableStringify(rest));
+  return hashOpaque(rest);
+}
+
+async function hashOpaque(value: unknown): Promise<string> {
+  const hex = await sha256Hex(stableStringify(value));
   return `sha256:${hex}`;
 }
 

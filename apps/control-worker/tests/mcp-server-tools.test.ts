@@ -296,7 +296,7 @@ describe('MCP server tools', () => {
     expect(startPublished['vacps.process.start']).toBeUndefined();
     expect(startPublished['vacps.process.start_command']?.properties?.program).toBeTruthy();
     expect(startPublished['vacps.process.start_shell']?.properties?.command).toBeTruthy();
-    expect(published.mcp_server_version).toBe('0.5.0');
+    expect(published.mcp_server_version).toBe(MCP_PROTOCOL_VERSION);
 
     await client.close();
   });
