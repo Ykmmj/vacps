@@ -128,9 +128,9 @@ describe('files runtime', () => {
     await writeFile(path, 'PRETTY_NAME="Ubuntu 24.04.4 LTS"\nNAME="Ubuntu"\n');
     const result = await filesGrep({ pattern: 'Ubuntu', path, caseSensitive: true });
     expect(result.match_count).toBeGreaterThanOrEqual(1);
-    expect(result.matches.some((m) => String((m as { line: string }).line).includes('Ubuntu'))).toBe(
-      true,
-    );
+    expect(
+      result.matches.some((m) => String((m as { line: string }).line).includes('Ubuntu')),
+    ).toBe(true);
   });
 
   it('rejects missing grep paths with path_not_found (not internal)', async () => {

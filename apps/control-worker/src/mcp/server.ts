@@ -25,9 +25,12 @@ import {
   schedulesListInputSchema,
   schedulesUpdateInputSchema,
   taskCreateResult,
+  tasksCleanupPreviewInputSchema,
+  tasksCleanupRunInputSchema,
   tasksCreateAgentInputSchema,
   tasksCreateCommandInputSchema,
   tasksCreateShellInputSchema,
+  tasksDeleteInputSchema,
   tasksGetInputSchema,
   tasksIdInputSchema,
   tasksListInputSchema,
@@ -171,9 +174,7 @@ export function createMcpServer(env: Env): McpServer {
     run: (args: Record<string, unknown>) => Promise<T>,
   ): (args: Record<string, unknown>) => Promise<ReturnType<typeof ok> | ReturnType<typeof fail>>;
   function wrap<T extends Record<string, unknown>>(
-    summaryOrRun:
-      | ((value: T) => string)
-      | ((args: Record<string, unknown>) => Promise<T>),
+    summaryOrRun: ((value: T) => string) | ((args: Record<string, unknown>) => Promise<T>),
     maybeRun?: (args: Record<string, unknown>) => Promise<T>,
   ) {
     const run = (maybeRun ?? summaryOrRun) as (args: Record<string, unknown>) => Promise<T>;
@@ -350,7 +351,8 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.tasks.list',
     toolConfig('vacps.tasks.list', {
-      description: 'List task summaries with optional filters and opaque cursor pagination.',
+      description:
+        'List task summaries with filters (backend, kind, status, source, environment, labels, terminal) and opaque cursor pagination. Soft-deleted tasks are hidden by default.',
       inputSchema: tasksListInputSchema,
       outputSchema: okEnvelope.extend({
         tasks: z.array(z.unknown()),
@@ -364,7 +366,19 @@ export function createMcpServer(env: Env): McpServer {
         ...(parsed.backend_id ? { backend_id: parsed.backend_id } : {}),
         ...(parsed.kind ? { kind: parsed.kind } : {}),
         ...(parsed.status ? { status: parsed.status } : {}),
+        ...(parsed.source ? { source: parsed.source } : {}),
+        ...(parsed.environment ? { environment: parsed.environment } : {}),
+        ...(parsed.schedule_id ? { schedule_id: parsed.schedule_id } : {}),
+        ...(parsed.terminal !== undefined ? { terminal: parsed.terminal } : {}),
+        ...(parsed.labels ? { labels: parsed.labels } : {}),
         ...(parsed.created_after ? { created_after: parsed.created_after } : {}),
+        ...(parsed.created_before ? { created_before: parsed.created_before } : {}),
+        ...(parsed.terminal_before ? { terminal_before: parsed.terminal_before } : {}),
+        ...(parsed.expires_before ? { expires_before: parsed.expires_before } : {}),
+        ...(parsed.include_deleted !== undefined
+          ? { include_deleted: parsed.include_deleted }
+          : {}),
+        ...(parsed.hide_test !== undefined ? { hide_test: parsed.hide_test } : {}),
       };
       const offset = parsed.cursor ? decodeQueryCursor(parsed.cursor, query) : 0;
       const page = await tasks.listPage({
@@ -373,13 +387,22 @@ export function createMcpServer(env: Env): McpServer {
         ...(parsed.backend_id ? { backendId: parsed.backend_id } : {}),
         ...(parsed.kind ? { kind: parsed.kind } : {}),
         ...(parsed.status ? { status: parsed.status } : {}),
+        ...(parsed.source ? { source: parsed.source } : {}),
+        ...(parsed.environment ? { environment: parsed.environment } : {}),
+        ...(parsed.schedule_id ? { scheduleId: parsed.schedule_id } : {}),
+        ...(parsed.terminal !== undefined ? { terminal: parsed.terminal } : {}),
+        ...(parsed.labels ? { labels: parsed.labels } : {}),
         ...(parsed.created_after ? { createdAfter: parsed.created_after } : {}),
+        ...(parsed.created_before ? { createdBefore: parsed.created_before } : {}),
+        ...(parsed.terminal_before ? { terminalBefore: parsed.terminal_before } : {}),
+        ...(parsed.expires_before ? { expiresBefore: parsed.expires_before } : {}),
+        ...(parsed.include_deleted !== undefined ? { includeDeleted: parsed.include_deleted } : {}),
+        ...(parsed.hide_test !== undefined ? { hideTest: parsed.hide_test } : {}),
       });
       return {
         tasks: page.tasks.map(snakeTask),
         returned_count: page.returned_count,
-        next_cursor:
-          page.next_offset !== null ? encodeQueryCursor(page.next_offset, query) : null,
+        next_cursor: page.next_offset !== null ? encodeQueryCursor(page.next_offset, query) : null,
       };
     }),
   );
@@ -423,6 +446,100 @@ export function createMcpServer(env: Env): McpServer {
       return {
         task: snakeTask(result.task as never),
         retry_of_task_id: result.retry_of_task_id,
+        ...(result.idempotency ? { idempotency: result.idempotency } : {}),
+      };
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.delete',
+    toolConfig('vacps.tasks.delete', {
+      description:
+        'Soft-delete (default) or hard-delete a terminal task from the control-plane index. Active tasks return task_not_terminal.',
+      inputSchema: tasksDeleteInputSchema,
+      outputSchema: okEnvelope.extend({
+        task_id: z.string(),
+        deleted: z.boolean(),
+        already_deleted: z.boolean(),
+        mode: z.enum(['soft', 'hard']),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksDeleteInputSchema.parse(args);
+      const result = await tasks.delete(parsed.task_id, {
+        ...(parsed.mode ? { mode: parsed.mode } : {}),
+        ...(parsed.reason ? { reason: parsed.reason } : {}),
+        deletedBy: 'mcp',
+        ...(parsed.idempotency_key ? { idempotencyKey: parsed.idempotency_key } : {}),
+      });
+      return {
+        task_id: result.task_id,
+        deleted: result.deleted,
+        already_deleted: result.already_deleted,
+        mode: result.mode,
+        ...(result.task ? { task: snakeTask(result.task as never) } : {}),
+        ...(result.idempotency ? { idempotency: result.idempotency } : {}),
+      };
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.cleanup.preview',
+    toolConfig('vacps.tasks.cleanup.preview', {
+      description:
+        'Preview terminal tasks matching cleanup filters (counts + status breakdown + sample ids). Prefer filters.environment=test or test_only for regression noise.',
+      inputSchema: tasksCleanupPreviewInputSchema,
+      outputSchema: okEnvelope.extend({
+        matched_count: z.number(),
+        deletable_count: z.number(),
+        protected_count: z.number(),
+        status_breakdown: z.record(z.string(), z.number()),
+        sample_task_ids: z.array(z.string()),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksCleanupPreviewInputSchema.parse(args);
+      const filters = mapCleanupFilters(parsed.filters);
+      return tasks.cleanupPreview(filters, {
+        ...(parsed.limit !== undefined ? { limit: parsed.limit } : {}),
+      });
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.cleanup.run',
+    toolConfig('vacps.tasks.cleanup.run', {
+      description:
+        'Soft-delete (default) terminal tasks matching filters. Pass expected_matched_count from preview to guard against scope drift. Use test_only or environment=test first.',
+      inputSchema: tasksCleanupRunInputSchema,
+      outputSchema: okEnvelope.extend({
+        matched_count: z.number(),
+        deleted_count: z.number(),
+        skipped_count: z.number(),
+        mode: z.enum(['soft', 'hard']),
+        reason: z.string(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksCleanupRunInputSchema.parse(args);
+      const filters = mapCleanupFilters(parsed.filters);
+      const result = await tasks.cleanupRun(filters, {
+        ...(parsed.mode ? { mode: parsed.mode } : {}),
+        ...(parsed.reason ? { reason: parsed.reason } : {}),
+        deletedBy: 'mcp',
+        ...(parsed.expected_matched_count !== undefined
+          ? { expectedMatchedCount: parsed.expected_matched_count }
+          : {}),
+        ...(parsed.limit !== undefined ? { limit: parsed.limit } : {}),
+        ...(parsed.idempotency_key ? { idempotencyKey: parsed.idempotency_key } : {}),
+      });
+      return {
+        matched_count: result.matched_count,
+        deleted_count: result.deleted_count,
+        skipped_count: result.skipped_count,
+        mode: result.mode,
+        reason: result.reason,
+        sample_deleted_ids: result.sample_deleted_ids,
         ...(result.idempotency ? { idempotency: result.idempotency } : {}),
       };
     }),
@@ -485,8 +602,7 @@ export function createMcpServer(env: Env): McpServer {
       return {
         schedules: page.schedules.map(snakeSchedule),
         returned_count: page.returned_count,
-        next_cursor:
-          page.next_offset !== null ? encodeOffsetCursor(page.next_offset) : null,
+        next_cursor: page.next_offset !== null ? encodeOffsetCursor(page.next_offset) : null,
       };
     }),
   );
@@ -1180,8 +1296,7 @@ function pageBackends(
 
   const page = filtered.slice(offset, offset + limit);
   const nextOffset = offset + page.length;
-  const next_cursor =
-    nextOffset < filtered.length ? encodeOffsetCursor(nextOffset) : null;
+  const next_cursor = nextOffset < filtered.length ? encodeOffsetCursor(nextOffset) : null;
 
   return {
     backends: page,
@@ -1223,13 +1338,14 @@ function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unk
   const enginesRaw = (raw.engines ?? {}) as Record<string, unknown>;
   const grepEngine = (enginesRaw.grep ?? {}) as Record<string, unknown>;
   const globEngine = (enginesRaw.glob ?? {}) as Record<string, unknown>;
-  const executables = (raw.executables ?? {}) as Record<string, { available?: boolean; version?: string }>;
+  const executables = (raw.executables ?? {}) as Record<
+    string,
+    { available?: boolean; version?: string }
+  >;
   const rg = executables.rg;
 
   const active =
-    featuresRaw['files.grep.engine'] === 'rg' || grepEngine.available === true
-      ? 'ripgrep'
-      : 'node';
+    featuresRaw['files.grep.engine'] === 'rg' || grepEngine.available === true ? 'ripgrep' : 'node';
 
   return {
     backend_id: raw.backend_id,
@@ -1267,6 +1383,48 @@ function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unk
   };
 }
 
+function mapCleanupFilters(
+  filters: Record<string, unknown> | undefined | null,
+): import('../tasks/task-service.js').CleanupFilters {
+  if (!filters) return {};
+  const out: import('../tasks/task-service.js').CleanupFilters = {};
+  const takeStr = (
+    key: string,
+    target: keyof import('../tasks/task-service.js').CleanupFilters,
+  ) => {
+    const v = filters[key];
+    if (typeof v === 'string' && v.length > 0) {
+      (out as Record<string, unknown>)[target] = v;
+    }
+  };
+  const takeBool = (
+    key: string,
+    target: keyof import('../tasks/task-service.js').CleanupFilters,
+  ) => {
+    const v = filters[key];
+    if (typeof v === 'boolean') {
+      (out as Record<string, unknown>)[target] = v;
+    }
+  };
+  takeStr('backend_id', 'backendId');
+  takeStr('schedule_id', 'scheduleId');
+  takeStr('status', 'status');
+  takeStr('source', 'source');
+  takeStr('environment', 'environment');
+  takeStr('created_before', 'createdBefore');
+  takeStr('created_after', 'createdAfter');
+  takeStr('terminal_before', 'terminalBefore');
+  takeStr('expires_before', 'expiresBefore');
+  takeStr('deleted_before', 'deletedBefore');
+  takeBool('expired_only', 'expiredOnly');
+  takeBool('test_only', 'testOnly');
+  takeBool('include_deleted', 'includeDeleted');
+  if (filters.labels && typeof filters.labels === 'object' && !Array.isArray(filters.labels)) {
+    out.labels = filters.labels as Record<string, string>;
+  }
+  return out;
+}
+
 function snakeTask(task: {
   id: string;
   backendId: string;
@@ -1283,6 +1441,13 @@ function snakeTask(task: {
   createdAt: string;
   updatedAt: string;
   finishedAt?: string | undefined;
+  terminalAt?: string | undefined;
+  expiresAt?: string | undefined;
+  labels?: Record<string, string> | undefined;
+  environment?: string | undefined;
+  retentionClass?: string | undefined;
+  deletedAt?: string | undefined;
+  cleanupState?: string | undefined;
   reusedExistingTask?: boolean | undefined;
 }) {
   return {
@@ -1301,6 +1466,13 @@ function snakeTask(task: {
     created_at: task.createdAt,
     updated_at: task.updatedAt,
     ...(task.finishedAt ? { finished_at: task.finishedAt } : {}),
+    ...(task.terminalAt ? { terminal_at: task.terminalAt } : {}),
+    ...(task.expiresAt ? { expires_at: task.expiresAt } : {}),
+    ...(task.labels && Object.keys(task.labels).length ? { labels: task.labels } : {}),
+    ...(task.environment ? { environment: task.environment } : {}),
+    ...(task.retentionClass ? { retention_class: task.retentionClass } : {}),
+    ...(task.deletedAt ? { deleted_at: task.deletedAt } : {}),
+    ...(task.cleanupState ? { cleanup_state: task.cleanupState } : {}),
     cancellable: !['succeeded', 'failed', 'cancelled', 'timed_out', 'dispatch_failed'].includes(
       task.status,
     ),
@@ -1345,11 +1517,7 @@ function snakeSchedule(schedule: {
 /** Strip nested backend_id / idempotency_key from schedule.task public view. */
 function publicScheduleTask(task: unknown): unknown {
   if (!task || typeof task !== 'object') return task;
-  const {
-    backend_id: _b,
-    idempotency_key: _i,
-    ...rest
-  } = task as Record<string, unknown>;
+  const { backend_id: _b, idempotency_key: _i, ...rest } = task as Record<string, unknown>;
   return rest;
 }
 

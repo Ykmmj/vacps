@@ -142,9 +142,10 @@ export async function createServer(input: {
         1_048_576,
       );
       const streamVersion = await streamVersionForPath(path);
-      const expected = typeof query.expected_stream_version === 'string'
-        ? query.expected_stream_version
-        : undefined;
+      const expected =
+        typeof query.expected_stream_version === 'string'
+          ? query.expected_stream_version
+          : undefined;
       if (expected && expected !== streamVersion) {
         return reply.code(409).send({
           error: {
@@ -555,8 +556,7 @@ export async function createServer(input: {
         .send({ error: { code: 'validation_error', message: 'command is required.' } });
     const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
     // Default true for bash; /bin/sh cannot claim login environment.
-    const loadUserEnvironment =
-      shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
     if (shell === '/bin/sh' && body.load_user_environment === true) {
       return reply.code(400).send({
         error: {
@@ -606,7 +606,10 @@ export async function createServer(input: {
     }
     if (body.mode !== undefined) {
       return reply.code(400).send({
-        error: { code: 'validation_error', message: 'mode is not accepted; use start_command/start_shell.' },
+        error: {
+          code: 'validation_error',
+          message: 'mode is not accepted; use start_command/start_shell.',
+        },
       });
     }
     const hardErr = validateHardMaxBytes(body);
@@ -662,12 +665,14 @@ export async function createServer(input: {
     }
     if (body.mode !== undefined) {
       return reply.code(400).send({
-        error: { code: 'validation_error', message: 'mode is not accepted; use start_command/start_shell.' },
+        error: {
+          code: 'validation_error',
+          message: 'mode is not accepted; use start_command/start_shell.',
+        },
       });
     }
     const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
-    const loadUserEnvironment =
-      shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
     if (shell === '/bin/sh' && body.load_user_environment === true) {
       return reply.code(400).send({
         error: {

@@ -118,7 +118,9 @@ export class TaskQueue {
   }
 
   /** Re-enqueue a new task_id copy of a previous task (Schema v3). */
-  async retry(taskId: string): Promise<{ task_id: string; status: 'queued'; retry_of_task_id: string }> {
+  async retry(
+    taskId: string,
+  ): Promise<{ task_id: string; status: 'queued'; retry_of_task_id: string }> {
     const stored = this.store.getTask(taskId);
     if (!stored) throw new Error('Task not found.');
     const newId = randomUUID();

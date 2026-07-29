@@ -98,7 +98,10 @@ export const filesEditInputSchema = z.strictObject({
 
 export const filesApplyPatchInputSchema = z.strictObject({
   backend_id: backendIdSchema,
-  patch: z.string().min(1).max(8 * 1024 * 1024),
+  patch: z
+    .string()
+    .min(1)
+    .max(8 * 1024 * 1024),
   workspace_path: pathSchema.optional(),
   dry_run: z.boolean().optional(),
   atomic: z.boolean().optional(),

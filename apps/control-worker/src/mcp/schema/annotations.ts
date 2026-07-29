@@ -83,6 +83,9 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotationHints> = {
   'vacps.tasks.output.read': READ_ONLY,
   'vacps.tasks.cancel': IDEMPOTENT_DESTRUCTIVE,
   'vacps.tasks.retry': MUTATING_OPEN,
+  'vacps.tasks.delete': IDEMPOTENT_DESTRUCTIVE,
+  'vacps.tasks.cleanup.preview': READ_ONLY,
+  'vacps.tasks.cleanup.run': IDEMPOTENT_DESTRUCTIVE,
 
   'vacps.schedules.create': MUTATING_LOCAL,
   'vacps.schedules.get': READ_ONLY,

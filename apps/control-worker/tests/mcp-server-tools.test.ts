@@ -50,6 +50,9 @@ const EXPECTED_TOOLS = [
   'vacps.tasks.output.read',
   'vacps.tasks.cancel',
   'vacps.tasks.retry',
+  'vacps.tasks.delete',
+  'vacps.tasks.cleanup.preview',
+  'vacps.tasks.cleanup.run',
   'vacps.schedules.create',
   'vacps.schedules.get',
   'vacps.schedules.list',
@@ -75,6 +78,7 @@ const READ_ONLY_TOOLS = [
   'vacps.tasks.get',
   'vacps.tasks.list',
   'vacps.tasks.output.read',
+  'vacps.tasks.cleanup.preview',
   'vacps.schedules.get',
   'vacps.schedules.list',
 ] as const;
@@ -275,9 +279,8 @@ describe('MCP server tools', () => {
     expect(getSchema.properties?.schedule_id).toBeTruthy();
     expect(getSchema.properties?.idempotency_key).toBeUndefined();
 
-    const { publicToolJsonSchemas, MCP_PROTOCOL_VERSION } = await import(
-      '../src/mcp/tool-schemas.js'
-    );
+    const { publicToolJsonSchemas, MCP_PROTOCOL_VERSION } =
+      await import('../src/mcp/tool-schemas.js');
     const published = publicToolJsonSchemas();
     expect(published.mcp_server_version).toBe(MCP_PROTOCOL_VERSION);
     expect(published.schema_version).toBe('3.0');
@@ -292,7 +295,10 @@ describe('MCP server tools', () => {
     expect(writePublished.required).toEqual(
       expect.arrayContaining(['backend_id', 'path', 'content', 'mode']),
     );
-    const startPublished = published.tools as Record<string, { oneOf?: unknown[]; properties?: Record<string, unknown> }>;
+    const startPublished = published.tools as Record<
+      string,
+      { oneOf?: unknown[]; properties?: Record<string, unknown> }
+    >;
     expect(startPublished['vacps.process.start']).toBeUndefined();
     expect(startPublished['vacps.process.start_command']?.properties?.program).toBeTruthy();
     expect(startPublished['vacps.process.start_shell']?.properties?.command).toBeTruthy();
