@@ -49,8 +49,12 @@ import {
   tasksDeleteInputSchema,
   tasksGetInputSchema,
   tasksIdInputSchema,
+  tasksLegalHoldClearInputSchema,
+  tasksLegalHoldSetInputSchema,
   tasksListInputSchema,
   tasksOutputReadInputSchema,
+  tasksPinInputSchema,
+  tasksUnpinInputSchema,
 } from './tasks.js';
 
 export function publicToolJsonSchemas(): Record<string, unknown> {
@@ -95,6 +99,10 @@ export function publicToolJsonSchemas(): Record<string, unknown> {
       'vacps.tasks.cancel': z.toJSONSchema(tasksIdInputSchema),
       'vacps.tasks.retry': z.toJSONSchema(tasksIdInputSchema),
       'vacps.tasks.delete': z.toJSONSchema(tasksDeleteInputSchema),
+      'vacps.tasks.pin': z.toJSONSchema(tasksPinInputSchema),
+      'vacps.tasks.unpin': z.toJSONSchema(tasksUnpinInputSchema),
+      'vacps.tasks.legal_hold.set': z.toJSONSchema(tasksLegalHoldSetInputSchema),
+      'vacps.tasks.legal_hold.clear': z.toJSONSchema(tasksLegalHoldClearInputSchema),
       'vacps.tasks.cleanup.preview': z.toJSONSchema(tasksCleanupPreviewInputSchema),
       'vacps.tasks.cleanup.run': z.toJSONSchema(tasksCleanupRunInputSchema),
       'vacps.schedules.create': z.toJSONSchema(schedulesCreateInputSchema),

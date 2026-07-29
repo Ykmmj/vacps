@@ -569,6 +569,36 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
         return json(await services.tasks.cancel(id));
       if (id && action === 'retry' && request.method === 'POST')
         return json(await services.tasks.retry(id), { status: 202 });
+      if (id && action === 'pin' && request.method === 'POST') {
+        const body = (await readJson(request).catch(() => ({}))) as { pinned_by?: string };
+        return json(
+          await services.tasks.pin(id, {
+            pinnedBy: body.pinned_by?.trim() || 'web',
+          }),
+        );
+      }
+      if (id && action === 'unpin' && request.method === 'POST')
+        return json(await services.tasks.unpin(id));
+      if (id && action === 'legal-hold' && request.method === 'POST') {
+        const body = (await readJson(request).catch(() => ({}))) as {
+          reason?: string;
+          held_by?: string;
+        };
+        return json(
+          await services.tasks.setLegalHold(id, {
+            ...(body.reason ? { reason: body.reason } : {}),
+            heldBy: body.held_by?.trim() || 'web',
+          }),
+        );
+      }
+      if (id && action === 'legal-hold' && request.method === 'DELETE') {
+        const body = (await readJson(request).catch(() => ({}))) as { cleared_by?: string };
+        return json(
+          await services.tasks.clearLegalHold(id, {
+            clearedBy: body.cleared_by?.trim() || 'web',
+          }),
+        );
+      }
     }
 
     if (resource === 'schedules') {

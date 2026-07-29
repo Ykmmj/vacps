@@ -33,8 +33,12 @@ import {
   tasksDeleteInputSchema,
   tasksGetInputSchema,
   tasksIdInputSchema,
+  tasksLegalHoldClearInputSchema,
+  tasksLegalHoldSetInputSchema,
   tasksListInputSchema,
   tasksOutputReadInputSchema,
+  tasksPinInputSchema,
+  tasksUnpinInputSchema,
   toCreateAgentTask,
   toCreateCommandTask,
   toCreateShellTask,
@@ -455,7 +459,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.tasks.delete',
     toolConfig('vacps.tasks.delete', {
       description:
-        'Soft-delete (default) or hard-delete a terminal task from the control-plane index. Active tasks return task_not_terminal.',
+        'Soft-delete (default) or hard-delete a terminal task from the control-plane index. Active tasks return task_not_terminal. Legal hold / pin return task_legal_hold.',
       inputSchema: tasksDeleteInputSchema,
       outputSchema: okEnvelope.extend({
         task_id: z.string(),
@@ -479,6 +483,104 @@ export function createMcpServer(env: Env): McpServer {
         mode: result.mode,
         ...(result.task ? { task: snakeTask(result.task as never) } : {}),
         ...(result.idempotency ? { idempotency: result.idempotency } : {}),
+      };
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.pin',
+    toolConfig('vacps.tasks.pin', {
+      description:
+        'Pin a task so automatic retention and default bulk cleanup skip it. Idempotent if already pinned.',
+      inputSchema: tasksPinInputSchema,
+      outputSchema: okEnvelope.extend({
+        task: z.unknown(),
+        pinned: z.boolean(),
+        already_pinned: z.boolean(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksPinInputSchema.parse(args);
+      const result = await tasks.pin(parsed.task_id, {
+        ...(parsed.pinned_by ? { pinnedBy: parsed.pinned_by } : { pinnedBy: 'mcp' }),
+      });
+      return {
+        task: snakeTask(result.task as never),
+        pinned: result.pinned,
+        already_pinned: result.already_pinned,
+      };
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.unpin',
+    toolConfig('vacps.tasks.unpin', {
+      description:
+        'Remove pin. If the task is terminal, expires_at is refreshed from terminal_at using current retention policy.',
+      inputSchema: tasksUnpinInputSchema,
+      outputSchema: okEnvelope.extend({
+        task: z.unknown(),
+        pinned: z.boolean(),
+        already_unpinned: z.boolean(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksUnpinInputSchema.parse(args);
+      const result = await tasks.unpin(parsed.task_id);
+      return {
+        task: snakeTask(result.task as never),
+        pinned: result.pinned,
+        already_unpinned: result.already_unpinned,
+      };
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.legal_hold.set',
+    toolConfig('vacps.tasks.legal_hold.set', {
+      description:
+        'Place a legal hold: blocks automatic purge and manual delete/cleanup until cleared. Idempotent if already held.',
+      inputSchema: tasksLegalHoldSetInputSchema,
+      outputSchema: okEnvelope.extend({
+        task: z.unknown(),
+        legal_hold: z.boolean(),
+        already_held: z.boolean(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksLegalHoldSetInputSchema.parse(args);
+      const result = await tasks.setLegalHold(parsed.task_id, {
+        ...(parsed.reason ? { reason: parsed.reason } : {}),
+        ...(parsed.held_by ? { heldBy: parsed.held_by } : { heldBy: 'mcp' }),
+      });
+      return {
+        task: snakeTask(result.task as never),
+        legal_hold: result.legal_hold,
+        already_held: result.already_held,
+      };
+    }),
+  );
+
+  server.registerTool(
+    'vacps.tasks.legal_hold.clear',
+    toolConfig('vacps.tasks.legal_hold.clear', {
+      description: 'Clear legal hold so retention and cleanup may apply again.',
+      inputSchema: tasksLegalHoldClearInputSchema,
+      outputSchema: okEnvelope.extend({
+        task: z.unknown(),
+        legal_hold: z.boolean(),
+        already_cleared: z.boolean(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = tasksLegalHoldClearInputSchema.parse(args);
+      const result = await tasks.clearLegalHold(parsed.task_id, {
+        ...(parsed.cleared_by ? { clearedBy: parsed.cleared_by } : { clearedBy: 'mcp' }),
+      });
+      return {
+        task: snakeTask(result.task as never),
+        legal_hold: result.legal_hold,
+        already_cleared: result.already_cleared,
       };
     }),
   );
@@ -1448,6 +1550,13 @@ function snakeTask(task: {
   retentionClass?: string | undefined;
   deletedAt?: string | undefined;
   cleanupState?: string | undefined;
+  pinned?: boolean | undefined;
+  pinnedAt?: string | undefined;
+  pinnedBy?: string | undefined;
+  legalHold?: boolean | undefined;
+  legalHoldReason?: string | undefined;
+  legalHoldAt?: string | undefined;
+  legalHoldBy?: string | undefined;
   reusedExistingTask?: boolean | undefined;
 }) {
   return {
@@ -1473,6 +1582,13 @@ function snakeTask(task: {
     ...(task.retentionClass ? { retention_class: task.retentionClass } : {}),
     ...(task.deletedAt ? { deleted_at: task.deletedAt } : {}),
     ...(task.cleanupState ? { cleanup_state: task.cleanupState } : {}),
+    pinned: Boolean(task.pinned),
+    ...(task.pinnedAt ? { pinned_at: task.pinnedAt } : {}),
+    ...(task.pinnedBy ? { pinned_by: task.pinnedBy } : {}),
+    legal_hold: Boolean(task.legalHold),
+    ...(task.legalHoldReason ? { legal_hold_reason: task.legalHoldReason } : {}),
+    ...(task.legalHoldAt ? { legal_hold_at: task.legalHoldAt } : {}),
+    ...(task.legalHoldBy ? { legal_hold_by: task.legalHoldBy } : {}),
     cancellable: !['succeeded', 'failed', 'cancelled', 'timed_out', 'dispatch_failed'].includes(
       task.status,
     ),

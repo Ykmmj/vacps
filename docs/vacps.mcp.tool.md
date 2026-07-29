@@ -73,7 +73,7 @@ Wire: **nested JSON**, **snake_case** keys, **snake_case** enums.
 
 ---
 
-## 最终 Tool 集（41）
+## 最终 Tool 集（45）
 
 ```text
 vacps.backends.list
@@ -114,6 +114,10 @@ vacps.tasks.output.read
 vacps.tasks.cancel
 vacps.tasks.retry
 vacps.tasks.delete
+vacps.tasks.pin
+vacps.tasks.unpin
+vacps.tasks.legal_hold.set
+vacps.tasks.legal_hold.clear
 vacps.tasks.cleanup.preview
 vacps.tasks.cleanup.run
 
@@ -313,12 +317,14 @@ schedules.get / list
 
 ### Task 保留 / 清理（Phase 0–1）
 
-| Tool                    | 作用                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------ |
-| `tasks.list`            | 过滤：`environment`、`source`、`labels`、`terminal`、`hide_test`、`include_deleted` 等；默认隐藏软删除 |
-| `tasks.delete`          | 终态任务软删（默认）/ 硬删；活跃 → `task_not_terminal`                                                 |
-| `tasks.cleanup.preview` | 按 filter 统计可清理终态任务                                                                           |
-| `tasks.cleanup.run`     | 批量软删；`expected_matched_count` 防范围漂移                                                          |
+| Tool                             | 作用                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `tasks.list`                     | 过滤：`environment`、`source`、`labels`、`terminal`、`hide_test`、`include_deleted` 等；默认隐藏软删除 |
+| `tasks.delete`                   | 终态任务软删（默认）/ 硬删；活跃 → `task_not_terminal`；hold/pin → `task_legal_hold`                   |
+| `tasks.pin` / `unpin`            | 固定 / 取消固定；自动清理与默认 bulk 跳过 pinned                                                       |
+| `tasks.legal_hold.set` / `clear` | 合规保留 / 解除；阻止自动 purge 与手工 delete/cleanup                                                  |
+| `tasks.cleanup.preview`          | 按 filter 统计可清理终态任务                                                                           |
+| `tasks.cleanup.run`              | 批量软删；`expected_matched_count` 防范围漂移                                                          |
 
 测试任务建议标签：
 

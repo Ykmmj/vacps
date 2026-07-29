@@ -103,7 +103,13 @@ export function categoryFor(code: string): ErrorCategory {
   ) {
     return 'conflict';
   }
-  if (code.includes('unauthorized') || code.includes('forbidden') || code.includes('permission')) {
+  if (
+    code.includes('unauthorized') ||
+    code.includes('forbidden') ||
+    code.includes('permission') ||
+    code === 'task_legal_hold' ||
+    code.endsWith('_legal_hold')
+  ) {
     return 'permission';
   }
   if (code.includes('rate_limit') || code.includes('too_many')) return 'rate_limit';
