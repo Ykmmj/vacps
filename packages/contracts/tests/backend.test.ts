@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { backendTelemetrySchema, telemetrySettingsSchema } from './backend.js';
+import { backendTelemetrySchema, telemetrySettingsSchema } from '../src/backend.js';
 
 describe('backend telemetry contracts', () => {
   const telemetry = {

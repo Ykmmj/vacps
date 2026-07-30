@@ -1,0 +1,26 @@
+{
+  "name": "@vacps/agent-script",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json",
+    "bundle": "node tools/build.mjs",
+    "build": "npm run typecheck && npm run bundle",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@vacps/contracts": "file:../../../packages/contracts",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "typescript": "6.0.3",
+    "vitest": "3.2.4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
+  }
+}

@@ -4,6 +4,7 @@ import {
   backendTelemetrySchema,
   createTaskSchema,
   registerBackendSchema,
+  scheduleOccurrenceAckSchema,
   telemetrySettingsSchema,
   updateBackendSchema,
   updateScheduleSchema,
@@ -152,12 +153,21 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     const resource = segments[1];
     const id = segments[2];
     const action = segments[3];
+    const subAction = segments[4];
 
     if (resource === 'auth') return handleAuth(request, env, id);
 
+    const isScheduleOccurrenceAck =
+      resource === 'schedules' &&
+      Boolean(id) &&
+      action === 'occurrences' &&
+      subAction === 'ack' &&
+      request.method === 'POST';
+
     const isAgentRequest =
       (resource === 'registrations' && !id && request.method === 'POST') ||
-      (resource === 'telemetry' && request.method === 'POST');
+      (resource === 'telemetry' && request.method === 'POST') ||
+      isScheduleOccurrenceAck;
     if (!isAgentRequest) {
       await requireAuthenticated(request, env);
       if (isStateChanging(request)) requireSameOrigin(request);
@@ -638,6 +648,28 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
           }),
           { status: 202 },
         );
+      }
+      // Agent-signed: POST /api/schedules/:id/occurrences/ack
+      if (id && action === 'occurrences' && subAction === 'ack' && request.method === 'POST') {
+        const { input, body } = await readSignedJson(request, scheduleOccurrenceAckSchema);
+        if (input.schedule_id !== id) {
+          throw new AppError(
+            'invalid_request',
+            'schedule_id in body must match path id.',
+            400,
+          );
+        }
+        const publicKey = await services.registrations.getPublicKey(input.backend_id);
+        const identity = await verifyAgentRequestSignature(request, publicKey, body);
+        if (identity.backendId !== input.backend_id) {
+          throw new AppError(
+            'backend_identity_mismatch',
+            'Ack backend ID does not match signature.',
+            409,
+          );
+        }
+        await services.agentSignatures.claimNonce(identity.backendId, identity.nonce);
+        return json(await services.schedules.ackOccurrence(input));
       }
       if (!id && action === 'reconcile' && request.method === 'POST')
         return json(await services.schedules.reconcile());

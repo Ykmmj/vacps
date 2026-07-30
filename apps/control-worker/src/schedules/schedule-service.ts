@@ -3,10 +3,19 @@ import type {
   CreateTaskInput,
   PatchScheduleInput,
   Schedule,
+  ScheduleOccurrenceAck,
+  ScheduleOccurrenceAckResult,
   SchedulePolicy,
   UpdateScheduleInput,
 } from '@vacps/contracts';
-import { createTaskSchema, schedulePolicySchema, withBackendId } from '@vacps/contracts';
+import {
+  authoritativeNextAfterOccurrence,
+  canonicalUtcIso,
+  createTaskSchema,
+  nextCronRunAtIso,
+  schedulePolicySchema,
+  withBackendId,
+} from '@vacps/contracts';
 
 import { AppError } from '../lib/http.js';
 import type { BackendClient } from '../registry/backend-client.js';
@@ -127,12 +136,17 @@ export class ScheduleService {
       expression: input.trigger.expression,
       timezone: input.trigger.timezone ?? 'UTC',
     };
+    const nextRunAtRaw =
+      input.enabled === false
+        ? null
+        : (nextCronRunAtIso(trigger.expression, trigger.timezone, new Date(now)) ?? null);
+    const nextRunAt = nextRunAtRaw ? (canonicalUtcIso(nextRunAtRaw) ?? nextRunAtRaw) : null;
     try {
       await this.db
         .prepare(
           `INSERT INTO schedules
-            (id, backend_id, name, cron, timezone, task_json, enabled, revision, policy_json, idempotency_key, request_hash, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+            (id, backend_id, name, cron, timezone, task_json, enabled, revision, policy_json, idempotency_key, request_hash, next_run_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           id,
@@ -145,6 +159,7 @@ export class ScheduleService {
           JSON.stringify(policy),
           input.idempotency_key ?? null,
           requestHash,
+          nextRunAt,
           now,
           now,
         )
@@ -300,16 +315,26 @@ export class ScheduleService {
       return { ...current, changed: false };
     }
 
+    const updatedAt = new Date().toISOString();
+    const nextRunAtRaw = nextBase.enabled
+      ? (nextCronRunAtIso(
+          nextBase.trigger.expression,
+          nextBase.trigger.timezone,
+          new Date(updatedAt),
+        ) ?? null)
+      : null;
+    const nextRunAt = nextRunAtRaw ? (canonicalUtcIso(nextRunAtRaw) ?? nextRunAtRaw) : null;
     const next: Schedule = {
       ...nextBase,
       revision: current.revision + 1,
-      updated_at: new Date().toISOString(),
+      updated_at: updatedAt,
+      ...(nextRunAt ? { next_run_at: nextRunAt } : { next_run_at: undefined }),
     };
 
     const result = await this.db
       .prepare(
         `UPDATE schedules SET name = ?, cron = ?, timezone = ?, task_json = ?, enabled = ?,
-           revision = ?, policy_json = ?, updated_at = ?
+           revision = ?, policy_json = ?, next_run_at = ?, updated_at = ?
          WHERE id = ? AND revision = ?`,
       )
       .bind(
@@ -320,6 +345,7 @@ export class ScheduleService {
         Number(next.enabled),
         next.revision,
         JSON.stringify(next.policy),
+        nextRunAt,
         next.updated_at,
         current.id,
         current.revision,
@@ -470,10 +496,55 @@ export class ScheduleService {
 
     const task = await this.tasks.create(template, 'schedule', schedule.id);
     if (!task.reusedExistingTask) {
-      await this.db
-        .prepare('UPDATE schedules SET last_run_at = ?, updated_at = ? WHERE id = ?')
-        .bind(new Date().toISOString(), new Date().toISOString(), id)
-        .run();
+      const now = new Date();
+      // Advance from claimed cursor when present (scheduled_for), else from now.
+      // CAS on (revision, next_run_at) so concurrent fire/ack cannot clobber.
+      const scheduledForRaw = schedule.next_run_at ?? null;
+      const advanceFrom =
+        scheduledForRaw && Number.isFinite(Date.parse(scheduledForRaw))
+          ? new Date(Date.parse(scheduledForRaw))
+          : now;
+      const nextRunAt = schedule.enabled
+        ? (nextCronRunAtIso(
+            schedule.trigger.expression,
+            schedule.trigger.timezone,
+            advanceFrom,
+          ) ?? null)
+        : null;
+      const nextCanonical = nextRunAt ? (canonicalUtcIso(nextRunAt) ?? nextRunAt) : null;
+      const nowIso = now.toISOString();
+      if (scheduledForRaw) {
+        await this.db
+          .prepare(
+            `UPDATE schedules
+             SET last_run_at = ?, next_run_at = ?, updated_at = ?
+             WHERE id = ? AND revision = ? AND next_run_at = ?`,
+          )
+          .bind(
+            nowIso,
+            nextCanonical,
+            nowIso,
+            id,
+            schedule.revision,
+            scheduledForRaw,
+          )
+          .run();
+      } else {
+        await this.db
+          .prepare(
+            `UPDATE schedules
+             SET last_run_at = ?, next_run_at = ?, updated_at = ?
+             WHERE id = ? AND revision = ?`,
+          )
+          .bind(nowIso, nextCanonical, nowIso, id, schedule.revision)
+          .run();
+      }
+      // Push advanced next_run_at to backend so absolute-time agents stay in sync.
+      try {
+        await this.sync(await this.get(id), await this.backends.get(schedule.backend_id));
+      } catch {
+        /* best-effort; reconcile will repair */
+      }
     }
     return { scheduleId: id, task, queued: true };
   }
@@ -495,6 +566,177 @@ export class ScheduleService {
     return result;
   }
 
+  /**
+   * Backend occurrence ack: CP recomputes authoritative next_run_at and CAS-advances D1.
+   * `locally_advanced_to` is never written as truth — diagnostic drift only.
+   */
+  async ackOccurrence(input: ScheduleOccurrenceAck): Promise<ScheduleOccurrenceAckResult> {
+    let schedule: ScheduleRecord;
+    try {
+      schedule = await this.get(input.schedule_id);
+    } catch {
+      throw new AppError('schedule_not_found', `Schedule '${input.schedule_id}' was not found.`, 404);
+    }
+
+    if (schedule.backend_id !== input.backend_id) {
+      throw new AppError(
+        'backend_identity_mismatch',
+        'Schedule does not belong to this backend.',
+        403,
+      );
+    }
+
+    if (input.revision !== schedule.revision) {
+      return {
+        accepted: false,
+        status: 'revision_mismatch',
+        schedule_id: schedule.id,
+        revision: schedule.revision,
+        ...(schedule.next_run_at ? { next_run_at: schedule.next_run_at } : {}),
+        ...(schedule.last_run_at ? { last_run_at: schedule.last_run_at } : {}),
+      };
+    }
+
+    if (!schedule.enabled) {
+      return {
+        accepted: false,
+        status: 'schedule_disabled',
+        schedule_id: schedule.id,
+        revision: schedule.revision,
+        ...(schedule.next_run_at ? { next_run_at: schedule.next_run_at } : {}),
+        ...(schedule.last_run_at ? { last_run_at: schedule.last_run_at } : {}),
+      };
+    }
+
+    const scheduledFor = canonicalUtcIso(input.scheduled_for);
+    if (!scheduledFor) {
+      throw new AppError('invalid_request', 'scheduled_for is not a valid timestamp.', 400);
+    }
+
+    const currentNext = schedule.next_run_at ? canonicalUtcIso(schedule.next_run_at) : undefined;
+    const currentNextMs = currentNext ? Date.parse(currentNext) : Number.NaN;
+    const scheduledMs = Date.parse(scheduledFor);
+
+    // Already moved past this occurrence (idempotent stale ack).
+    if (
+      Number.isFinite(currentNextMs) &&
+      Number.isFinite(scheduledMs) &&
+      currentNextMs > scheduledMs
+    ) {
+      const drift = localAdvanceDrift(input.locally_advanced_to, currentNext);
+      return {
+        accepted: true,
+        status: 'already_advanced',
+        schedule_id: schedule.id,
+        revision: schedule.revision,
+        ...(currentNext ? { next_run_at: currentNext } : {}),
+        ...(schedule.last_run_at ? { last_run_at: schedule.last_run_at } : {}),
+        ...(drift !== undefined ? { local_advance_drift: drift } : {}),
+      };
+    }
+
+    // Cursor must still be at scheduled_for for CAS (or equal after canonicalize).
+    if (currentNext && currentNext !== scheduledFor && schedule.next_run_at !== input.scheduled_for) {
+      // raw string may differ from canonical; compare epochs
+      const rawMs = schedule.next_run_at ? Date.parse(schedule.next_run_at) : Number.NaN;
+      if (!(Number.isFinite(rawMs) && rawMs === scheduledMs)) {
+        return {
+          accepted: false,
+          status: 'cursor_mismatch',
+          schedule_id: schedule.id,
+          revision: schedule.revision,
+          ...(currentNext ? { next_run_at: currentNext } : {}),
+          ...(schedule.last_run_at ? { last_run_at: schedule.last_run_at } : {}),
+        };
+      }
+    }
+
+    const now = new Date();
+    const enqueued = input.enqueued_count ?? (input.occurrence_id ? 1 : 0);
+    // skip path: 0 enqueued still advances past backlog (same as run_once on CP).
+    const misfire =
+      schedule.policy.misfire === 'catch_up' && enqueued === 0
+        ? 'skip'
+        : schedule.policy.misfire;
+
+    const computed = authoritativeNextAfterOccurrence(
+      schedule.trigger.expression,
+      schedule.trigger.timezone,
+      scheduledFor,
+      now,
+      misfire,
+      Math.max(1, enqueued || 1),
+    );
+    const nextCanonical = computed ? (canonicalUtcIso(computed) ?? computed) : null;
+    const nowIso = now.toISOString();
+
+    // CAS on raw D1 value first; fall back to canonical equality.
+    const casToken = schedule.next_run_at ?? scheduledFor;
+    const result = await this.db
+      .prepare(
+        `UPDATE schedules
+         SET last_run_at = ?, next_run_at = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND next_run_at = ?`,
+      )
+      .bind(nowIso, nextCanonical, nowIso, schedule.id, schedule.revision, casToken)
+      .run();
+
+    let applied = (result.meta?.changes ?? 0) > 0;
+    if (!applied && casToken !== scheduledFor) {
+      const retry = await this.db
+        .prepare(
+          `UPDATE schedules
+           SET last_run_at = ?, next_run_at = ?, updated_at = ?
+           WHERE id = ? AND revision = ? AND next_run_at = ?`,
+        )
+        .bind(nowIso, nextCanonical, nowIso, schedule.id, schedule.revision, scheduledFor)
+        .run();
+      applied = (retry.meta?.changes ?? 0) > 0;
+    }
+
+    if (!applied) {
+      // Concurrent advance — re-read and treat as idempotent if past scheduled_for.
+      const latest = await this.get(schedule.id);
+      const latestNext = latest.next_run_at ? canonicalUtcIso(latest.next_run_at) : undefined;
+      const latestMs = latestNext ? Date.parse(latestNext) : Number.NaN;
+      if (Number.isFinite(latestMs) && latestMs > scheduledMs) {
+        return {
+          accepted: true,
+          status: 'already_advanced',
+          schedule_id: latest.id,
+          revision: latest.revision,
+          ...(latestNext ? { next_run_at: latestNext } : {}),
+          ...(latest.last_run_at ? { last_run_at: latest.last_run_at } : {}),
+        };
+      }
+      return {
+        accepted: false,
+        status: 'cursor_mismatch',
+        schedule_id: schedule.id,
+        revision: schedule.revision,
+        ...(schedule.next_run_at ? { next_run_at: schedule.next_run_at } : {}),
+      };
+    }
+
+    const updated = await this.get(schedule.id);
+    try {
+      await this.sync(updated, await this.backends.get(updated.backend_id));
+    } catch {
+      /* best-effort */
+    }
+
+    const drift = localAdvanceDrift(input.locally_advanced_to, updated.next_run_at);
+    return {
+      accepted: true,
+      status: 'cas_applied',
+      schedule_id: updated.id,
+      revision: updated.revision,
+      ...(updated.next_run_at ? { next_run_at: updated.next_run_at } : {}),
+      ...(updated.last_run_at ? { last_run_at: updated.last_run_at } : {}),
+      ...(drift !== undefined ? { local_advance_drift: drift } : {}),
+    };
+  }
+
   private async findByIdempotency(
     backendId: string,
     key: string,
@@ -510,7 +752,18 @@ export class ScheduleService {
     schedule: ScheduleRecord,
     backend: Awaited<ReturnType<BackendRepository['get']>>,
   ): Promise<void> {
-    // Agent wire: cron/timezone columns + V3 task body (not taskTemplate).
+    // Backend wire: cron/timezone for display + absolute next_run_at for firing.
+    // Always send canonical ISO so backend CAS tokens stay stable.
+    const computed =
+      schedule.next_run_at ??
+      (schedule.enabled
+        ? nextCronRunAtIso(
+            schedule.trigger.expression,
+            schedule.trigger.timezone,
+            new Date(),
+          )
+        : undefined);
+    const nextRunAt = computed ? canonicalUtcIso(computed) : undefined;
     await this.client.upsertScheduler(backend, schedule.id, {
       cron: schedule.trigger.expression,
       timezone: schedule.trigger.timezone,
@@ -518,8 +771,21 @@ export class ScheduleService {
       task: schedule.task,
       policy: schedule.policy,
       revision: schedule.revision,
+      ...(nextRunAt ? { next_run_at: nextRunAt } : {}),
     });
   }
+}
+
+/** True when local advance epoch differs from CP next (diagnostic). */
+function localAdvanceDrift(
+  localAdvancedTo: string | undefined,
+  cpNext: string | null | undefined,
+): boolean | undefined {
+  if (!localAdvancedTo || !cpNext) return undefined;
+  const a = Date.parse(localAdvancedTo);
+  const b = Date.parse(cpNext);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return undefined;
+  return a !== b;
 }
 
 function toSchedule(row: ScheduleRow): ScheduleRecord {

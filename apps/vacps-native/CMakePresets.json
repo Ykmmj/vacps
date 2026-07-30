@@ -1,0 +1,68 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "linux-x86_64-musl-release",
+      "displayName": "Linux x86_64 musl static Release (Alpine/Clang)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VACPS_STATIC": "ON",
+        "VACPS_BUILD_TESTS": "ON",
+        "VACPS_USE_SYSTEM_BOOST": "OFF",
+        "CMAKE_C_COMPILER": "clang-22",
+        "CMAKE_CXX_COMPILER": "clang++-22",
+        "CMAKE_EXE_LINKER_FLAGS_INIT": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-fuse-ld=lld",
+        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-fuse-ld=lld"
+      }
+    },
+    {
+      "name": "linux-x86_64-musl-debug",
+      "displayName": "Linux x86_64 musl Debug (dynamic OK)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "VACPS_STATIC": "OFF",
+        "VACPS_BUILD_TESTS": "ON",
+        "VACPS_USE_SYSTEM_BOOST": "OFF",
+        "CMAKE_C_COMPILER": "clang-22",
+        "CMAKE_CXX_COMPILER": "clang++-22",
+        "CMAKE_EXE_LINKER_FLAGS_INIT": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-fuse-ld=lld",
+        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-fuse-ld=lld"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "linux-x86_64-musl-release"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "linux-x86_64-musl-debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "release",
+      "configurePreset": "linux-x86_64-musl-release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "debug",
+      "configurePreset": "linux-x86_64-musl-debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    }
+  ]
+}

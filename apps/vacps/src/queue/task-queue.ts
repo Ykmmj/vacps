@@ -154,11 +154,17 @@ export class TaskQueue {
     timezone: string;
     enabled: boolean;
     task: CreateTaskInput;
+    /** Absolute next fire (ISO UTC); control plane authoritative. BullMQ still uses cron+tz. */
+    next_run_at?: string;
+    revision?: number;
+    policy?: unknown;
   }): Promise<void> {
     if (!input.enabled) {
       await this.queue.removeJobScheduler(input.id);
       return;
     }
+    // Node path: BullMQ job scheduler still owns timing (cron + IANA tz).
+    // revision / next_run_at accepted for wire parity with native backends.
     await this.queue.upsertJobScheduler(
       input.id,
       { pattern: input.cron, tz: input.timezone },
@@ -168,6 +174,9 @@ export class TaskQueue {
           trigger_kind: 'schedule-trigger',
           schedule_id: input.id,
           task: input.task,
+          ...(input.next_run_at ? { next_run_at: input.next_run_at } : {}),
+          ...(input.revision !== undefined ? { revision: input.revision } : {}),
+          ...(input.policy !== undefined ? { policy: input.policy } : {}),
         },
         opts: {
           removeOnComplete: { age: 86_400, count: 200 },

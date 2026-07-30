@@ -6,9 +6,17 @@ import { createTaskSchema, scheduleTaskSchema, withBackendId } from './task.js';
 export const scheduleConcurrencyPolicies = ['allow', 'forbid', 'replace', 'queue'] as const;
 export const scheduleMisfirePolicies = ['skip', 'run_once', 'catch_up'] as const;
 
+/**
+ * Schedule execution policy. See `schedule-semantics.ts` for frozen misfire/DST rules.
+ *
+ * - misfire=run_once (default): one task for first due slot; jump cursor past backlog
+ * - misfire=skip: no task; jump cursor past backlog
+ * - misfire=catch_up: up to max_catchup_runs tasks; remainder on later ticks
+ */
 export const schedulePolicySchema = z.object({
   concurrency: z.enum(scheduleConcurrencyPolicies).default('forbid'),
   misfire: z.enum(scheduleMisfirePolicies).default('run_once'),
+  /** Cap for catch_up enqueues per claim (also hard-capped by MAX_SCHEDULE_ADVANCE_STEPS). */
   max_catchup_runs: z.number().int().min(0).max(100).default(1),
 });
 
@@ -80,12 +88,58 @@ export const patchScheduleSchema = z.object({
   idempotency_key: z.string().trim().min(1).max(200).optional(),
 });
 
+/**
+ * Backend → control-plane occurrence ack after local CAS claim.
+ * CP recomputes authoritative next_run_at; locally_advanced_to is diagnostic only.
+ */
+export const scheduleOccurrenceAckSchema = z.object({
+  backend_id: backendIdSchema,
+  schedule_id: z.uuid(),
+  revision: z.number().int().min(1),
+  /** Canonical UTC ISO of the claimed cursor (CAS token on CP). */
+  scheduled_for: z.iso.datetime(),
+  /** Backend's local advance result (observability / drift detection only). */
+  locally_advanced_to: z.iso.datetime().optional(),
+  /** Deterministic occurrence id when a task was enqueued (first slot if multi). */
+  occurrence_id: z.string().trim().min(1).max(200).optional(),
+  /**
+   * How many occurrences the backend enqueued in this claim batch (catch_up).
+   * CP advances this many cron steps from scheduled_for when misfire=catch_up.
+   */
+  enqueued_count: z.number().int().min(0).max(32).optional(),
+  /** Wall-clock when the backend claimed (optional diagnostics). */
+  claimed_at: z.iso.datetime().optional(),
+});
+
+export const scheduleOccurrenceAckResultSchema = z.object({
+  accepted: z.boolean(),
+  /**
+   * cas_applied | already_advanced | revision_mismatch | schedule_disabled |
+   * not_found | cursor_mismatch
+   */
+  status: z.enum([
+    'cas_applied',
+    'already_advanced',
+    'revision_mismatch',
+    'schedule_disabled',
+    'cursor_mismatch',
+  ]),
+  schedule_id: z.uuid(),
+  revision: z.number().int().min(1),
+  next_run_at: z.iso.datetime().optional(),
+  last_run_at: z.iso.datetime().optional(),
+  /** Present when local advance differs from CP-computed next (drift signal). */
+  local_advance_drift: z.boolean().optional(),
+});
+
 export type Schedule = z.infer<typeof scheduleSchema>;
 export type CreateScheduleInput = z.infer<typeof createScheduleSchema>;
 export type UpdateScheduleInput = z.infer<typeof updateScheduleSchema>;
 export type PatchScheduleInput = z.infer<typeof patchScheduleSchema>;
 export type SchedulePolicy = z.infer<typeof schedulePolicySchema>;
 export type ScheduleTrigger = z.infer<typeof scheduleTriggerSchema>;
+export type ScheduleOccurrenceAck = z.infer<typeof scheduleOccurrenceAckSchema>;
+export type ScheduleOccurrenceAckResult = z.infer<typeof scheduleOccurrenceAckResultSchema>;
 
 /** Normalize schedule task with inherited backend_id for storage/dispatch. */
 export function scheduleTaskForBackend(

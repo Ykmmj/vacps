@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createTaskSchema, taskSummary, taskToCommand } from './task.js';
+import { createTaskSchema, taskSummary, taskToCommand } from '../src/task.js';
 
 describe('createTaskSchema (Schema v3 kind)', () => {
   it('accepts a command task with absolute working_directory', () => {

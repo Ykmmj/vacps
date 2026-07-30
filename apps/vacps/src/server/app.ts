@@ -835,6 +835,9 @@ export async function createServer(input: {
       timezone: body.timezone,
       enabled: body.enabled,
       task: template.data,
+      ...(typeof body.next_run_at === 'string' ? { next_run_at: body.next_run_at } : {}),
+      ...(typeof body.revision === 'number' ? { revision: body.revision } : {}),
+      ...(body.policy !== undefined ? { policy: body.policy } : {}),
     });
     return reply.code(204).send();
   });

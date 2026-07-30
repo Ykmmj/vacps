@@ -1,0 +1,894 @@
+import { createTaskSchema, taskDispatchSchema, isTerminalTaskStatus } from "@vacps/contracts";
+import * as host from "vacps:host";
+
+import type { AgentConfig } from "../config";
+import { parseSchedulePolicy } from "../queue/schedule-logic";
+import type { TaskQueue } from "../queue/task-queue";
+import type { ControlPlaneState } from "../registration/control-plane-state";
+import { probeShellEnvironment } from "../runtime/shell-environment";
+import * as files from "../runtime/files";
+import { hashRequest, IdempotencyStore } from "../runtime/idempotency";
+import type { ProcessManager } from "../runtime/process-manager";
+import { verifyControlPlaneRequest } from "../security/control-plane-verify";
+import type { NativeTelemetryCollector } from "../telemetry/native-telemetry";
+import { createApp, type App, type Reply } from "./router";
+
+export interface CreateServerInput {
+  config: AgentConfig;
+  queue: TaskQueue;
+  processes: ProcessManager;
+  telemetry: NativeTelemetryCollector;
+  getControlPlaneState: () => ControlPlaneState;
+  isReady: () => boolean;
+}
+
+function numberOr(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return parsed;
+}
+
+function errorStatus(error: unknown, fallback = 400): number {
+  if (error && typeof error === "object" && "statusCode" in error) {
+    const n = Number((error as { statusCode: unknown }).statusCode);
+    if (Number.isInteger(n) && n >= 400 && n < 600) return n;
+  }
+  return fallback;
+}
+
+function errorBody(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code: unknown }).code)
+      : "runtime_error";
+  return { error: { code, message } };
+}
+
+async function runtimeError(reply: Reply, error: unknown, fallback = 400) {
+  return reply.code(errorStatus(error, fallback)).send(errorBody(error));
+}
+
+/**
+ * Product HTTP routes — same registration style as apps/vacps/src/server/app.ts
+ * (`app.get` / `app.post` / hooks), over vacps:http Host instead of Fastify.
+ */
+export async function createServer(input: CreateServerInput): Promise<App> {
+  const app = createApp();
+  const idempotency = new IdempotencyStore();
+
+  // Public probes skip signature; mutating control-plane API requires it when key is set.
+  const publicPaths = new Set([
+    "/health",
+    "/ready",
+    "/script/ping",
+    "/status",
+    "/info",
+    "/capabilities",
+    "/metrics",
+  ]);
+
+  app.addHook("preValidation", async (request, reply) => {
+    if (publicPaths.has(request.path)) return undefined;
+    if (request.method === "GET" && request.path.startsWith("/tasks")) return undefined;
+    if (request.method === "GET" && request.path.startsWith("/fs/")) return undefined;
+
+    const pub = input.config.CONTROL_PLANE_PUBLIC_KEY;
+    if (!pub) return undefined;
+
+    try {
+      const { nonce } = verifyControlPlaneRequest({
+        publicKeyB64: pub,
+        method: request.method,
+        path: request.path,
+        headers: request.headers,
+        body: request.raw.body ?? "",
+      });
+      if (!input.queue.claimNonce(nonce)) {
+        return reply.code(401).send({
+          error: {
+            code: "replayed_request",
+            message: "A control-plane request may only be used once.",
+          },
+        });
+      }
+      return undefined;
+    } catch (error) {
+      return reply.code(401).send({
+        error: {
+          code: "unauthorized",
+          message:
+            error instanceof Error
+              ? error.message
+              : "A valid control-plane signature is required.",
+        },
+      });
+    }
+  });
+
+  app.get("/health", async () => {
+    const status = await input.telemetry.collect();
+    const shellEnv = await probeShellEnvironment();
+    return {
+      ...status.health,
+      shell_environment: shellEnv,
+      shell_environment_ok: shellEnv.home_accessible && shellEnv.shell_smoke_ok,
+    };
+  });
+
+  app.get("/metrics", async () => {
+    const status = await input.telemetry.collect();
+    return status.metrics ?? {};
+  });
+
+  app.get("/ready", async (_request, reply) => {
+    const ready = input.isReady();
+    const state = input.getControlPlaneState();
+    return reply.code(ready ? 200 : 503).send({
+      ready,
+      database: ready ? "ok" : "error",
+      runtime: ready ? "ok" : "error",
+      listener: ready ? "ok" : "error",
+      registration: state.registrationStatus,
+    });
+  });
+
+  app.get("/script/ping", async (request) => ({
+    ok: true,
+    service: "vacps-script",
+    hostVersion: host.version(),
+    requestId: request.requestId,
+  }));
+
+  app.get("/status", async () => ({
+    registration: input.getControlPlaneState(),
+    controlPlaneConfigured: Boolean(input.config.CONTROL_PLANE_URL),
+    ...(await input.telemetry.collect()),
+  }));
+
+  app.get("/info", async () => ({
+    backendId: input.config.BACKEND_ID,
+    runMode: "api+worker",
+    redis: false,
+    pi: false,
+    shell_environment: await probeShellEnvironment(),
+  }));
+
+  // ── Tasks ─────────────────────────────────────────────────────────
+  app.post("/tasks", async (request, reply) => {
+    if (!input.isReady()) {
+      return reply.code(503).send({
+        error: { code: "service_unavailable", message: "application not initialized" },
+      });
+    }
+
+    const parsed = taskDispatchSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: { code: "invalid_task", message: parsed.error.message } });
+    }
+    if (parsed.data.backend_id !== input.config.BACKEND_ID) {
+      return reply
+        .code(409)
+        .send({ error: { code: "backend_mismatch", message: "Task targets another backend." } });
+    }
+    if (parsed.data.kind === "agent") {
+      // Protocol kind from @vacps/contracts; native never runs Pi.
+      return reply.code(409).send({
+        error: {
+          code: "capability_unavailable",
+          message: "Pi runtime is not available on this backend.",
+          details: { capability: "pi" },
+        },
+      });
+    }
+
+    if (parsed.data.idempotency_key) {
+      const prior = input.queue.findByIdempotencyKey(parsed.data.idempotency_key);
+      if (prior) {
+        return reply.code(202).send({
+          task_id: prior.task.task_id,
+          status: prior.status,
+          backend_id: prior.task.backend_id,
+          kind: prior.task.kind,
+          deduped: true,
+          idempotency_key: parsed.data.idempotency_key,
+        });
+      }
+    }
+
+    const { created } = input.queue.enqueue(parsed.data);
+    const stored = input.queue.getTask(parsed.data.task_id);
+    return reply.code(202).send({
+      task_id: parsed.data.task_id,
+      status: stored?.status ?? "queued",
+      backend_id: parsed.data.backend_id,
+      kind: parsed.data.kind,
+      ...(created ? {} : { deduped: true }),
+    });
+  });
+
+  app.get("/tasks/:id", async (request, reply) => {
+    const id = request.params.id ?? "";
+    const task = input.queue.getTask(id);
+    if (!task) {
+      return reply.code(404).send({ error: { code: "not_found", message: "Task not found." } });
+    }
+    return {
+      task: task.task,
+      status: task.status,
+      result: task.result,
+      error: task.error,
+      createdAt: task.createdAt,
+      startedAt: task.startedAt,
+      finishedAt: task.finishedAt,
+    };
+  });
+
+  app.get("/tasks/:id/logs", async (request, reply) => {
+    const id = request.params.id ?? "";
+    const task = input.queue.getTask(id);
+    if (!task) {
+      return reply.code(404).send({ error: { code: "not_found", message: "Task not found." } });
+    }
+    const offset = Math.max(0, Number(request.query.offset ?? "0") || 0);
+    const stream = request.query.stream;
+    const maxBytes = Math.min(
+      Math.max(Number(request.query.max_bytes ?? "65536") || 65_536, 1),
+      1_048_576,
+    );
+    const logs = input.queue.listLogs(id, {
+      offset,
+      ...(stream ? { stream } : {}),
+      limit: 500,
+    });
+
+    // Stream-style read (control-plane / Node parity): concatenate rows after offset.
+    if (stream === "stdout" || stream === "stderr") {
+      let content = "";
+      let nextOffset = offset;
+      for (const row of logs) {
+        if (content.length >= maxBytes) break;
+        const room = maxBytes - content.length;
+        content += row.data.length > room ? row.data.slice(0, room) : row.data;
+        nextOffset = row.sequence;
+      }
+      const more = input.queue.listLogs(id, { offset: nextOffset, stream, limit: 1 });
+      const terminal = isTerminalTaskStatus(task.status);
+      return {
+        task_id: id,
+        stream,
+        offset,
+        next_offset: nextOffset,
+        eof: terminal && more.length === 0,
+        total_bytes: content.length,
+        truncated: false,
+        encoding: "utf-8",
+        content,
+        logs,
+      };
+    }
+
+    return { task_id: id, logs };
+  });
+
+  app.post("/tasks/:id/cancel", async (request, reply) => {
+    const id = request.params.id ?? "";
+    const result = input.queue.cancel(id);
+    if (result.status === "not_found") {
+      return reply.code(404).send({ error: { code: "not_found", message: "Task not found." } });
+    }
+    if (!result.cancelled) {
+      return reply.code(409).send({
+        error: { code: "not_cancellable", message: "Task already terminal." },
+        task_id: id,
+        status: result.status,
+        already_terminal: true,
+      });
+    }
+    return { ok: true, task_id: id, ...result };
+  });
+
+  app.post("/tasks/:id/retry", async (request, reply) => {
+    const id = request.params.id ?? "";
+    try {
+      const result = input.queue.retry(id);
+      return reply.code(202).send({ ok: true, ...result });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("not found") || message.includes("Task not found")) {
+        return reply.code(404).send({ error: { code: "not_found", message } });
+      }
+      return reply.code(400).send({ error: { code: "retry_failed", message } });
+    }
+  });
+
+  // ── Files (vacps:fs) ──────────────────────────────────────────────
+  app.get("/fs/read", async (request, reply) => {
+    const filePath = request.query.path?.trim() || request.query.file_path?.trim();
+    if (!filePath) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "path is required." } });
+    }
+    try {
+      const startRaw = request.query.start_line ?? request.query.offset;
+      const endRaw = request.query.end_line;
+      const result = await files.filesRead({
+        path: filePath,
+        ...(startRaw !== undefined ? { startLine: numberOr(startRaw, 1) } : {}),
+        ...(endRaw !== undefined ? { endLine: numberOr(endRaw, 1) } : {}),
+        maxBytes: numberOr(request.query.max_bytes, 32_768),
+        encoding: request.query.encoding === "base64" ? "base64" : "utf-8",
+      });
+      return { ok: true, backend_id: input.config.BACKEND_ID, ...result };
+    } catch (error) {
+      return runtimeError(reply, error, 404);
+    }
+  });
+
+  app.get("/fs/stat", async (request, reply) => {
+    const path = request.query.path?.trim();
+    if (!path) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "path is required." } });
+    }
+    try {
+      return { ok: true, backend_id: input.config.BACKEND_ID, ...(await files.filesStat(path)) };
+    } catch (error) {
+      return runtimeError(reply, error, 404);
+    }
+  });
+
+  app.get("/fs/list", async (request, reply) => {
+    const path = request.query.path?.trim();
+    if (!path) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "path is required." } });
+    }
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesList({
+          path,
+          limit: numberOr(request.query.limit, 200),
+          includeHidden: request.query.include_hidden === "true",
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error, 404);
+    }
+  });
+
+  app.post("/fs/write", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.path !== "string" || typeof body.content !== "string") {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "path and content are required." } });
+    }
+    if (
+      body.mode !== "create" &&
+      body.mode !== "overwrite" &&
+      body.mode !== "create_or_overwrite"
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: "validation_error",
+          message: "mode is required: create | overwrite | create_or_overwrite.",
+        },
+      });
+    }
+    try {
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        "files.write",
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesWrite({
+            path: body.path as string,
+            content: body.content as string,
+            mode: body.mode as "create" | "overwrite" | "create_or_overwrite",
+            createParentDirectories: body.create_parent_directories !== false,
+            ...(typeof body.expected_sha256 === "string"
+              ? { expectedSha256: body.expected_sha256 }
+              : {}),
+          })),
+        }),
+      );
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/fs/glob", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.pattern !== "string" || !body.pattern) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "pattern is required." } });
+    }
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesGlob({
+          pattern: body.pattern,
+          ...(typeof body.path === "string" ? { path: body.path } : {}),
+          includeHidden: Boolean(body.include_hidden),
+          limit: typeof body.limit === "number" ? body.limit : 200,
+          ...(typeof body.cursor === "string" ? { cursor: body.cursor } : {}),
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/fs/grep", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.pattern !== "string" || !body.pattern) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "pattern is required." } });
+    }
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesGrep({
+          pattern: body.pattern,
+          ...(typeof body.path === "string" ? { path: body.path } : {}),
+          ...(typeof body.file_pattern === "string" ? { filePattern: body.file_pattern } : {}),
+          caseSensitive: body.case_sensitive === true,
+          fixedString: body.fixed_string === true,
+          contextBefore: typeof body.context_before === "number" ? body.context_before : 0,
+          contextAfter: typeof body.context_after === "number" ? body.context_after : 0,
+          maxMatches: typeof body.max_matches === "number" ? body.max_matches : 100,
+          maxBytes: typeof body.max_bytes === "number" ? body.max_bytes : 64_000,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/fs/edit", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (
+      typeof body.path !== "string" ||
+      typeof body.old_text !== "string" ||
+      typeof body.new_text !== "string"
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: "validation_error",
+          message: "path, old_text, and new_text are required.",
+        },
+      });
+    }
+    try {
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        "files.edit",
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesEdit({
+            path: body.path as string,
+            oldText: body.old_text as string,
+            newText: body.new_text as string,
+            replaceAll: body.replace_all === true,
+            ...(typeof body.expected_sha256 === "string"
+              ? { expectedSha256: body.expected_sha256 }
+              : {}),
+          })),
+        }),
+      );
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/fs/apply_patch", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.patch !== "string" || !body.patch) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "patch is required." } });
+    }
+    try {
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        "files.apply_patch",
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.applyPatch({
+            patch: body.patch as string,
+            ...(typeof body.workspace_path === "string"
+              ? { workspacePath: body.workspace_path }
+              : {}),
+            dryRun: body.dry_run === true,
+            atomic: body.atomic !== false,
+          })),
+        }),
+      );
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.get("/capabilities", async () => ({
+    ok: true,
+    backend_id: input.config.BACKEND_ID,
+    ...(await files.detectCapabilities()),
+  }));
+
+  app.post("/fs/mkdir", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.path !== "string") {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "path is required." } });
+    }
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesMkdir({
+          path: body.path,
+          recursive: body.recursive !== false,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/fs/delete", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.path !== "string") {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "path is required." } });
+    }
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesDelete({ path: body.path })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/fs/move", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.from !== "string" || typeof body.to !== "string") {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "from and to are required." } });
+    }
+    try {
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesMove({ from: body.from, to: body.to })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  // ── Command / shell ───────────────────────────────────────────────
+  app.post("/exec/command", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.program !== "string" || !body.program) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "program is required." } });
+    }
+    try {
+      const result = await input.processes.exec({
+        toolName: "command.exec",
+        program: body.program,
+        ...(Array.isArray(body.arguments)
+          ? { arguments: body.arguments.map(String) }
+          : {}),
+        ...(typeof body.working_directory === "string"
+          ? { workingDirectory: body.working_directory }
+          : {}),
+        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 120_000,
+        stdoutMaxBytes: typeof body.stdout_max_bytes === "number" ? body.stdout_max_bytes : 16_384,
+        stderrMaxBytes: typeof body.stderr_max_bytes === "number" ? body.stderr_max_bytes : 16_384,
+        ...(typeof body.idempotency_key === "string"
+          ? { idempotencyKey: body.idempotency_key }
+          : {}),
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/exec/shell", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.command !== "string" || !body.command.trim()) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "command is required." } });
+    }
+    const shell = body.shell === "/bin/sh" ? "/bin/sh" : "/bin/bash";
+    const loadUserEnvironment = shell === "/bin/sh" ? false : body.load_user_environment !== false;
+    if (shell === "/bin/sh" && body.load_user_environment === true) {
+      return reply.code(400).send({
+        error: {
+          code: "validation_error",
+          message:
+            "load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or omit/false.",
+        },
+      });
+    }
+    try {
+      const result = await input.processes.exec({
+        toolName: "shell.exec",
+        command: body.command,
+        shell,
+        ...(typeof body.working_directory === "string"
+          ? { workingDirectory: body.working_directory }
+          : {}),
+        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 120_000,
+        stdoutMaxBytes: typeof body.stdout_max_bytes === "number" ? body.stdout_max_bytes : 16_384,
+        stderrMaxBytes: typeof body.stderr_max_bytes === "number" ? body.stderr_max_bytes : 16_384,
+        ...(typeof body.idempotency_key === "string"
+          ? { idempotencyKey: body.idempotency_key }
+          : {}),
+        loadUserEnvironment,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  // ── Long-lived process (start / read / write / terminate) ─────────
+  app.post("/process/start_command", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.program !== "string" || !body.program) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "program is required." } });
+    }
+    try {
+      const result = await input.processes.start({
+        toolName: "process.start_command",
+        program: body.program,
+        ...(Array.isArray(body.arguments)
+          ? { arguments: body.arguments.map(String) }
+          : {}),
+        ...(typeof body.working_directory === "string"
+          ? { workingDirectory: body.working_directory }
+          : {}),
+        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 3_600_000,
+        closeStdin: body.tty === true ? false : body.close_stdin !== false,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/process/start_shell", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.command !== "string" || !body.command.trim()) {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "command is required." } });
+    }
+    const shell = body.shell === "/bin/sh" ? "/bin/sh" : "/bin/bash";
+    const loadUserEnvironment = shell === "/bin/sh" ? false : body.load_user_environment !== false;
+    try {
+      const result = await input.processes.start({
+        toolName: "process.start_shell",
+        command: body.command,
+        shell,
+        ...(typeof body.working_directory === "string"
+          ? { workingDirectory: body.working_directory }
+          : {}),
+        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 3_600_000,
+        closeStdin: body.tty === true ? false : body.close_stdin !== false,
+        loadUserEnvironment,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/process/read", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.process_id !== "string") {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "process_id is required." } });
+    }
+    try {
+      const result = await input.processes.readWait(body.process_id, {
+        ...(typeof body.cursor === "string" ? { cursor: body.cursor } : {}),
+        maxBytes: typeof body.max_bytes === "number" ? body.max_bytes : 65_536,
+        waitMs: typeof body.wait_ms === "number" ? body.wait_ms : 0,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/process/write", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.process_id !== "string" || typeof body.data !== "string") {
+      return reply.code(400).send({
+        error: { code: "validation_error", message: "process_id and data are required." },
+      });
+    }
+    try {
+      const result = await input.processes.write(
+        body.process_id,
+        body.data,
+        body.close_stdin === true,
+      );
+      return { ok: true, process_id: body.process_id, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post("/process/terminate", async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.process_id !== "string") {
+      return reply
+        .code(400)
+        .send({ error: { code: "validation_error", message: "process_id is required." } });
+    }
+    try {
+      const signal =
+        body.signal === "sigint" || body.signal === "sigkill" || body.signal === "sigterm"
+          ? body.signal
+          : "sigterm";
+      const result = await input.processes.terminate(
+        body.process_id,
+        signal,
+        typeof body.grace_period_ms === "number" ? body.grace_period_ms : 3_000,
+      );
+      return { ok: true, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  // ── Schedulers (SQLite; no Redis/BullMQ) ──────────────────────────
+  app.get("/schedulers", async () => input.queue.listSchedulers());
+
+  app.put("/schedulers/:id", async (request, reply) => {
+    const id = request.params.id ?? "";
+    const body = asRecord(request.body);
+    if (body.taskTemplate !== undefined) {
+      return reply.code(400).send({
+        error: {
+          code: "validation_error",
+          message: "taskTemplate is not accepted; use task (Schema v3 kind payload).",
+        },
+      });
+    }
+    const template = createTaskSchema.safeParse(body.task);
+    if (
+      !template.success ||
+      typeof body.cron !== "string" ||
+      typeof body.timezone !== "string" ||
+      typeof body.enabled !== "boolean"
+    ) {
+      return reply
+        .code(400)
+        .send({ error: { code: "invalid_scheduler", message: "Invalid scheduler payload." } });
+    }
+    const revision =
+      typeof body.revision === "number" && Number.isInteger(body.revision) && body.revision >= 1
+        ? body.revision
+        : undefined;
+    const policy =
+      body.policy && typeof body.policy === "object"
+        ? parseSchedulePolicy(body.policy)
+        : undefined;
+    input.queue.upsertScheduler({
+      id,
+      cron: body.cron,
+      timezone: body.timezone,
+      enabled: body.enabled,
+      task: template.data,
+      ...(revision !== undefined ? { revision } : {}),
+      ...(policy ? { policy } : {}),
+      ...(typeof body.next_run_at === "string"
+        ? { nextRunAt: body.next_run_at }
+        : body.next_run_at === null
+          ? { nextRunAt: null }
+          : {}),
+    });
+    return reply.code(204).send();
+  });
+
+  app.delete("/schedulers/:id", async (request, reply) => {
+    const id = request.params.id ?? "";
+    try {
+      input.queue.deleteScheduler(id);
+    } catch {
+      /* best-effort */
+    }
+    return reply.code(204).send();
+  });
+
+  app.post("/schedulers/:id/run", async (request, reply) => {
+    const id = request.params.id ?? "";
+    const body = asRecord(request.body);
+    if (body.taskTemplate !== undefined) {
+      return reply.code(400).send({
+        error: {
+          code: "validation_error",
+          message: "taskTemplate is not accepted; use task (Schema v3 kind payload).",
+        },
+      });
+    }
+    const template = createTaskSchema.safeParse(body.task);
+    if (!template.success) {
+      return reply
+        .code(400)
+        .send({ error: { code: "invalid_task", message: template.error.message } });
+    }
+    const taskId = input.queue.runScheduleNow({ id, task: template.data });
+    return { task_id: taskId };
+  });
+
+  return app;
+}
+
+function asRecord(body: unknown): Record<string, unknown> {
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    return body as Record<string, unknown>;
+  }
+  return {};
+}
+
+async function withFileIdempotency(
+  store: IdempotencyStore,
+  backendId: string,
+  toolName: string,
+  body: Record<string, unknown>,
+  run: () => Promise<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  const key = typeof body.idempotency_key === "string" ? body.idempotency_key : undefined;
+  const requestHash = hashRequest({
+    tool_name: toolName,
+    backend_id: backendId,
+    arguments: body,
+  });
+  const cached = store.lookup(toolName, key, requestHash);
+  if (cached && typeof cached === "object") {
+    return store.withIdempotencyMeta(key, requestHash, true, cached as Record<string, unknown>);
+  }
+  const result = await run();
+  store.store(toolName, key, requestHash, result);
+  return store.withIdempotencyMeta(key, requestHash, false, result);
+}
