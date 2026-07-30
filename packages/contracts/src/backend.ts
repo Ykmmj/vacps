@@ -4,10 +4,25 @@ export const backendIdSchema = z
   .string()
   .regex(/^[a-z0-9-]{1,64}$/, 'Backend ID must be a lowercase slug (1-64 characters).');
 
+/**
+ * Absolute http(s) URL for backend baseUrl.
+ * Uses a regex refine instead of z.url() so validation works in QuickJS
+ * (no WHATWG URL global) as well as Node/Workers.
+ */
+export const absoluteHttpUrlSchema = z
+  .string()
+  .trim()
+  .min(8)
+  .max(2048)
+  .refine((value) => /^https?:\/\/[^\s/$.?#][^\s]*$/i.test(value), {
+    message: 'Invalid URL',
+  })
+  .transform((value) => value.replace(/\/$/, ''));
+
 export const backendSchema = z.object({
   id: backendIdSchema,
   name: z.string().trim().min(1).max(120),
-  baseUrl: z.url().transform((value) => value.replace(/\/$/, '')),
+  baseUrl: absoluteHttpUrlSchema,
   tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
   enabled: z.boolean().default(true),
   createdAt: z.iso.datetime(),
@@ -27,7 +42,7 @@ export const agentPublicKeySchema = z
 export const registerBackendSchema = z.object({
   backendId: backendIdSchema,
   name: z.string().trim().min(1).max(120),
-  baseUrl: z.url().transform((value) => value.replace(/\/$/, '')),
+  baseUrl: absoluteHttpUrlSchema,
   tags: z.array(z.string().trim().min(1).max(48)).max(32).default([]),
   publicIps: z.array(ipAddressSchema).max(32).default([]),
   agentVersion: z.string().trim().min(1).max(48).default('unknown'),
