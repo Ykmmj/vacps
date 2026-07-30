@@ -400,11 +400,8 @@ EOF
 }
 
 install_quick_tunnel_service() {
-  # Node listens on 3100; native on 8788. Tunnel must target the active agent port.
+  # Both node and native installers listen on 3100 so managed/quick tunnels share origin.
   local agent_port=3100
-  if is_native_runtime; then
-    agent_port=8788
-  fi
   install -d /usr/local/lib/vacps
   # Expand agent_port into the helper (not quoted heredoc).
   cat >/usr/local/lib/vacps/quick-tunnel.sh <<EOF
@@ -564,6 +561,9 @@ EOF
 }
 
 write_systemd_unit_native() {
+  # Port 3100 matches control-plane managed tunnel ingress (http://127.0.0.1:3100)
+  # and Node vacps default, so the same Cloudflare Tunnel token works for both runtimes.
+  local agent_port=3100
   install -d /etc/systemd/system/vacps.service.d
   cat >/etc/systemd/system/vacps.service <<EOF
 [Unit]
@@ -584,8 +584,8 @@ EnvironmentFile=$ENVIRONMENT_FILE
 Environment=VACPS_DATA_DIR=$DATA_DIRECTORY
 Environment=VACPS_SCRIPT=$NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME
 Environment=VACPS_LISTEN_HOST=127.0.0.1
-Environment=VACPS_LISTEN_PORT=8788
-ExecStart=$NATIVE_INSTALL_DIR/$NATIVE_BIN_NAME --script $NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME --data-dir $DATA_DIRECTORY --host 127.0.0.1 --port 8788
+Environment=VACPS_LISTEN_PORT=$agent_port
+ExecStart=$NATIVE_INSTALL_DIR/$NATIVE_BIN_NAME --script $NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME --data-dir $DATA_DIRECTORY --host 127.0.0.1 --port $agent_port
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -972,7 +972,7 @@ TELEMETRY_FALLBACK_INTERVAL_SECONDS=120
 VACPS_DATA_DIR=$DATA_DIRECTORY
 VACPS_SCRIPT=$NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME
 VACPS_LISTEN_HOST=127.0.0.1
-VACPS_LISTEN_PORT=8788
+VACPS_LISTEN_PORT=3100
 DATABASE_PATH=$DATA_DIRECTORY/agent.db
 LOG_DIR=$DATA_DIRECTORY/logs
 EOF
