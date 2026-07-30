@@ -1,4 +1,4 @@
-import * as host from "vacps:host";
+import * as host from 'vacps:host';
 
 /**
  * Agent config from process env (parity with apps/vacps/src/config.ts).
@@ -20,7 +20,7 @@ export interface AgentConfig {
 
 function env(name: string): string | undefined {
   const v = host.getenv(name);
-  if (v === null || v === "") return undefined;
+  if (v === null || v === '') return undefined;
   return v;
 }
 
@@ -34,29 +34,29 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
 
 function stripSlash(url: string | undefined): string | undefined {
   if (url === undefined) return undefined;
-  return url.replace(/\/$/, "");
+  return url.replace(/\/$/, '');
 }
 
 export function loadConfig(): AgentConfig {
-  const backendId = env("BACKEND_ID") ?? env("VACPS_BACKEND_ID") ?? "local";
-  const tagsRaw = env("BACKEND_TAGS") ?? "";
+  const backendId = env('BACKEND_ID') ?? env('VACPS_BACKEND_ID') ?? 'local';
+  const tagsRaw = env('BACKEND_TAGS') ?? '';
   return {
     BACKEND_ID: backendId,
-    BACKEND_NAME: env("BACKEND_NAME") ?? backendId,
+    BACKEND_NAME: env('BACKEND_NAME') ?? backendId,
     BACKEND_TAGS: tagsRaw
-      .split(",")
+      .split(',')
       .map((t) => t.trim())
       .filter(Boolean),
-    PUBLIC_BASE_URL: stripSlash(env("PUBLIC_BASE_URL") ?? env("VACPS_PUBLIC_BASE_URL")),
-    CONTROL_PLANE_URL: stripSlash(env("CONTROL_PLANE_URL") ?? env("VACPS_CONTROL_PLANE_URL")),
-    AGENT_PRIVATE_KEY: env("AGENT_PRIVATE_KEY") ?? env("VACPS_AGENT_PRIVATE_KEY"),
-    AGENT_PUBLIC_KEY: env("AGENT_PUBLIC_KEY") ?? env("VACPS_AGENT_PUBLIC_KEY"),
+    PUBLIC_BASE_URL: stripSlash(env('PUBLIC_BASE_URL') ?? env('VACPS_PUBLIC_BASE_URL')),
+    CONTROL_PLANE_URL: stripSlash(env('CONTROL_PLANE_URL') ?? env('VACPS_CONTROL_PLANE_URL')),
+    AGENT_PRIVATE_KEY: env('AGENT_PRIVATE_KEY') ?? env('VACPS_AGENT_PRIVATE_KEY'),
+    AGENT_PUBLIC_KEY: env('AGENT_PUBLIC_KEY') ?? env('VACPS_AGENT_PUBLIC_KEY'),
     CONTROL_PLANE_PUBLIC_KEY:
-      env("CONTROL_PLANE_PUBLIC_KEY") ?? env("VACPS_CONTROL_PLANE_PUBLIC_KEY"),
-    REGISTRATION_TOKEN: env("REGISTRATION_TOKEN") ?? env("VACPS_REGISTRATION_TOKEN"),
-    REGISTRATION_INTERVAL_SECONDS: envInt("REGISTRATION_INTERVAL_SECONDS", 300, 60, 86_400),
+      env('CONTROL_PLANE_PUBLIC_KEY') ?? env('VACPS_CONTROL_PLANE_PUBLIC_KEY'),
+    REGISTRATION_TOKEN: env('REGISTRATION_TOKEN') ?? env('VACPS_REGISTRATION_TOKEN'),
+    REGISTRATION_INTERVAL_SECONDS: envInt('REGISTRATION_INTERVAL_SECONDS', 300, 60, 86_400),
     TELEMETRY_FALLBACK_INTERVAL_SECONDS: envInt(
-      "TELEMETRY_FALLBACK_INTERVAL_SECONDS",
+      'TELEMETRY_FALLBACK_INTERVAL_SECONDS',
       120,
       15,
       3600,
@@ -67,10 +67,10 @@ export function loadConfig(): AgentConfig {
 export function registrationConfigured(config: AgentConfig): boolean {
   return Boolean(
     config.CONTROL_PLANE_URL &&
-      config.PUBLIC_BASE_URL &&
-      config.AGENT_PRIVATE_KEY &&
-      config.AGENT_PUBLIC_KEY &&
-      config.BACKEND_ID,
+    config.PUBLIC_BASE_URL &&
+    config.AGENT_PRIVATE_KEY &&
+    config.AGENT_PUBLIC_KEY &&
+    config.BACKEND_ID,
   );
 }
 

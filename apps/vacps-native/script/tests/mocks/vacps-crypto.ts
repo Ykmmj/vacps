@@ -1,10 +1,10 @@
 /**
  * Node stand-in for vacps:crypto in vitest (OpenSSL path tested via C++ gtest).
  */
-import { createHash, randomBytes as nodeRandom } from "node:crypto";
+import { createHash, randomBytes as nodeRandom } from 'node:crypto';
 
 function toBuffer(data: string | ArrayBuffer | Uint8Array): Buffer {
-  if (typeof data === "string") return Buffer.from(data, "utf8");
+  if (typeof data === 'string') return Buffer.from(data, 'utf8');
   if (data instanceof ArrayBuffer) return Buffer.from(data);
   return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 }
@@ -15,40 +15,38 @@ export function randomBytes(n: number): ArrayBuffer {
 }
 
 export function sha256(data: string | ArrayBuffer | Uint8Array): ArrayBuffer {
-  const dig = createHash("sha256").update(toBuffer(data)).digest();
+  const dig = createHash('sha256').update(toBuffer(data)).digest();
   return dig.buffer.slice(dig.byteOffset, dig.byteOffset + dig.byteLength);
 }
 
 export function sha256Hex(data: string | ArrayBuffer | Uint8Array): string {
-  return createHash("sha256").update(toBuffer(data)).digest("hex");
+  return createHash('sha256').update(toBuffer(data)).digest('hex');
 }
 
 export function toHex(bytes: ArrayBuffer | Uint8Array): string {
-  return Buffer.from(toBuffer(bytes)).toString("hex");
+  return Buffer.from(toBuffer(bytes)).toString('hex');
 }
 
 export function fromHex(hex: string): ArrayBuffer {
-  const b = Buffer.from(hex, "hex");
+  const b = Buffer.from(hex, 'hex');
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 }
 
 export function base64Encode(data: string | ArrayBuffer | Uint8Array): string {
-  return toBuffer(data).toString("base64");
+  return toBuffer(data).toString('base64');
 }
 
 export function base64Decode(s: string): ArrayBuffer {
-  const b = Buffer.from(s, "base64");
+  const b = Buffer.from(s, 'base64');
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 }
 
 export function base64UrlEncode(data: string | ArrayBuffer | Uint8Array): string {
-  return toBuffer(data)
-    .toString("base64url")
-    .replace(/=+$/, "");
+  return toBuffer(data).toString('base64url').replace(/=+$/, '');
 }
 
 export function base64UrlDecode(s: string): ArrayBuffer {
-  const b = Buffer.from(s, "base64url");
+  const b = Buffer.from(s, 'base64url');
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 }
 

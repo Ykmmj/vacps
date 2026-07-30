@@ -1,17 +1,13 @@
-import type { CreateTaskInput, SchedulePolicy, TaskDispatch } from "@vacps/contracts";
-import { canonicalUtcIso, nextCronRunAtIso } from "@vacps/contracts";
-import * as host from "vacps:host";
-import * as log from "vacps:log";
+import type { CreateTaskInput, SchedulePolicy, TaskDispatch } from '@vacps/contracts';
+import { canonicalUtcIso, nextCronRunAtIso } from '@vacps/contracts';
+import * as host from 'vacps:host';
+import * as log from 'vacps:log';
 
-import type { ShellExecutor } from "../executor/shell-executor";
-import type { TaskStore } from "../storage/task-store";
-import { randomUuidV4 } from "../util/uuid";
-import { DEFAULT_SCHEDULE_POLICY, parseSchedulePolicy } from "./schedule-logic";
-import {
-  cronMatchesUtc,
-  SchedulerStore,
-  utcMinuteKey,
-} from "./scheduler-store";
+import type { ShellExecutor } from '../executor/shell-executor';
+import type { TaskStore } from '../storage/task-store';
+import { randomUuidV4 } from '../util/uuid';
+import { DEFAULT_SCHEDULE_POLICY, parseSchedulePolicy } from './schedule-logic';
+import { cronMatchesUtc, SchedulerStore, utcMinuteKey } from './scheduler-store';
 
 /**
  * Local inbox + single-flight worker (apps/vacps TaskQueue without BullMQ/Redis).
@@ -29,7 +25,7 @@ export class TaskQueue {
   }
 
   enqueue(task: TaskDispatch): { created: boolean } {
-    const created = this.store.createTask(task, "queued");
+    const created = this.store.createTask(task, 'queued');
     return { created };
   }
 
@@ -37,10 +33,7 @@ export class TaskQueue {
     return this.store.getTask(taskId);
   }
 
-  listLogs(
-    taskId: string,
-    opts?: { stream?: string; offset?: number; limit?: number },
-  ) {
+  listLogs(taskId: string, opts?: { stream?: string; offset?: number; limit?: number }) {
     return this.store.listLogs(taskId, opts);
   }
 
@@ -56,7 +49,7 @@ export class TaskQueue {
   } {
     const before = this.store.getTask(taskId);
     if (!before) {
-      return { cancelled: false, status: "not_found", already_terminal: true };
+      return { cancelled: false, status: 'not_found', already_terminal: true };
     }
     const ok = this.store.requestCancel(taskId);
     if (!ok) {
@@ -71,18 +64,18 @@ export class TaskQueue {
     const after = this.store.getTask(taskId);
     return {
       cancelled: true,
-      status: after?.status ?? "cancelled",
-      state: after?.status === "cancelled" ? "cancelled" : "cancelling",
+      status: after?.status ?? 'cancelled',
+      state: after?.status === 'cancelled' ? 'cancelled' : 'cancelling',
     };
   }
 
-  retry(taskId: string): { task_id: string; status: "queued"; retry_of_task_id: string } {
+  retry(taskId: string): { task_id: string; status: 'queued'; retry_of_task_id: string } {
     const newId = randomUuidV4();
     const enqueued = this.store.enqueueRetryOf(taskId, newId);
     if (!enqueued) {
-      throw new Error("Task not found.");
+      throw new Error('Task not found.');
     }
-    return { task_id: newId, status: "queued", retry_of_task_id: taskId };
+    return { task_id: newId, status: 'queued', retry_of_task_id: taskId };
   }
 
   /** Claim and run at most one queued task (single-flight). */
@@ -97,7 +90,7 @@ export class TaskQueue {
       log.info(`queue claim task=${claimed.task.task_id} kind=${claimed.task.kind}`);
       await this.executor.execute(claimed.task);
       const done = this.store.getTask(claimed.task.task_id);
-      log.info(`queue done task=${claimed.task.task_id} status=${done?.status ?? "?"}`);
+      log.info(`queue done task=${claimed.task.task_id} status=${done?.status ?? '?'}`);
       return true;
     } finally {
       this.pumpBusy = false;
@@ -177,10 +170,10 @@ export class TaskQueue {
     const dispatch = {
       ...input.task,
       task_id: taskId,
-      source: "schedule" as const,
+      source: 'schedule' as const,
       schedule_id: input.id,
     } as TaskDispatch;
-    this.store.createTask(dispatch, "queued");
+    this.store.createTask(dispatch, 'queued');
     return taskId;
   }
 
@@ -219,7 +212,7 @@ export class TaskQueue {
         const dispatch = {
           ...schedule.task,
           task_id: slot.occurrenceId,
-          source: "schedule" as const,
+          source: 'schedule' as const,
           schedule_id: schedule.id,
           idempotency_key: slot.occurrenceId,
         } as TaskDispatch;
@@ -235,7 +228,7 @@ export class TaskQueue {
       log.info(
         `scheduler claim id=${current.id} rev=${current.revision} ` +
           `scheduled_for=${result.plan.scheduledForRaw} ` +
-          `tasks=${result.slots.length} advanced=${result.advancedNext ?? "none"}`,
+          `tasks=${result.slots.length} advanced=${result.advancedNext ?? 'none'}`,
       );
 
       const scheduledFor =

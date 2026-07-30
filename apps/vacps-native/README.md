@@ -78,37 +78,37 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 
 ## Status
 
-| Piece | Status |
-|-------|--------|
-| Docker toolchain (+ proxy) | done |
-| CMake presets | done |
-| Boost 1.91.0 (FetchContent) | Asio/Beast 传输层（无 C++ 产品路由） |
-| SQLite 3.53.4 amalgamation | connection + PRAGMA only（业务表/SQL 归 JS `vacps:store`） |
-| spdlog 1.17.0 | stderr logger; `VACPS_LOG_LEVEL` / `--log-level` |
-| nlohmann/json 3.12.0 | HTTP JSON bodies |
-| QuickJS RAII + Asio Promise 桥 | `await_settled` + `notify_progress`（无 HostState） |
-| Native modules | `log` / `store` / `host` / `fs` / `process` / `crypto`（见 `docs/NATIVE_MODULES.md`） |
-| 业务 script（ESM） | 全部路由含 `/health` `/ready`；`--script` |
-| Listen `127.0.0.1:8788` | done |
-| OpenSSL（apk static） | Ed25519 / RAND / SHA-256 |
-| vacps:http outbound `request` | done（HTTP/HTTPS；CA fail-closed） |
-| Control-plane registration/telemetry | JS via `@vacps/contracts` + signed `http.request`；timer `tickControlPlane` |
-| Tasks inbox + pump | POST/GET/cancel/retry/logs；`command`/`shell` via `process.run`；contracts `taskDispatchSchema` |
-| Process group | `setpgid` + timeout/terminate `kill(-pgid)`（shell 子树） |
-| `vacps:process` | `run` + `start`/`read`/`write`/`terminate`（Host `ProcessRegistry`） |
-| `/exec/command` `/exec/shell` | JS `ProcessManager`（fire-and-wait） |
-| `/process/start_*` `/read` `/write` `/terminate` | 长驻进程 API |
-| Task mid-cancel | `POST /tasks/:id/cancel` → `process.terminate` 杀进程组 |
-| `/fs/*` | read/stat/list/write/mkdir/delete/move + glob/grep/edit/apply_patch |
-| `/capabilities` | 工具探测（`pi: false`，不接 Pi） |
-| `/metrics` + health shape | `/proc` 遥测；`backendHealthSchema` 对齐 |
-| `/schedulers/*` | SQLite；**绝对 `next_run_at` + `revision` CAS claim**；无 Redis |
-| Env | `CONTROL_PLANE_URL` / `PUBLIC_BASE_URL` / `BACKEND_ID` / `AGENT_*_KEY` / `REGISTRATION_TOKEN` / `CONTROL_PLANE_PUBLIC_KEY` / `VACPS_CA_BUNDLE` |
+| Piece                                            | Status                                                                                                                                         |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Docker toolchain (+ proxy)                       | done                                                                                                                                           |
+| CMake presets                                    | done                                                                                                                                           |
+| Boost 1.91.0 (FetchContent)                      | Asio/Beast 传输层（无 C++ 产品路由）                                                                                                           |
+| SQLite 3.53.4 amalgamation                       | connection + PRAGMA only（业务表/SQL 归 JS `vacps:store`）                                                                                     |
+| spdlog 1.17.0                                    | stderr logger; `VACPS_LOG_LEVEL` / `--log-level`                                                                                               |
+| nlohmann/json 3.12.0                             | HTTP JSON bodies                                                                                                                               |
+| QuickJS RAII + Asio Promise 桥                   | `await_settled` + `notify_progress`（无 HostState）                                                                                            |
+| Native modules                                   | `log` / `store` / `host` / `fs` / `process` / `crypto`（见 `docs/NATIVE_MODULES.md`）                                                          |
+| 业务 script（ESM）                               | 全部路由含 `/health` `/ready`；`--script`                                                                                                      |
+| Listen `127.0.0.1:8788`                          | done                                                                                                                                           |
+| OpenSSL（apk static）                            | Ed25519 / RAND / SHA-256                                                                                                                       |
+| vacps:http outbound `request`                    | done（HTTP/HTTPS；CA fail-closed）                                                                                                             |
+| Control-plane registration/telemetry             | JS via `@vacps/contracts` + signed `http.request`；timer `tickControlPlane`                                                                    |
+| Tasks inbox + pump                               | POST/GET/cancel/retry/logs；`command`/`shell` via `process.run`；contracts `taskDispatchSchema`                                                |
+| Process group                                    | `setpgid` + timeout/terminate `kill(-pgid)`（shell 子树）                                                                                      |
+| `vacps:process`                                  | `run` + `start`/`read`/`write`/`terminate`（Host `ProcessRegistry`）                                                                           |
+| `/exec/command` `/exec/shell`                    | JS `ProcessManager`（fire-and-wait）                                                                                                           |
+| `/process/start_*` `/read` `/write` `/terminate` | 长驻进程 API                                                                                                                                   |
+| Task mid-cancel                                  | `POST /tasks/:id/cancel` → `process.terminate` 杀进程组                                                                                        |
+| `/fs/*`                                          | read/stat/list/write/mkdir/delete/move + glob/grep/edit/apply_patch                                                                            |
+| `/capabilities`                                  | 工具探测（`pi: false`，不接 Pi）                                                                                                               |
+| `/metrics` + health shape                        | `/proc` 遥测；`backendHealthSchema` 对齐                                                                                                       |
+| `/schedulers/*`                                  | SQLite；**绝对 `next_run_at` + `revision` CAS claim**；无 Redis                                                                                |
+| Env                                              | `CONTROL_PLANE_URL` / `PUBLIC_BASE_URL` / `BACKEND_ID` / `AGENT_*_KEY` / `REGISTRATION_TOKEN` / `CONTROL_PLANE_PUBLIC_KEY` / `VACPS_CA_BUNDLE` |
 
 ### Product stance
 
 **vacps-native 直接替代 Node `apps/vacps`**（不做双端口影子部署）。  
-**不接 Pi**（协议里若收到 `kind=agent` 任务直接 409）。  
+**不接 Pi**（协议里若收到 `kind=agent` 任务直接 409）。
 
 **调度状态机（绝对时刻）**
 
@@ -120,19 +120,19 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 节点：now_ms >= next → enqueue → advance from scheduled_for
 ```
 
-- wire 带 `revision` / `policy` / `next_run_at`；同 rev 游标只向前合并；更高 rev 可合法回拨  
-- occurrence：`schedule_id:revision:scheduled_for_ms` 作 `task_id`（确定性幂等）  
-- misfire：`run_once` | `skip` | `catch_up`（有 `max_catchup_runs` 硬上限）  
-- `last_fired_minute` 仅观测；一致性靠 CAS + 事务  
-- claim 后 agent 签名 `POST /api/schedules/:id/occurrences/ack`；**CP 用本侧 Intl 重算权威 next**（`locally_advanced_to` 只诊断）  
-- 绝对时间是执行协议；IANA 投影在 CP（native 本地 advance = 离线连续，非最终权威）  
+- wire 带 `revision` / `policy` / `next_run_at`；同 rev 游标只向前合并；更高 rev 可合法回拨
+- occurrence：`schedule_id:revision:scheduled_for_ms` 作 `task_id`（确定性幂等）
+- misfire：`run_once` | `skip` | `catch_up`（有 `max_catchup_runs` 硬上限）
+- `last_fired_minute` 仅观测；一致性靠 CAS + 事务
+- claim 后 agent 签名 `POST /api/schedules/:id/occurrences/ack`；**CP 用本侧 Intl 重算权威 next**（`locally_advanced_to` 只诊断）
+- 绝对时间是执行协议；IANA 投影在 CP（native 本地 advance = 离线连续，非最终权威）
 - 语义冻结见 `@vacps/contracts` `schedule-semantics`：misfire / DST gap=skip / overlap=双 UTC 都可触发 / revision merge
 
 ### Remaining polish (vs Node)
 
-| Item | Notes |
-|------|--------|
-| Pi | 不做 |
+| Item                     | Notes                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| Pi                       | 不做                                                                           |
 | 控制面 schedule fixtures | `apps/control-worker/tests/fixtures/schedule-control-plane.ts` + ack/e2e tests |
 
 Smoke after build:
@@ -145,8 +145,6 @@ curl -sS http://127.0.0.1:8788/health
 curl -sS http://127.0.0.1:8788/ready
 curl -sS http://127.0.0.1:8788/script/ping
 ```
-
-
 
 ## Layout
 

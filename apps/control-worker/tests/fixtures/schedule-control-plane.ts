@@ -86,8 +86,7 @@ export function fixtureOccurrenceAck(opts?: {
     revision,
     scheduled_for,
     enqueued_count: opts?.enqueued_count ?? 1,
-    occurrence_id:
-      opts?.occurrence_id ?? `${FIXTURE_SCHEDULE_ID}:${revision}:${ms}`,
+    occurrence_id: opts?.occurrence_id ?? `${FIXTURE_SCHEDULE_ID}:${revision}:${ms}`,
     ...(opts?.locally_advanced_to
       ? { locally_advanced_to: opts.locally_advanced_to }
       : { locally_advanced_to: '2026-08-01T01:00:00.000Z' }),

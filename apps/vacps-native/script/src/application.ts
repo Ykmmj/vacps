@@ -1,37 +1,37 @@
-import { taskDispatchSchema } from "@vacps/contracts";
-import * as host from "vacps:host";
-import * as http from "vacps:http";
-import * as log from "vacps:log";
-import * as store from "vacps:store";
+import { taskDispatchSchema } from '@vacps/contracts';
+import * as host from 'vacps:host';
+import * as http from 'vacps:http';
+import * as log from 'vacps:log';
+import * as store from 'vacps:store';
 
 import {
   loadConfig,
   registrationConfigured,
   telemetryConfigured,
   type AgentConfig,
-} from "./config";
-import type { HostRequest, HostResponse } from "./contracts/http";
-import type { TaskRequest, TaskResult } from "./contracts/task";
-import { TaskState } from "./contracts/task";
-import { ShellExecutor } from "./executor/shell-executor";
-import { TaskQueue } from "./queue/task-queue";
-import { SchedulerStore } from "./queue/scheduler-store";
+} from './config';
+import type { HostRequest, HostResponse } from './contracts/http';
+import type { TaskRequest, TaskResult } from './contracts/task';
+import { TaskState } from './contracts/task';
+import { ShellExecutor } from './executor/shell-executor';
+import { TaskQueue } from './queue/task-queue';
+import { SchedulerStore } from './queue/scheduler-store';
 import {
   registerWithControlPlane,
   reportTelemetry,
-} from "./registration/control-plane-registration";
-import { reportScheduleOccurrenceAck } from "./registration/schedule-occurrence-ack";
+} from './registration/control-plane-registration';
+import { reportScheduleOccurrenceAck } from './registration/schedule-occurrence-ack';
 import {
   loadControlPlaneState,
   saveControlPlaneState,
   type ControlPlaneState,
   type RegistrationStatus,
-} from "./registration/control-plane-state";
-import { ProcessManager } from "./runtime/process-manager";
-import { createServer } from "./server/app";
-import type { App } from "./server/router";
-import { TaskStore } from "./storage/task-store";
-import { NativeTelemetryCollector } from "./telemetry/native-telemetry";
+} from './registration/control-plane-state';
+import { ProcessManager } from './runtime/process-manager';
+import { createServer } from './server/app';
+import type { App } from './server/router';
+import { TaskStore } from './storage/task-store';
+import { NativeTelemetryCollector } from './telemetry/native-telemetry';
 
 type Store = ReturnType<typeof store.open>;
 type HttpServer = ReturnType<typeof http.createServer>;
@@ -51,7 +51,7 @@ export class Application {
   private server: HttpServer | undefined;
   private ready = false;
   private cpState: ControlPlaneState = {
-    registrationStatus: "unknown",
+    registrationStatus: 'unknown',
     telemetryIntervalSeconds: 120,
   };
   private nextRegistrationMs = 0;
@@ -92,13 +92,13 @@ export class Application {
     this.ready = true;
 
     log.info(
-      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path()} listening=${this.server.isListening()} controlPlane=${this.config.CONTROL_PLANE_URL ?? "off"}`,
+      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path()} listening=${this.server.isListening()} controlPlane=${this.config.CONTROL_PLANE_URL ?? 'off'}`,
     );
 
     if (registrationConfigured(this.config)) {
       await this.runRegistration();
     } else {
-      this.cpState = { ...this.cpState, registrationStatus: "disabled" };
+      this.cpState = { ...this.cpState, registrationStatus: 'disabled' };
       saveControlPlaneState(this.db, this.cpState);
     }
     this.nextTelemetryMs = host.nowMs() + 5_000;
@@ -108,9 +108,9 @@ export class Application {
     if (!this.httpApp) {
       return {
         status: 503,
-        headers: { "content-type": "application/json; charset=utf-8" },
+        headers: { 'content-type': 'application/json; charset=utf-8' },
         body: JSON.stringify({
-          error: { code: "service_unavailable", message: "application not initialized" },
+          error: { code: 'service_unavailable', message: 'application not initialized' },
         }),
       };
     }
@@ -119,10 +119,10 @@ export class Application {
 
   async runTask(task: TaskRequest): Promise<TaskResult> {
     if (!this.ready || !this.queue || !this.store) {
-      throw new Error("application not initialized");
+      throw new Error('application not initialized');
     }
     try {
-      const parsed = taskDispatchSchema.safeParse(JSON.parse(task.payload || "{}"));
+      const parsed = taskDispatchSchema.safeParse(JSON.parse(task.payload || '{}'));
       if (parsed.success) {
         this.queue.enqueue(parsed.data);
         await this.queue.pumpOnce();
@@ -130,12 +130,12 @@ export class Application {
         return {
           id: task.id,
           state:
-            done?.status === "succeeded"
+            done?.status === 'succeeded'
               ? TaskState.succeeded
-              : done?.status === "cancelled"
+              : done?.status === 'cancelled'
                 ? TaskState.cancelled
                 : TaskState.failed,
-          message: done?.error?.message ?? done?.status ?? "done",
+          message: done?.error?.message ?? done?.status ?? 'done',
         };
       }
     } catch {
@@ -144,7 +144,7 @@ export class Application {
     return {
       id: task.id,
       state: TaskState.failed,
-      message: "invalid task payload; expected TaskDispatch JSON",
+      message: 'invalid task payload; expected TaskDispatch JSON',
     };
   }
 
@@ -168,9 +168,7 @@ export class Application {
           scheduled_for: ack.scheduled_for,
           enqueued_count: ack.enqueued_count,
           claimed_at: this.isoNow(),
-          ...(ack.locally_advanced_to
-            ? { locally_advanced_to: ack.locally_advanced_to }
-            : {}),
+          ...(ack.locally_advanced_to ? { locally_advanced_to: ack.locally_advanced_to } : {}),
           ...(ack.occurrence_id ? { occurrence_id: ack.occurrence_id } : {}),
         });
       }
@@ -183,7 +181,7 @@ export class Application {
   }
 
   async shutdown(): Promise<void> {
-    log.info("application shutdown");
+    log.info('application shutdown');
     if (this.server) {
       this.server.close();
       this.server = undefined;
@@ -216,8 +214,7 @@ export class Application {
       if (this.cpState.lastTelemetryAt) next.lastTelemetryAt = this.cpState.lastTelemetryAt;
       this.cpState = next;
       saveControlPlaneState(this.db, this.cpState);
-      this.nextRegistrationMs =
-        host.nowMs() + this.config.REGISTRATION_INTERVAL_SECONDS * 1000;
+      this.nextRegistrationMs = host.nowMs() + this.config.REGISTRATION_INTERVAL_SECONDS * 1000;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log.warn(`registration failed: ${msg}`);
@@ -242,7 +239,8 @@ export class Application {
         lastTelemetryAt: this.isoNow(),
         telemetryIntervalSeconds: seconds,
       };
-      if (this.cpState.lastRegistrationAt) next.lastRegistrationAt = this.cpState.lastRegistrationAt;
+      if (this.cpState.lastRegistrationAt)
+        next.lastRegistrationAt = this.cpState.lastRegistrationAt;
       this.cpState = next;
       saveControlPlaneState(this.db, this.cpState);
       this.nextTelemetryMs = host.nowMs() + seconds * 1000;
@@ -251,21 +249,20 @@ export class Application {
       log.warn(`telemetry failed: ${msg}`);
       this.cpState = { ...this.cpState, lastError: msg };
       saveControlPlaneState(this.db, this.cpState);
-      this.nextTelemetryMs =
-        host.nowMs() + this.config.TELEMETRY_FALLBACK_INTERVAL_SECONDS * 1000;
+      this.nextTelemetryMs = host.nowMs() + this.config.TELEMETRY_FALLBACK_INTERVAL_SECONDS * 1000;
     }
   }
 }
 
 function toRegistrationStatus(status: string | undefined): RegistrationStatus {
   if (
-    status === "pending" ||
-    status === "approved" ||
-    status === "rejected" ||
-    status === "disabled" ||
-    status === "unknown"
+    status === 'pending' ||
+    status === 'approved' ||
+    status === 'rejected' ||
+    status === 'disabled' ||
+    status === 'unknown'
   ) {
     return status;
   }
-  return "unknown";
+  return 'unknown';
 }

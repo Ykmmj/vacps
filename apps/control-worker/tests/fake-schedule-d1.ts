@@ -74,10 +74,7 @@ export class FakeScheduleD1 {
         string,
       ];
       const row = this.schedules.find(
-        (s) =>
-          s.id === id &&
-          s.revision === revision &&
-          s.next_run_at === next_token,
+        (s) => s.id === id && s.revision === revision && s.next_run_at === next_token,
       );
       if (!row) return { first: null, all: [], changes: 0 };
       row.last_run_at = last_run_at;
@@ -111,9 +108,8 @@ export class FakeScheduleD1 {
     if (sql.includes('FROM schedules WHERE backend_id = ? AND idempotency_key = ?')) {
       const [backend_id, key] = binds;
       const row =
-        this.schedules.find(
-          (s) => s.backend_id === backend_id && s.idempotency_key === key,
-        ) ?? null;
+        this.schedules.find((s) => s.backend_id === backend_id && s.idempotency_key === key) ??
+        null;
       return { first: row, all: row ? [row] : [], changes: 0 };
     }
 

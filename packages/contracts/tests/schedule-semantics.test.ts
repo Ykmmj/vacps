@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  nextCronRunAfter,
-  nextCronRunAtIso,
-} from '../src/cron-next.js';
+import { nextCronRunAfter, nextCronRunAtIso } from '../src/cron-next.js';
 import {
   DEFAULT_SCHEDULE_POLICY,
   DST_POLICY_SPEC,
@@ -52,11 +49,7 @@ describe('DST overlap (fall back)', () => {
     expect(first).toBe('2024-11-03T08:30:00.000Z');
 
     // Second walk from first → second 01:30 PST = 09:30 UTC
-    const second = nextCronRunAtIso(
-      '30 1 * * *',
-      'America/Los_Angeles',
-      new Date(first!),
-    );
+    const second = nextCronRunAtIso('30 1 * * *', 'America/Los_Angeles', new Date(first!));
     expect(second).toBe('2024-11-03T09:30:00.000Z');
   });
 });

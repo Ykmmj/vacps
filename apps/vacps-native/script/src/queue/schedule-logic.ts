@@ -5,7 +5,7 @@
  * Frozen product rules: @vacps/contracts schedule-semantics
  * (misfire, DST gap/overlap, revision merge).
  */
-import type { SchedulePolicy } from "@vacps/contracts";
+import type { SchedulePolicy } from '@vacps/contracts';
 import {
   DEFAULT_SCHEDULE_POLICY as CONTRACT_DEFAULT_POLICY,
   MAX_SCHEDULE_ADVANCE_STEPS,
@@ -13,7 +13,7 @@ import {
   laterUtcIso,
   nextCronRunAtIso,
   scheduleOccurrenceId,
-} from "@vacps/contracts";
+} from '@vacps/contracts';
 
 export const DEFAULT_SCHEDULE_POLICY: SchedulePolicy = { ...CONTRACT_DEFAULT_POLICY };
 
@@ -21,21 +21,21 @@ export const DEFAULT_SCHEDULE_POLICY: SchedulePolicy = { ...CONTRACT_DEFAULT_POL
 export const MAX_CATCHUP_STEPS_PER_PUMP = MAX_SCHEDULE_ADVANCE_STEPS;
 
 export function parseSchedulePolicy(raw: unknown): SchedulePolicy {
-  if (!raw || typeof raw !== "object") return { ...DEFAULT_SCHEDULE_POLICY };
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_SCHEDULE_POLICY };
   const o = raw as Record<string, unknown>;
   const misfire =
-    o.misfire === "skip" || o.misfire === "run_once" || o.misfire === "catch_up"
+    o.misfire === 'skip' || o.misfire === 'run_once' || o.misfire === 'catch_up'
       ? o.misfire
       : DEFAULT_SCHEDULE_POLICY.misfire;
   const concurrency =
-    o.concurrency === "allow" ||
-    o.concurrency === "forbid" ||
-    o.concurrency === "replace" ||
-    o.concurrency === "queue"
+    o.concurrency === 'allow' ||
+    o.concurrency === 'forbid' ||
+    o.concurrency === 'replace' ||
+    o.concurrency === 'queue'
       ? o.concurrency
       : DEFAULT_SCHEDULE_POLICY.concurrency;
   const max =
-    typeof o.max_catchup_runs === "number" && Number.isInteger(o.max_catchup_runs)
+    typeof o.max_catchup_runs === 'number' && Number.isInteger(o.max_catchup_runs)
       ? Math.min(100, Math.max(0, o.max_catchup_runs))
       : DEFAULT_SCHEDULE_POLICY.max_catchup_runs;
   return { concurrency, misfire, max_catchup_runs: max };
@@ -45,11 +45,7 @@ export function parseSchedulePolicy(raw: unknown): SchedulePolicy {
  * Deterministic occurrence id: schedule_id:revision:scheduled_for_ms
  * (ms epoch — never raw ISO, so formatting variants cannot split IDs).
  */
-export function occurrenceId(
-  scheduleId: string,
-  revision: number,
-  scheduledForMs: number,
-): string {
+export function occurrenceId(scheduleId: string, revision: number, scheduledForMs: number): string {
   return scheduleOccurrenceId(scheduleId, revision, scheduledForMs);
 }
 
@@ -76,9 +72,9 @@ export interface SchedulerMergeIncoming {
 }
 
 export type SchedulerMergeResult =
-  | { action: "ignore" }
+  | { action: 'ignore' }
   | {
-      action: "apply";
+      action: 'apply';
       revision: number;
       cron: string;
       timezone: string;
@@ -101,11 +97,9 @@ export function mergeSchedulerWire(
 ): SchedulerMergeResult {
   if (!local) {
     const next =
-      incoming.enabled && incoming.nextRunAt
-        ? canonicalUtcIso(incoming.nextRunAt)
-        : undefined;
+      incoming.enabled && incoming.nextRunAt ? canonicalUtcIso(incoming.nextRunAt) : undefined;
     const base = {
-      action: "apply" as const,
+      action: 'apply' as const,
       revision: Math.max(1, incoming.revision),
       cron: incoming.cron,
       timezone: incoming.timezone,
@@ -117,17 +111,15 @@ export function mergeSchedulerWire(
   }
 
   if (incoming.revision < local.revision) {
-    return { action: "ignore" };
+    return { action: 'ignore' };
   }
 
   if (incoming.revision > local.revision) {
     // Full config replace. Empty next is accepted (caller may recompute).
     const next =
-      incoming.enabled && incoming.nextRunAt
-        ? canonicalUtcIso(incoming.nextRunAt)
-        : undefined;
+      incoming.enabled && incoming.nextRunAt ? canonicalUtcIso(incoming.nextRunAt) : undefined;
     const base = {
-      action: "apply" as const,
+      action: 'apply' as const,
       revision: incoming.revision,
       cron: incoming.cron,
       timezone: incoming.timezone,
@@ -145,7 +137,7 @@ export function mergeSchedulerWire(
   } else if (
     incoming.nextRunAt === null ||
     incoming.nextRunAt === undefined ||
-    incoming.nextRunAt === ""
+    incoming.nextRunAt === ''
   ) {
     // Do not clear local cursor on empty incoming.
     nextRunAt = local.nextRunAt ? canonicalUtcIso(local.nextRunAt) : undefined;
@@ -156,7 +148,7 @@ export function mergeSchedulerWire(
   }
 
   const base = {
-    action: "apply" as const,
+    action: 'apply' as const,
     revision: local.revision,
     cron: incoming.cron,
     timezone: incoming.timezone,
@@ -203,10 +195,7 @@ export function planMisfire(input: {
     input.maxSteps ?? MAX_CATCHUP_STEPS_PER_PUMP,
     MAX_CATCHUP_STEPS_PER_PUMP,
   );
-  const maxCatchup = Math.min(
-    Math.max(0, input.policy.max_catchup_runs),
-    maxSteps,
-  );
+  const maxCatchup = Math.min(Math.max(0, input.policy.max_catchup_runs), maxSteps);
 
   // Walk missed slots starting at stored next (inclusive).
   const missed: string[] = [];
@@ -229,21 +218,17 @@ export function planMisfire(input: {
   let advancedNext: string | null = null;
 
   switch (input.policy.misfire) {
-    case "skip": {
+    case 'skip': {
       enqueueSlots = [];
       // Advance to first slot strictly > now.
       advancedNext = advancePastNow(input.cron, input.timezone, first, input.nowMs, maxSteps);
       break;
     }
-    case "catch_up": {
+    case 'catch_up': {
       const n = Math.max(1, maxCatchup);
       enqueueSlots = missed.slice(0, n);
       const last = enqueueSlots[enqueueSlots.length - 1]!;
-      const afterLast = nextCronRunAtIso(
-        input.cron,
-        input.timezone,
-        new Date(Date.parse(last)),
-      );
+      const afterLast = nextCronRunAtIso(input.cron, input.timezone, new Date(Date.parse(last)));
       // If still behind now and we hit cap, leave cursor at afterLast (remaining backlog next tick).
       // If afterLast still <= now and we consumed all missed in plan walk, jump past now.
       if (afterLast && Date.parse(afterLast) > input.nowMs) {
@@ -258,16 +243,10 @@ export function planMisfire(input: {
       }
       break;
     }
-    case "run_once":
+    case 'run_once':
     default: {
       enqueueSlots = [first];
-      advancedNext = advancePastNow(
-        input.cron,
-        input.timezone,
-        first,
-        input.nowMs,
-        maxSteps,
-      );
+      advancedNext = advancePastNow(input.cron, input.timezone, first, input.nowMs, maxSteps);
       break;
     }
   }

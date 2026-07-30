@@ -90,8 +90,7 @@ export function authoritativeNextAfterOccurrence(
   misfire: 'skip' | 'run_once' | 'catch_up' = 'run_once',
   enqueuedCount = 1,
 ): string | undefined {
-  const from =
-    typeof scheduledFor === 'string' ? Date.parse(scheduledFor) : scheduledFor.getTime();
+  const from = typeof scheduledFor === 'string' ? Date.parse(scheduledFor) : scheduledFor.getTime();
   if (!Number.isFinite(from)) return undefined;
   const nowMs = now.getTime();
 

@@ -1,6 +1,6 @@
-import * as fs from "vacps:fs";
-import * as host from "vacps:host";
-import * as process from "vacps:process";
+import * as fs from 'vacps:fs';
+import * as host from 'vacps:host';
+import * as process from 'vacps:process';
 
 /** Process user home/shell probe (not Pi / task.kind). */
 export interface ShellEnvironment {
@@ -21,9 +21,9 @@ export interface ShellEnvironment {
  * Probe HOME / bash login environment for shell.exec health.
  */
 export async function probeShellEnvironment(): Promise<ShellEnvironment> {
-  const user = host.getenv("USER") ?? host.getenv("LOGNAME") ?? "vacps";
-  const home = host.getenv("HOME") ?? `/home/${user}`;
-  const shell = host.getenv("SHELL") ?? "/bin/bash";
+  const user = host.getenv('USER') ?? host.getenv('LOGNAME') ?? 'vacps';
+  const home = host.getenv('HOME') ?? `/home/${user}`;
+  const shell = host.getenv('SHELL') ?? '/bin/bash';
   const bashrc = `${home}/.bashrc`;
   const notes: string[] = [];
 
@@ -33,7 +33,7 @@ export async function probeShellEnvironment(): Promise<ShellEnvironment> {
 
   try {
     const st = await fs.stat(home);
-    home_accessible = st.type === "directory" && st.readable;
+    home_accessible = st.type === 'directory' && st.readable;
     home_writable = st.writable;
     if (!home_accessible) {
       notes.push(`HOME ${home} is not accessible.`);
@@ -62,14 +62,14 @@ export async function probeShellEnvironment(): Promise<ShellEnvironment> {
   let gid = 0;
   try {
     const r = await process.run(
-      ["/bin/bash", "-lc", 'test -n "$HOME" && test -x "$HOME" && id -un && id -u && id -g'],
+      ['/bin/bash', '-lc', 'test -n "$HOME" && test -x "$HOME" && id -un && id -u && id -g'],
       { timeoutMs: 3_000 },
     );
-    if (r.stderr.includes("Permission denied")) {
+    if (r.stderr.includes('Permission denied')) {
       notes.push(`bash -lc reported: ${r.stderr.trim()}`);
     } else if (r.exitCode === 0 && r.stdout.trim()) {
       shell_smoke_ok = true;
-      const lines = r.stdout.trim().split("\n");
+      const lines = r.stdout.trim().split('\n');
       if (lines.length >= 3) {
         uid = Number(lines[1]) || 0;
         gid = Number(lines[2]) || 0;

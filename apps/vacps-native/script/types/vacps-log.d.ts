@@ -1,4 +1,4 @@
-declare module "vacps:log" {
+declare module 'vacps:log' {
   export function trace(message: string): void;
   export function debug(message: string): void;
   export function info(message: string): void;

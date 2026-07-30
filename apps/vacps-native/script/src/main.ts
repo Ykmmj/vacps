@@ -1,6 +1,6 @@
-import { Application } from "./application";
-import type { HostRequest, HostResponse } from "./contracts/http";
-import type { TaskRequest, TaskResult } from "./contracts/task";
+import { Application } from './application';
+import type { HostRequest, HostResponse } from './contracts/http';
+import type { TaskRequest, TaskResult } from './contracts/task';
 
 /**
  * Host entry exports (C++ invoke_export).
@@ -10,7 +10,7 @@ let application: Application | undefined;
 
 export async function initialize(): Promise<void> {
   if (application !== undefined) {
-    throw new Error("VACPS script is already initialized");
+    throw new Error('VACPS script is already initialized');
   }
   const instance = new Application();
   await instance.initialize();
@@ -19,14 +19,14 @@ export async function initialize(): Promise<void> {
 
 export async function handleRequest(request: HostRequest): Promise<HostResponse> {
   if (application === undefined) {
-    throw new Error("VACPS script is not initialized");
+    throw new Error('VACPS script is not initialized');
   }
   return application.handleRequest(request);
 }
 
 export async function runTask(task: TaskRequest): Promise<TaskResult> {
   if (application === undefined) {
-    throw new Error("VACPS script is not initialized");
+    throw new Error('VACPS script is not initialized');
   }
   return application.runTask(task);
 }

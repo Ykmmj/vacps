@@ -1,4 +1,4 @@
-declare module "vacps:host" {
+declare module 'vacps:host' {
   /** Thin process info (not HTTP / SQL / process / fs). */
   export function version(): string;
   export function dataDir(): string;

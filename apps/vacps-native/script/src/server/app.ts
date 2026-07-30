@@ -1,17 +1,17 @@
-import { createTaskSchema, taskDispatchSchema, isTerminalTaskStatus } from "@vacps/contracts";
-import * as host from "vacps:host";
+import { createTaskSchema, taskDispatchSchema, isTerminalTaskStatus } from '@vacps/contracts';
+import * as host from 'vacps:host';
 
-import type { AgentConfig } from "../config";
-import { parseSchedulePolicy } from "../queue/schedule-logic";
-import type { TaskQueue } from "../queue/task-queue";
-import type { ControlPlaneState } from "../registration/control-plane-state";
-import { probeShellEnvironment } from "../runtime/shell-environment";
-import * as files from "../runtime/files";
-import { hashRequest, IdempotencyStore } from "../runtime/idempotency";
-import type { ProcessManager } from "../runtime/process-manager";
-import { verifyControlPlaneRequest } from "../security/control-plane-verify";
-import type { NativeTelemetryCollector } from "../telemetry/native-telemetry";
-import { createApp, type App, type Reply } from "./router";
+import type { AgentConfig } from '../config';
+import { parseSchedulePolicy } from '../queue/schedule-logic';
+import type { TaskQueue } from '../queue/task-queue';
+import type { ControlPlaneState } from '../registration/control-plane-state';
+import { probeShellEnvironment } from '../runtime/shell-environment';
+import * as files from '../runtime/files';
+import { hashRequest, IdempotencyStore } from '../runtime/idempotency';
+import type { ProcessManager } from '../runtime/process-manager';
+import { verifyControlPlaneRequest } from '../security/control-plane-verify';
+import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
+import { createApp, type App, type Reply } from './router';
 
 export interface CreateServerInput {
   config: AgentConfig;
@@ -30,7 +30,7 @@ function numberOr(value: string | undefined, fallback: number): number {
 }
 
 function errorStatus(error: unknown, fallback = 400): number {
-  if (error && typeof error === "object" && "statusCode" in error) {
+  if (error && typeof error === 'object' && 'statusCode' in error) {
     const n = Number((error as { statusCode: unknown }).statusCode);
     if (Number.isInteger(n) && n >= 400 && n < 600) return n;
   }
@@ -40,9 +40,9 @@ function errorStatus(error: unknown, fallback = 400): number {
 function errorBody(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   const code =
-    error && typeof error === "object" && "code" in error
+    error && typeof error === 'object' && 'code' in error
       ? String((error as { code: unknown }).code)
-      : "runtime_error";
+      : 'runtime_error';
   return { error: { code, message } };
 }
 
@@ -60,19 +60,19 @@ export async function createServer(input: CreateServerInput): Promise<App> {
 
   // Public probes skip signature; mutating control-plane API requires it when key is set.
   const publicPaths = new Set([
-    "/health",
-    "/ready",
-    "/script/ping",
-    "/status",
-    "/info",
-    "/capabilities",
-    "/metrics",
+    '/health',
+    '/ready',
+    '/script/ping',
+    '/status',
+    '/info',
+    '/capabilities',
+    '/metrics',
   ]);
 
-  app.addHook("preValidation", async (request, reply) => {
+  app.addHook('preValidation', async (request, reply) => {
     if (publicPaths.has(request.path)) return undefined;
-    if (request.method === "GET" && request.path.startsWith("/tasks")) return undefined;
-    if (request.method === "GET" && request.path.startsWith("/fs/")) return undefined;
+    if (request.method === 'GET' && request.path.startsWith('/tasks')) return undefined;
+    if (request.method === 'GET' && request.path.startsWith('/fs/')) return undefined;
 
     const pub = input.config.CONTROL_PLANE_PUBLIC_KEY;
     if (!pub) return undefined;
@@ -83,13 +83,13 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         method: request.method,
         path: request.path,
         headers: request.headers,
-        body: request.raw.body ?? "",
+        body: request.raw.body ?? '',
       });
       if (!input.queue.claimNonce(nonce)) {
         return reply.code(401).send({
           error: {
-            code: "replayed_request",
-            message: "A control-plane request may only be used once.",
+            code: 'replayed_request',
+            message: 'A control-plane request may only be used once.',
           },
         });
       }
@@ -97,17 +97,15 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     } catch (error) {
       return reply.code(401).send({
         error: {
-          code: "unauthorized",
+          code: 'unauthorized',
           message:
-            error instanceof Error
-              ? error.message
-              : "A valid control-plane signature is required.",
+            error instanceof Error ? error.message : 'A valid control-plane signature is required.',
         },
       });
     }
   });
 
-  app.get("/health", async () => {
+  app.get('/health', async () => {
     const status = await input.telemetry.collect();
     const shellEnv = await probeShellEnvironment();
     return {
@@ -117,49 +115,49 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     };
   });
 
-  app.get("/metrics", async () => {
+  app.get('/metrics', async () => {
     const status = await input.telemetry.collect();
     return status.metrics ?? {};
   });
 
-  app.get("/ready", async (_request, reply) => {
+  app.get('/ready', async (_request, reply) => {
     const ready = input.isReady();
     const state = input.getControlPlaneState();
     return reply.code(ready ? 200 : 503).send({
       ready,
-      database: ready ? "ok" : "error",
-      runtime: ready ? "ok" : "error",
-      listener: ready ? "ok" : "error",
+      database: ready ? 'ok' : 'error',
+      runtime: ready ? 'ok' : 'error',
+      listener: ready ? 'ok' : 'error',
       registration: state.registrationStatus,
     });
   });
 
-  app.get("/script/ping", async (request) => ({
+  app.get('/script/ping', async (request) => ({
     ok: true,
-    service: "vacps-script",
+    service: 'vacps-script',
     hostVersion: host.version(),
     requestId: request.requestId,
   }));
 
-  app.get("/status", async () => ({
+  app.get('/status', async () => ({
     registration: input.getControlPlaneState(),
     controlPlaneConfigured: Boolean(input.config.CONTROL_PLANE_URL),
     ...(await input.telemetry.collect()),
   }));
 
-  app.get("/info", async () => ({
+  app.get('/info', async () => ({
     backendId: input.config.BACKEND_ID,
-    runMode: "api+worker",
+    runMode: 'api+worker',
     redis: false,
     pi: false,
     shell_environment: await probeShellEnvironment(),
   }));
 
   // ── Tasks ─────────────────────────────────────────────────────────
-  app.post("/tasks", async (request, reply) => {
+  app.post('/tasks', async (request, reply) => {
     if (!input.isReady()) {
       return reply.code(503).send({
-        error: { code: "service_unavailable", message: "application not initialized" },
+        error: { code: 'service_unavailable', message: 'application not initialized' },
       });
     }
 
@@ -167,20 +165,20 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     if (!parsed.success) {
       return reply
         .code(400)
-        .send({ error: { code: "invalid_task", message: parsed.error.message } });
+        .send({ error: { code: 'invalid_task', message: parsed.error.message } });
     }
     if (parsed.data.backend_id !== input.config.BACKEND_ID) {
       return reply
         .code(409)
-        .send({ error: { code: "backend_mismatch", message: "Task targets another backend." } });
+        .send({ error: { code: 'backend_mismatch', message: 'Task targets another backend.' } });
     }
-    if (parsed.data.kind === "agent") {
+    if (parsed.data.kind === 'agent') {
       // Protocol kind from @vacps/contracts; native never runs Pi.
       return reply.code(409).send({
         error: {
-          code: "capability_unavailable",
-          message: "Pi runtime is not available on this backend.",
-          details: { capability: "pi" },
+          code: 'capability_unavailable',
+          message: 'Pi runtime is not available on this backend.',
+          details: { capability: 'pi' },
         },
       });
     }
@@ -203,18 +201,18 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     const stored = input.queue.getTask(parsed.data.task_id);
     return reply.code(202).send({
       task_id: parsed.data.task_id,
-      status: stored?.status ?? "queued",
+      status: stored?.status ?? 'queued',
       backend_id: parsed.data.backend_id,
       kind: parsed.data.kind,
       ...(created ? {} : { deduped: true }),
     });
   });
 
-  app.get("/tasks/:id", async (request, reply) => {
-    const id = request.params.id ?? "";
+  app.get('/tasks/:id', async (request, reply) => {
+    const id = request.params.id ?? '';
     const task = input.queue.getTask(id);
     if (!task) {
-      return reply.code(404).send({ error: { code: "not_found", message: "Task not found." } });
+      return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
     return {
       task: task.task,
@@ -227,16 +225,16 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     };
   });
 
-  app.get("/tasks/:id/logs", async (request, reply) => {
-    const id = request.params.id ?? "";
+  app.get('/tasks/:id/logs', async (request, reply) => {
+    const id = request.params.id ?? '';
     const task = input.queue.getTask(id);
     if (!task) {
-      return reply.code(404).send({ error: { code: "not_found", message: "Task not found." } });
+      return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
-    const offset = Math.max(0, Number(request.query.offset ?? "0") || 0);
+    const offset = Math.max(0, Number(request.query.offset ?? '0') || 0);
     const stream = request.query.stream;
     const maxBytes = Math.min(
-      Math.max(Number(request.query.max_bytes ?? "65536") || 65_536, 1),
+      Math.max(Number(request.query.max_bytes ?? '65536') || 65_536, 1),
       1_048_576,
     );
     const logs = input.queue.listLogs(id, {
@@ -246,8 +244,8 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     });
 
     // Stream-style read (control-plane / Node parity): concatenate rows after offset.
-    if (stream === "stdout" || stream === "stderr") {
-      let content = "";
+    if (stream === 'stdout' || stream === 'stderr') {
+      let content = '';
       let nextOffset = offset;
       for (const row of logs) {
         if (content.length >= maxBytes) break;
@@ -265,7 +263,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         eof: terminal && more.length === 0,
         total_bytes: content.length,
         truncated: false,
-        encoding: "utf-8",
+        encoding: 'utf-8',
         content,
         logs,
       };
@@ -274,15 +272,15 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     return { task_id: id, logs };
   });
 
-  app.post("/tasks/:id/cancel", async (request, reply) => {
-    const id = request.params.id ?? "";
+  app.post('/tasks/:id/cancel', async (request, reply) => {
+    const id = request.params.id ?? '';
     const result = input.queue.cancel(id);
-    if (result.status === "not_found") {
-      return reply.code(404).send({ error: { code: "not_found", message: "Task not found." } });
+    if (result.status === 'not_found') {
+      return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
     if (!result.cancelled) {
       return reply.code(409).send({
-        error: { code: "not_cancellable", message: "Task already terminal." },
+        error: { code: 'not_cancellable', message: 'Task already terminal.' },
         task_id: id,
         status: result.status,
         already_terminal: true,
@@ -291,27 +289,27 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     return { ok: true, task_id: id, ...result };
   });
 
-  app.post("/tasks/:id/retry", async (request, reply) => {
-    const id = request.params.id ?? "";
+  app.post('/tasks/:id/retry', async (request, reply) => {
+    const id = request.params.id ?? '';
     try {
       const result = input.queue.retry(id);
       return reply.code(202).send({ ok: true, ...result });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("not found") || message.includes("Task not found")) {
-        return reply.code(404).send({ error: { code: "not_found", message } });
+      if (message.includes('not found') || message.includes('Task not found')) {
+        return reply.code(404).send({ error: { code: 'not_found', message } });
       }
-      return reply.code(400).send({ error: { code: "retry_failed", message } });
+      return reply.code(400).send({ error: { code: 'retry_failed', message } });
     }
   });
 
   // ── Files (vacps:fs) ──────────────────────────────────────────────
-  app.get("/fs/read", async (request, reply) => {
+  app.get('/fs/read', async (request, reply) => {
     const filePath = request.query.path?.trim() || request.query.file_path?.trim();
     if (!filePath) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "path is required." } });
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
     }
     try {
       const startRaw = request.query.start_line ?? request.query.offset;
@@ -321,7 +319,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         ...(startRaw !== undefined ? { startLine: numberOr(startRaw, 1) } : {}),
         ...(endRaw !== undefined ? { endLine: numberOr(endRaw, 1) } : {}),
         maxBytes: numberOr(request.query.max_bytes, 32_768),
-        encoding: request.query.encoding === "base64" ? "base64" : "utf-8",
+        encoding: request.query.encoding === 'base64' ? 'base64' : 'utf-8',
       });
       return { ok: true, backend_id: input.config.BACKEND_ID, ...result };
     } catch (error) {
@@ -329,12 +327,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.get("/fs/stat", async (request, reply) => {
+  app.get('/fs/stat', async (request, reply) => {
     const path = request.query.path?.trim();
     if (!path) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "path is required." } });
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
     }
     try {
       return { ok: true, backend_id: input.config.BACKEND_ID, ...(await files.filesStat(path)) };
@@ -343,12 +341,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.get("/fs/list", async (request, reply) => {
+  app.get('/fs/list', async (request, reply) => {
     const path = request.query.path?.trim();
     if (!path) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "path is required." } });
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
     }
     try {
       return {
@@ -357,7 +355,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         ...(await files.filesList({
           path,
           limit: numberOr(request.query.limit, 200),
-          includeHidden: request.query.include_hidden === "true",
+          includeHidden: request.query.include_hidden === 'true',
         })),
       };
     } catch (error) {
@@ -365,22 +363,22 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/fs/write", async (request, reply) => {
+  app.post('/fs/write', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.path !== "string" || typeof body.content !== "string") {
+    if (typeof body.path !== 'string' || typeof body.content !== 'string') {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "path and content are required." } });
+        .send({ error: { code: 'validation_error', message: 'path and content are required.' } });
     }
     if (
-      body.mode !== "create" &&
-      body.mode !== "overwrite" &&
-      body.mode !== "create_or_overwrite"
+      body.mode !== 'create' &&
+      body.mode !== 'overwrite' &&
+      body.mode !== 'create_or_overwrite'
     ) {
       return reply.code(400).send({
         error: {
-          code: "validation_error",
-          message: "mode is required: create | overwrite | create_or_overwrite.",
+          code: 'validation_error',
+          message: 'mode is required: create | overwrite | create_or_overwrite.',
         },
       });
     }
@@ -388,7 +386,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return await withFileIdempotency(
         idempotency,
         input.config.BACKEND_ID,
-        "files.write",
+        'files.write',
         body,
         async () => ({
           ok: true,
@@ -396,9 +394,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           ...(await files.filesWrite({
             path: body.path as string,
             content: body.content as string,
-            mode: body.mode as "create" | "overwrite" | "create_or_overwrite",
+            mode: body.mode as 'create' | 'overwrite' | 'create_or_overwrite',
             createParentDirectories: body.create_parent_directories !== false,
-            ...(typeof body.expected_sha256 === "string"
+            ...(typeof body.expected_sha256 === 'string'
               ? { expectedSha256: body.expected_sha256 }
               : {}),
           })),
@@ -409,12 +407,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/fs/glob", async (request, reply) => {
+  app.post('/fs/glob', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.pattern !== "string" || !body.pattern) {
+    if (typeof body.pattern !== 'string' || !body.pattern) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "pattern is required." } });
+        .send({ error: { code: 'validation_error', message: 'pattern is required.' } });
     }
     try {
       return {
@@ -422,10 +420,10 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         backend_id: input.config.BACKEND_ID,
         ...(await files.filesGlob({
           pattern: body.pattern,
-          ...(typeof body.path === "string" ? { path: body.path } : {}),
+          ...(typeof body.path === 'string' ? { path: body.path } : {}),
           includeHidden: Boolean(body.include_hidden),
-          limit: typeof body.limit === "number" ? body.limit : 200,
-          ...(typeof body.cursor === "string" ? { cursor: body.cursor } : {}),
+          limit: typeof body.limit === 'number' ? body.limit : 200,
+          ...(typeof body.cursor === 'string' ? { cursor: body.cursor } : {}),
         })),
       };
     } catch (error) {
@@ -433,12 +431,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/fs/grep", async (request, reply) => {
+  app.post('/fs/grep', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.pattern !== "string" || !body.pattern) {
+    if (typeof body.pattern !== 'string' || !body.pattern) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "pattern is required." } });
+        .send({ error: { code: 'validation_error', message: 'pattern is required.' } });
     }
     try {
       return {
@@ -446,14 +444,14 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         backend_id: input.config.BACKEND_ID,
         ...(await files.filesGrep({
           pattern: body.pattern,
-          ...(typeof body.path === "string" ? { path: body.path } : {}),
-          ...(typeof body.file_pattern === "string" ? { filePattern: body.file_pattern } : {}),
+          ...(typeof body.path === 'string' ? { path: body.path } : {}),
+          ...(typeof body.file_pattern === 'string' ? { filePattern: body.file_pattern } : {}),
           caseSensitive: body.case_sensitive === true,
           fixedString: body.fixed_string === true,
-          contextBefore: typeof body.context_before === "number" ? body.context_before : 0,
-          contextAfter: typeof body.context_after === "number" ? body.context_after : 0,
-          maxMatches: typeof body.max_matches === "number" ? body.max_matches : 100,
-          maxBytes: typeof body.max_bytes === "number" ? body.max_bytes : 64_000,
+          contextBefore: typeof body.context_before === 'number' ? body.context_before : 0,
+          contextAfter: typeof body.context_after === 'number' ? body.context_after : 0,
+          maxMatches: typeof body.max_matches === 'number' ? body.max_matches : 100,
+          maxBytes: typeof body.max_bytes === 'number' ? body.max_bytes : 64_000,
         })),
       };
     } catch (error) {
@@ -461,17 +459,17 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/fs/edit", async (request, reply) => {
+  app.post('/fs/edit', async (request, reply) => {
     const body = asRecord(request.body);
     if (
-      typeof body.path !== "string" ||
-      typeof body.old_text !== "string" ||
-      typeof body.new_text !== "string"
+      typeof body.path !== 'string' ||
+      typeof body.old_text !== 'string' ||
+      typeof body.new_text !== 'string'
     ) {
       return reply.code(400).send({
         error: {
-          code: "validation_error",
-          message: "path, old_text, and new_text are required.",
+          code: 'validation_error',
+          message: 'path, old_text, and new_text are required.',
         },
       });
     }
@@ -479,7 +477,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return await withFileIdempotency(
         idempotency,
         input.config.BACKEND_ID,
-        "files.edit",
+        'files.edit',
         body,
         async () => ({
           ok: true,
@@ -489,7 +487,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
             oldText: body.old_text as string,
             newText: body.new_text as string,
             replaceAll: body.replace_all === true,
-            ...(typeof body.expected_sha256 === "string"
+            ...(typeof body.expected_sha256 === 'string'
               ? { expectedSha256: body.expected_sha256 }
               : {}),
           })),
@@ -500,25 +498,25 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/fs/apply_patch", async (request, reply) => {
+  app.post('/fs/apply_patch', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.patch !== "string" || !body.patch) {
+    if (typeof body.patch !== 'string' || !body.patch) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "patch is required." } });
+        .send({ error: { code: 'validation_error', message: 'patch is required.' } });
     }
     try {
       return await withFileIdempotency(
         idempotency,
         input.config.BACKEND_ID,
-        "files.apply_patch",
+        'files.apply_patch',
         body,
         async () => ({
           ok: true,
           backend_id: input.config.BACKEND_ID,
           ...(await files.applyPatch({
             patch: body.patch as string,
-            ...(typeof body.workspace_path === "string"
+            ...(typeof body.workspace_path === 'string'
               ? { workspacePath: body.workspace_path }
               : {}),
             dryRun: body.dry_run === true,
@@ -531,18 +529,18 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.get("/capabilities", async () => ({
+  app.get('/capabilities', async () => ({
     ok: true,
     backend_id: input.config.BACKEND_ID,
     ...(await files.detectCapabilities()),
   }));
 
-  app.post("/fs/mkdir", async (request, reply) => {
+  app.post('/fs/mkdir', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.path !== "string") {
+    if (typeof body.path !== 'string') {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "path is required." } });
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
     }
     try {
       return {
@@ -558,12 +556,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/fs/delete", async (request, reply) => {
+  app.post('/fs/delete', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.path !== "string") {
+    if (typeof body.path !== 'string') {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "path is required." } });
+        .send({ error: { code: 'validation_error', message: 'path is required.' } });
     }
     try {
       return {
@@ -576,12 +574,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/fs/move", async (request, reply) => {
+  app.post('/fs/move', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.from !== "string" || typeof body.to !== "string") {
+    if (typeof body.from !== 'string' || typeof body.to !== 'string') {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "from and to are required." } });
+        .send({ error: { code: 'validation_error', message: 'from and to are required.' } });
     }
     try {
       return {
@@ -595,27 +593,25 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   });
 
   // ── Command / shell ───────────────────────────────────────────────
-  app.post("/exec/command", async (request, reply) => {
+  app.post('/exec/command', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.program !== "string" || !body.program) {
+    if (typeof body.program !== 'string' || !body.program) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "program is required." } });
+        .send({ error: { code: 'validation_error', message: 'program is required.' } });
     }
     try {
       const result = await input.processes.exec({
-        toolName: "command.exec",
+        toolName: 'command.exec',
         program: body.program,
-        ...(Array.isArray(body.arguments)
-          ? { arguments: body.arguments.map(String) }
-          : {}),
-        ...(typeof body.working_directory === "string"
+        ...(Array.isArray(body.arguments) ? { arguments: body.arguments.map(String) } : {}),
+        ...(typeof body.working_directory === 'string'
           ? { workingDirectory: body.working_directory }
           : {}),
-        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 120_000,
-        stdoutMaxBytes: typeof body.stdout_max_bytes === "number" ? body.stdout_max_bytes : 16_384,
-        stderrMaxBytes: typeof body.stderr_max_bytes === "number" ? body.stderr_max_bytes : 16_384,
-        ...(typeof body.idempotency_key === "string"
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
+        stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
+        stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
+        ...(typeof body.idempotency_key === 'string'
           ? { idempotencyKey: body.idempotency_key }
           : {}),
       });
@@ -625,36 +621,36 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/exec/shell", async (request, reply) => {
+  app.post('/exec/shell', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.command !== "string" || !body.command.trim()) {
+    if (typeof body.command !== 'string' || !body.command.trim()) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "command is required." } });
+        .send({ error: { code: 'validation_error', message: 'command is required.' } });
     }
-    const shell = body.shell === "/bin/sh" ? "/bin/sh" : "/bin/bash";
-    const loadUserEnvironment = shell === "/bin/sh" ? false : body.load_user_environment !== false;
-    if (shell === "/bin/sh" && body.load_user_environment === true) {
+    const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
+    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    if (shell === '/bin/sh' && body.load_user_environment === true) {
       return reply.code(400).send({
         error: {
-          code: "validation_error",
+          code: 'validation_error',
           message:
-            "load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or omit/false.",
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or omit/false.',
         },
       });
     }
     try {
       const result = await input.processes.exec({
-        toolName: "shell.exec",
+        toolName: 'shell.exec',
         command: body.command,
         shell,
-        ...(typeof body.working_directory === "string"
+        ...(typeof body.working_directory === 'string'
           ? { workingDirectory: body.working_directory }
           : {}),
-        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 120_000,
-        stdoutMaxBytes: typeof body.stdout_max_bytes === "number" ? body.stdout_max_bytes : 16_384,
-        stderrMaxBytes: typeof body.stderr_max_bytes === "number" ? body.stderr_max_bytes : 16_384,
-        ...(typeof body.idempotency_key === "string"
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
+        stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
+        stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
+        ...(typeof body.idempotency_key === 'string'
           ? { idempotencyKey: body.idempotency_key }
           : {}),
         loadUserEnvironment,
@@ -666,24 +662,22 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   });
 
   // ── Long-lived process (start / read / write / terminate) ─────────
-  app.post("/process/start_command", async (request, reply) => {
+  app.post('/process/start_command', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.program !== "string" || !body.program) {
+    if (typeof body.program !== 'string' || !body.program) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "program is required." } });
+        .send({ error: { code: 'validation_error', message: 'program is required.' } });
     }
     try {
       const result = await input.processes.start({
-        toolName: "process.start_command",
+        toolName: 'process.start_command',
         program: body.program,
-        ...(Array.isArray(body.arguments)
-          ? { arguments: body.arguments.map(String) }
-          : {}),
-        ...(typeof body.working_directory === "string"
+        ...(Array.isArray(body.arguments) ? { arguments: body.arguments.map(String) } : {}),
+        ...(typeof body.working_directory === 'string'
           ? { workingDirectory: body.working_directory }
           : {}),
-        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 3_600_000,
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
         closeStdin: body.tty === true ? false : body.close_stdin !== false,
       });
       return { ok: true, ...result };
@@ -692,24 +686,24 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/process/start_shell", async (request, reply) => {
+  app.post('/process/start_shell', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.command !== "string" || !body.command.trim()) {
+    if (typeof body.command !== 'string' || !body.command.trim()) {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "command is required." } });
+        .send({ error: { code: 'validation_error', message: 'command is required.' } });
     }
-    const shell = body.shell === "/bin/sh" ? "/bin/sh" : "/bin/bash";
-    const loadUserEnvironment = shell === "/bin/sh" ? false : body.load_user_environment !== false;
+    const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
+    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
     try {
       const result = await input.processes.start({
-        toolName: "process.start_shell",
+        toolName: 'process.start_shell',
         command: body.command,
         shell,
-        ...(typeof body.working_directory === "string"
+        ...(typeof body.working_directory === 'string'
           ? { workingDirectory: body.working_directory }
           : {}),
-        timeoutMs: typeof body.timeout_ms === "number" ? body.timeout_ms : 3_600_000,
+        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
         closeStdin: body.tty === true ? false : body.close_stdin !== false,
         loadUserEnvironment,
       });
@@ -719,18 +713,18 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/process/read", async (request, reply) => {
+  app.post('/process/read', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.process_id !== "string") {
+    if (typeof body.process_id !== 'string') {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "process_id is required." } });
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
     }
     try {
       const result = await input.processes.readWait(body.process_id, {
-        ...(typeof body.cursor === "string" ? { cursor: body.cursor } : {}),
-        maxBytes: typeof body.max_bytes === "number" ? body.max_bytes : 65_536,
-        waitMs: typeof body.wait_ms === "number" ? body.wait_ms : 0,
+        ...(typeof body.cursor === 'string' ? { cursor: body.cursor } : {}),
+        maxBytes: typeof body.max_bytes === 'number' ? body.max_bytes : 65_536,
+        waitMs: typeof body.wait_ms === 'number' ? body.wait_ms : 0,
       });
       return { ok: true, ...result };
     } catch (error) {
@@ -738,11 +732,11 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/process/write", async (request, reply) => {
+  app.post('/process/write', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.process_id !== "string" || typeof body.data !== "string") {
+    if (typeof body.process_id !== 'string' || typeof body.data !== 'string') {
       return reply.code(400).send({
-        error: { code: "validation_error", message: "process_id and data are required." },
+        error: { code: 'validation_error', message: 'process_id and data are required.' },
       });
     }
     try {
@@ -757,22 +751,22 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post("/process/terminate", async (request, reply) => {
+  app.post('/process/terminate', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.process_id !== "string") {
+    if (typeof body.process_id !== 'string') {
       return reply
         .code(400)
-        .send({ error: { code: "validation_error", message: "process_id is required." } });
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
     }
     try {
       const signal =
-        body.signal === "sigint" || body.signal === "sigkill" || body.signal === "sigterm"
+        body.signal === 'sigint' || body.signal === 'sigkill' || body.signal === 'sigterm'
           ? body.signal
-          : "sigterm";
+          : 'sigterm';
       const result = await input.processes.terminate(
         body.process_id,
         signal,
-        typeof body.grace_period_ms === "number" ? body.grace_period_ms : 3_000,
+        typeof body.grace_period_ms === 'number' ? body.grace_period_ms : 3_000,
       );
       return { ok: true, ...result };
     } catch (error) {
@@ -781,38 +775,36 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   });
 
   // ── Schedulers (SQLite; no Redis/BullMQ) ──────────────────────────
-  app.get("/schedulers", async () => input.queue.listSchedulers());
+  app.get('/schedulers', async () => input.queue.listSchedulers());
 
-  app.put("/schedulers/:id", async (request, reply) => {
-    const id = request.params.id ?? "";
+  app.put('/schedulers/:id', async (request, reply) => {
+    const id = request.params.id ?? '';
     const body = asRecord(request.body);
     if (body.taskTemplate !== undefined) {
       return reply.code(400).send({
         error: {
-          code: "validation_error",
-          message: "taskTemplate is not accepted; use task (Schema v3 kind payload).",
+          code: 'validation_error',
+          message: 'taskTemplate is not accepted; use task (Schema v3 kind payload).',
         },
       });
     }
     const template = createTaskSchema.safeParse(body.task);
     if (
       !template.success ||
-      typeof body.cron !== "string" ||
-      typeof body.timezone !== "string" ||
-      typeof body.enabled !== "boolean"
+      typeof body.cron !== 'string' ||
+      typeof body.timezone !== 'string' ||
+      typeof body.enabled !== 'boolean'
     ) {
       return reply
         .code(400)
-        .send({ error: { code: "invalid_scheduler", message: "Invalid scheduler payload." } });
+        .send({ error: { code: 'invalid_scheduler', message: 'Invalid scheduler payload.' } });
     }
     const revision =
-      typeof body.revision === "number" && Number.isInteger(body.revision) && body.revision >= 1
+      typeof body.revision === 'number' && Number.isInteger(body.revision) && body.revision >= 1
         ? body.revision
         : undefined;
     const policy =
-      body.policy && typeof body.policy === "object"
-        ? parseSchedulePolicy(body.policy)
-        : undefined;
+      body.policy && typeof body.policy === 'object' ? parseSchedulePolicy(body.policy) : undefined;
     input.queue.upsertScheduler({
       id,
       cron: body.cron,
@@ -821,7 +813,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       task: template.data,
       ...(revision !== undefined ? { revision } : {}),
       ...(policy ? { policy } : {}),
-      ...(typeof body.next_run_at === "string"
+      ...(typeof body.next_run_at === 'string'
         ? { nextRunAt: body.next_run_at }
         : body.next_run_at === null
           ? { nextRunAt: null }
@@ -830,8 +822,8 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     return reply.code(204).send();
   });
 
-  app.delete("/schedulers/:id", async (request, reply) => {
-    const id = request.params.id ?? "";
+  app.delete('/schedulers/:id', async (request, reply) => {
+    const id = request.params.id ?? '';
     try {
       input.queue.deleteScheduler(id);
     } catch {
@@ -840,14 +832,14 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     return reply.code(204).send();
   });
 
-  app.post("/schedulers/:id/run", async (request, reply) => {
-    const id = request.params.id ?? "";
+  app.post('/schedulers/:id/run', async (request, reply) => {
+    const id = request.params.id ?? '';
     const body = asRecord(request.body);
     if (body.taskTemplate !== undefined) {
       return reply.code(400).send({
         error: {
-          code: "validation_error",
-          message: "taskTemplate is not accepted; use task (Schema v3 kind payload).",
+          code: 'validation_error',
+          message: 'taskTemplate is not accepted; use task (Schema v3 kind payload).',
         },
       });
     }
@@ -855,7 +847,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     if (!template.success) {
       return reply
         .code(400)
-        .send({ error: { code: "invalid_task", message: template.error.message } });
+        .send({ error: { code: 'invalid_task', message: template.error.message } });
     }
     const taskId = input.queue.runScheduleNow({ id, task: template.data });
     return { task_id: taskId };
@@ -865,7 +857,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
 }
 
 function asRecord(body: unknown): Record<string, unknown> {
-  if (body && typeof body === "object" && !Array.isArray(body)) {
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
     return body as Record<string, unknown>;
   }
   return {};
@@ -878,14 +870,14 @@ async function withFileIdempotency(
   body: Record<string, unknown>,
   run: () => Promise<Record<string, unknown>>,
 ): Promise<Record<string, unknown>> {
-  const key = typeof body.idempotency_key === "string" ? body.idempotency_key : undefined;
+  const key = typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined;
   const requestHash = hashRequest({
     tool_name: toolName,
     backend_id: backendId,
     arguments: body,
   });
   const cached = store.lookup(toolName, key, requestHash);
-  if (cached && typeof cached === "object") {
+  if (cached && typeof cached === 'object') {
     return store.withIdempotencyMeta(key, requestHash, true, cached as Record<string, unknown>);
   }
   const result = await run();

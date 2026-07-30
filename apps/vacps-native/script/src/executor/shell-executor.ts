@@ -1,9 +1,9 @@
-import type { TaskDispatch } from "@vacps/contracts";
-import { isTerminalTaskStatus } from "@vacps/contracts";
-import * as log from "vacps:log";
-import * as process from "vacps:process";
+import type { TaskDispatch } from '@vacps/contracts';
+import { isTerminalTaskStatus } from '@vacps/contracts';
+import * as log from 'vacps:log';
+import * as process from 'vacps:process';
 
-import type { TaskStore } from "../storage/task-store";
+import type { TaskStore } from '../storage/task-store';
 
 /**
  * Run command/shell tasks via vacps:process start/read/terminate
@@ -23,7 +23,7 @@ export class ShellExecutor {
     const procId = this.active.get(taskId);
     if (!procId) return false;
     try {
-      await process.terminate(procId, { signal: "SIGKILL", graceMs: 0 });
+      await process.terminate(procId, { signal: 'SIGKILL', graceMs: 0 });
       return true;
     } catch {
       return false;
@@ -34,36 +34,36 @@ export class ShellExecutor {
     const id = task.task_id;
     if (this.store.isCancelRequested(id)) {
       this.store.updateTask(id, {
-        status: "cancelled",
-        error: { code: "cancelled", message: "Cancelled before start." },
+        status: 'cancelled',
+        error: { code: 'cancelled', message: 'Cancelled before start.' },
       });
       return;
     }
 
-    if (task.kind === "agent") {
+    if (task.kind === 'agent') {
       this.store.updateTask(id, {
-        status: "failed",
+        status: 'failed',
         error: {
-          code: "capability_unavailable",
-          message: "Pi runtime is not available on this backend.",
+          code: 'capability_unavailable',
+          message: 'Pi runtime is not available on this backend.',
         },
       });
-      this.store.appendLog(id, "system", "Pi runtime not available on native");
+      this.store.appendLog(id, 'system', 'Pi runtime not available on native');
       return;
     }
 
-    const cwd = task.working_directory ?? "/tmp";
+    const cwd = task.working_directory ?? '/tmp';
     const timeoutMs = Math.max(1, task.timeout_seconds) * 1000;
 
     let argv: string[];
-    if (task.kind === "command") {
+    if (task.kind === 'command') {
       argv = [task.program, ...(task.arguments ?? [])];
     } else {
-      const shell = task.shell ?? "/bin/bash";
-      argv = [shell, "-lc", task.command];
+      const shell = task.shell ?? '/bin/bash';
+      argv = [shell, '-lc', task.command];
     }
 
-    this.store.appendLog(id, "system", `exec: ${argv.map(shellQuote).join(" ")}`);
+    this.store.appendLog(id, 'system', `exec: ${argv.map(shellQuote).join(' ')}`);
     log.info(`task ${id} start kind=${task.kind}`);
 
     try {
@@ -76,8 +76,8 @@ export class ShellExecutor {
 
       let stdoutOff = 0;
       let stderrOff = 0;
-      let stdout = "";
-      let stderr = "";
+      let stdout = '';
+      let stderr = '';
       let final = await process.read(started.id, {
         waitMs: 0,
         maxBytes: 256_000,
@@ -87,7 +87,7 @@ export class ShellExecutor {
 
       for (;;) {
         if (this.store.isCancelRequested(id)) {
-          await process.terminate(started.id, { signal: "SIGKILL", graceMs: 0 });
+          await process.terminate(started.id, { signal: 'SIGKILL', graceMs: 0 });
           // drain final status
           final = await process.read(started.id, {
             waitMs: 2_000,
@@ -97,11 +97,11 @@ export class ShellExecutor {
           });
           if (final.stdout) stdout += final.stdout;
           if (final.stderr) stderr += final.stderr;
-          if (stdout) this.store.appendLog(id, "stdout", truncate(stdout, 256_000));
-          if (stderr) this.store.appendLog(id, "stderr", truncate(stderr, 256_000));
+          if (stdout) this.store.appendLog(id, 'stdout', truncate(stdout, 256_000));
+          if (stderr) this.store.appendLog(id, 'stderr', truncate(stderr, 256_000));
           this.store.updateTask(id, {
-            status: "cancelled",
-            error: { code: "cancelled", message: "Cancelled during execution." },
+            status: 'cancelled',
+            error: { code: 'cancelled', message: 'Cancelled during execution.' },
             result: {
               exitCode: final.exitCode,
               timedOut: final.timedOut,
@@ -127,25 +127,25 @@ export class ShellExecutor {
           stderrOff = final.nextStderrOffset;
         }
 
-        if (final.eof || final.status !== "running") break;
+        if (final.eof || final.status !== 'running') break;
       }
 
-      if (stdout) this.store.appendLog(id, "stdout", truncate(stdout, 256_000));
-      if (stderr) this.store.appendLog(id, "stderr", truncate(stderr, 256_000));
+      if (stdout) this.store.appendLog(id, 'stdout', truncate(stdout, 256_000));
+      if (stderr) this.store.appendLog(id, 'stderr', truncate(stderr, 256_000));
 
-      if (final.timedOut || final.status === "timed_out") {
+      if (final.timedOut || final.status === 'timed_out') {
         this.store.updateTask(id, {
-          status: "timed_out",
-          error: { code: "timed_out", message: `Timeout after ${task.timeout_seconds}s` },
+          status: 'timed_out',
+          error: { code: 'timed_out', message: `Timeout after ${task.timeout_seconds}s` },
           result: { exitCode: final.exitCode, timedOut: true },
         });
         return;
       }
 
-      if (final.status === "cancelled") {
+      if (final.status === 'cancelled') {
         this.store.updateTask(id, {
-          status: "cancelled",
-          error: { code: "cancelled", message: "Process terminated." },
+          status: 'cancelled',
+          error: { code: 'cancelled', message: 'Process terminated.' },
           result: {
             exitCode: final.exitCode,
             timedOut: false,
@@ -158,7 +158,7 @@ export class ShellExecutor {
 
       if (final.exitCode === 0) {
         this.store.updateTask(id, {
-          status: "succeeded",
+          status: 'succeeded',
           result: {
             exitCode: 0,
             stdout: truncate(stdout, 65_536),
@@ -167,9 +167,9 @@ export class ShellExecutor {
         });
       } else {
         this.store.updateTask(id, {
-          status: "failed",
+          status: 'failed',
           error: {
-            code: "exit_nonzero",
+            code: 'exit_nonzero',
             message: `Process exited with code ${final.exitCode}`,
           },
           result: {
@@ -181,12 +181,12 @@ export class ShellExecutor {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      this.store.appendLog(id, "system", `error: ${msg}`);
+      this.store.appendLog(id, 'system', `error: ${msg}`);
       const cur = this.store.getTask(id);
       if (cur && !isTerminalTaskStatus(cur.status)) {
         this.store.updateTask(id, {
-          status: "failed",
-          error: { code: "exec_error", message: msg },
+          status: 'failed',
+          error: { code: 'exec_error', message: msg },
         });
       }
     } finally {

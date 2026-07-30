@@ -2,7 +2,7 @@
  * Thin wrappers over vacps:crypto OpenSSL Base64 / Base64url.
  * Prefer importing `vacps:crypto` directly in new code.
  */
-import * as crypto from "vacps:crypto";
+import * as crypto from 'vacps:crypto';
 
 export function base64UrlEncode(bytes: Uint8Array | ArrayBuffer | string): string {
   return crypto.base64UrlEncode(bytes);

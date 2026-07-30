@@ -1,4 +1,4 @@
-declare module "vacps:process" {
+declare module 'vacps:process' {
   export interface RunOptions {
     readonly cwd?: string;
     readonly timeoutMs?: number;
@@ -31,7 +31,7 @@ declare module "vacps:process" {
   }
 
   export interface ReadResult {
-    readonly status: "running" | "exited" | "timed_out" | "cancelled" | string;
+    readonly status: 'running' | 'exited' | 'timed_out' | 'cancelled' | string;
     readonly exitCode: number;
     readonly timedOut: boolean;
     readonly eof: boolean;
@@ -49,7 +49,7 @@ declare module "vacps:process" {
   }
 
   export interface TerminateOptions {
-    readonly signal?: "SIGTERM" | "SIGINT" | "SIGKILL" | string;
+    readonly signal?: 'SIGTERM' | 'SIGINT' | 'SIGKILL' | string;
     readonly graceMs?: number;
   }
 
@@ -57,16 +57,10 @@ declare module "vacps:process" {
    * Run argv without a shell (Boost.Process v2 + Asio).
    * Returns a Promise; does not block the event loop.
    */
-  export function run(
-    argv: readonly string[],
-    options?: RunOptions,
-  ): Promise<RunResult>;
+  export function run(argv: readonly string[], options?: RunOptions): Promise<RunResult>;
 
   /** Start a long-lived process (process group leader). */
-  export function start(
-    argv: readonly string[],
-    options?: StartOptions,
-  ): Promise<StartResult>;
+  export function start(argv: readonly string[], options?: StartOptions): Promise<StartResult>;
 
   /** Read accumulated stdout/stderr slices (optional wait). */
   export function read(id: string, options?: ReadOptions): Promise<ReadResult>;

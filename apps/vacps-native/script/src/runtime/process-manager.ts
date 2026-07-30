@@ -1,10 +1,10 @@
-import * as crypto from "vacps:crypto";
-import * as host from "vacps:host";
-import * as process from "vacps:process";
+import * as crypto from 'vacps:crypto';
+import * as host from 'vacps:host';
+import * as process from 'vacps:process';
 
-import { assertSafeAbsolutePath } from "./path-guard";
+import { assertSafeAbsolutePath } from './path-guard';
 
-export type ProcessStatus = "running" | "exited" | "signaled" | "timed_out" | "cancelled";
+export type ProcessStatus = 'running' | 'exited' | 'signaled' | 'timed_out' | 'cancelled';
 
 export interface ProcessSnapshot {
   process_id: string;
@@ -58,7 +58,10 @@ function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
 
-function preview(data: string, max: number): {
+function preview(
+  data: string,
+  max: number,
+): {
   preview: string;
   total_bytes: number;
   truncated: boolean;
@@ -71,10 +74,10 @@ function preview(data: string, max: number): {
 }
 
 function mapStatus(status: string, timedOut: boolean): ProcessStatus {
-  if (timedOut || status === "timed_out") return "timed_out";
-  if (status === "cancelled") return "cancelled";
-  if (status === "running") return "running";
-  return "exited";
+  if (timedOut || status === 'timed_out') return 'timed_out';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'running') return 'running';
+  return 'exited';
 }
 
 export function canonicalRequestHash(
@@ -108,7 +111,7 @@ export class ProcessManager {
   constructor(private readonly backendId: string) {}
 
   async exec(input: ExecInput): Promise<ProcessSnapshot> {
-    const toolName = input.toolName ?? (input.command ? "shell.exec" : "command.exec");
+    const toolName = input.toolName ?? (input.command ? 'shell.exec' : 'command.exec');
     const requestHash = canonicalRequestHash(this.backendId, toolName, input);
 
     if (input.idempotencyKey) {
@@ -117,8 +120,8 @@ export class ProcessManager {
       if (existing) {
         if (existing.requestHash !== requestHash) {
           throw Object.assign(
-            new Error("The idempotency key was previously used with different arguments."),
-            { code: "idempotency_conflict", statusCode: 409 },
+            new Error('The idempotency key was previously used with different arguments.'),
+            { code: 'idempotency_conflict', statusCode: 409 },
           );
         }
         return {
@@ -157,45 +160,43 @@ export class ProcessManager {
 
   async start(input: ExecInput): Promise<ProcessSnapshot> {
     if (input.program && input.command) {
-      throw Object.assign(new Error("Provide either program or command, not both."), {
-        code: "validation_error",
+      throw Object.assign(new Error('Provide either program or command, not both.'), {
+        code: 'validation_error',
         statusCode: 400,
       });
     }
     if (!input.program && !input.command) {
-      throw Object.assign(new Error("program or command is required."), {
-        code: "validation_error",
+      throw Object.assign(new Error('program or command is required.'), {
+        code: 'validation_error',
         statusCode: 400,
       });
     }
 
     const timeoutMs = clamp(input.timeoutMs ?? 3_600_000, 1, 3_600_000);
-    const cwd = input.workingDirectory
-      ? assertSafeAbsolutePath(input.workingDirectory)
-      : "/tmp";
+    const cwd = input.workingDirectory ? assertSafeAbsolutePath(input.workingDirectory) : '/tmp';
     const stdoutMax = clamp(input.stdoutMaxBytes ?? 16_384, 0, 1_048_576);
     const stderrMax = clamp(input.stderrMaxBytes ?? 16_384, 0, 1_048_576);
     const closeStdin = input.closeStdin !== false;
 
     let argv: string[];
     if (input.command) {
-      const shell = input.shell === "/bin/sh" ? "/bin/sh" : "/bin/bash";
+      const shell = input.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
       const loadUserEnvironment =
         input.loadUserEnvironment !== undefined ? input.loadUserEnvironment : true;
-      if (shell === "/bin/sh" && loadUserEnvironment) {
+      if (shell === '/bin/sh' && loadUserEnvironment) {
         throw Object.assign(
           new Error(
-            "load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or set load_user_environment=false.",
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or set load_user_environment=false.',
           ),
-          { code: "validation_error", statusCode: 400 },
+          { code: 'validation_error', statusCode: 400 },
         );
       }
       const shellArgs =
-        shell === "/bin/sh"
-          ? ["-c", input.command]
+        shell === '/bin/sh'
+          ? ['-c', input.command]
           : loadUserEnvironment
-            ? ["-lc", input.command]
-            : ["--noprofile", "--norc", "-c", input.command];
+            ? ['-lc', input.command]
+            : ['--noprofile', '--norc', '-c', input.command];
       argv = [shell, ...shellArgs];
     } else {
       argv = [input.program!, ...(input.arguments ?? [])];
@@ -214,7 +215,7 @@ export class ProcessManager {
     return {
       process_id: started.id,
       backend_id: this.backendId,
-      status: "running",
+      status: 'running',
       exit_code: null,
       signal: null,
       timed_out: false,
@@ -224,8 +225,8 @@ export class ProcessManager {
       stdin_available: !closeStdin,
       tty: false,
       output_cursor: null,
-      stdout: preview("", stdoutMax),
-      stderr: preview("", stderrMax),
+      stdout: preview('', stdoutMax),
+      stderr: preview('', stderrMax),
     };
   }
 
@@ -246,7 +247,7 @@ export class ProcessManager {
     });
     const chunks: Array<{
       sequence: number;
-      stream: "stdout" | "stderr";
+      stream: 'stdout' | 'stderr';
       data: string;
       observed_at: string;
     }> = [];
@@ -254,7 +255,7 @@ export class ProcessManager {
     if (r.stdout) {
       chunks.push({
         sequence: seq++,
-        stream: "stdout",
+        stream: 'stdout',
         data: r.stdout,
         observed_at: new Date(host.nowMs()).toISOString(),
       });
@@ -262,7 +263,7 @@ export class ProcessManager {
     if (r.stderr) {
       chunks.push({
         sequence: seq++,
-        stream: "stderr",
+        stream: 'stderr',
         data: r.stderr,
         observed_at: new Date(host.nowMs()).toISOString(),
       });
@@ -273,8 +274,8 @@ export class ProcessManager {
       chunks,
       next_cursor: encodeCursor(r.nextStdoutOffset, r.nextStderrOffset),
       eof: r.eof,
-      exit_code: r.status === "running" ? null : r.exitCode,
-      signal: r.timedOut ? "SIGKILL" : null,
+      exit_code: r.status === 'running' ? null : r.exitCode,
+      signal: r.timedOut ? 'SIGKILL' : null,
       returned_bytes: r.stdout.length + r.stderr.length,
     };
   }
@@ -290,7 +291,7 @@ export class ProcessManager {
 
   async terminate(
     processId: string,
-    signal: "sigterm" | "sigint" | "sigkill" = "sigterm",
+    signal: 'sigterm' | 'sigint' | 'sigkill' = 'sigterm',
     gracePeriodMs = 3_000,
   ): Promise<
     ProcessSnapshot & {
@@ -299,7 +300,7 @@ export class ProcessManager {
     }
   > {
     const nodeSignal =
-      signal === "sigkill" ? "SIGKILL" : signal === "sigint" ? "SIGINT" : "SIGTERM";
+      signal === 'sigkill' ? 'SIGKILL' : signal === 'sigint' ? 'SIGINT' : 'SIGTERM';
     const r = await process.terminate(processId, {
       signal: nodeSignal,
       graceMs: clamp(gracePeriodMs, 0, 60_000),
@@ -328,14 +329,14 @@ export class ProcessManager {
     const stdoutMax = limits.stdoutMax ?? tracked?.stdoutMax ?? 16_384;
     const stderrMax = limits.stderrMax ?? tracked?.stderrMax ?? 16_384;
     const startedMs = tracked?.startedMs ?? host.nowMs();
-    const finished = r.status !== "running";
+    const finished = r.status !== 'running';
     const finishedMs = finished ? host.nowMs() : null;
     return {
       process_id: processId,
       backend_id: tracked?.backendId ?? this.backendId,
       status: mapStatus(r.status, r.timedOut),
       exit_code: finished && !r.timedOut ? r.exitCode : r.timedOut ? null : null,
-      signal: r.timedOut ? "SIGKILL" : r.status === "cancelled" ? "SIGTERM" : null,
+      signal: r.timedOut ? 'SIGKILL' : r.status === 'cancelled' ? 'SIGTERM' : null,
       timed_out: r.timedOut,
       started_at: new Date(startedMs).toISOString(),
       finished_at: finishedMs ? new Date(finishedMs).toISOString() : null,
@@ -355,8 +356,8 @@ export class ProcessManager {
   ): Promise<ProcessSnapshot> {
     let stdoutOff = 0;
     let stderrOff = 0;
-    let stdout = "";
-    let stderr = "";
+    let stdout = '';
+    let stderr = '';
     for (;;) {
       const r = await process.read(processId, {
         waitMs: 500,
@@ -368,7 +369,7 @@ export class ProcessManager {
       if (r.stderr) stderr += r.stderr;
       stdoutOff = r.nextStdoutOffset;
       stderrOff = r.nextStderrOffset;
-      if (r.eof || r.status !== "running") {
+      if (r.eof || r.status !== 'running') {
         const tracked = this.tracked.get(processId);
         const startedMs = tracked?.startedMs ?? host.nowMs();
         const finishedMs = host.nowMs();
@@ -379,7 +380,7 @@ export class ProcessManager {
           backend_id: tracked?.backendId ?? this.backendId,
           status: mapStatus(r.status, r.timedOut),
           exit_code: r.timedOut ? null : r.exitCode,
-          signal: r.timedOut ? "SIGKILL" : r.status === "cancelled" ? "SIGTERM" : null,
+          signal: r.timedOut ? 'SIGKILL' : r.status === 'cancelled' ? 'SIGTERM' : null,
           timed_out: r.timedOut,
           started_at: new Date(startedMs).toISOString(),
           finished_at: new Date(finishedMs).toISOString(),
@@ -400,8 +401,8 @@ function parseCursor(cursor: string | undefined): {
   stderrOffset: number;
 } {
   if (!cursor) return { stdoutOffset: 0, stderrOffset: 0 };
-  if (cursor.includes(":")) {
-    const [a, b] = cursor.split(":");
+  if (cursor.includes(':')) {
+    const [a, b] = cursor.split(':');
     return {
       stdoutOffset: Math.max(0, Number(a) || 0),
       stderrOffset: Math.max(0, Number(b) || 0),

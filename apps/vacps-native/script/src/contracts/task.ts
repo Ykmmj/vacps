@@ -1,11 +1,11 @@
 export const TaskState = {
-  queued: "queued",
-  starting: "starting",
-  running: "running",
-  succeeded: "succeeded",
-  failed: "failed",
-  cancelled: "cancelled",
-  interrupted: "interrupted",
+  queued: 'queued',
+  starting: 'starting',
+  running: 'running',
+  succeeded: 'succeeded',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  interrupted: 'interrupted',
 } as const;
 
 export type TaskState = (typeof TaskState)[keyof typeof TaskState];

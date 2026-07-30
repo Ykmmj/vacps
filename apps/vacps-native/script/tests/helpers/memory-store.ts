@@ -1,12 +1,12 @@
 /**
  * Store adapter over Node's built-in SQLite for unit tests (no vacps:store host).
  */
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from 'node:sqlite';
 
-import type { RunResult, SqlParam, Store } from "vacps:store";
+import type { RunResult, SqlParam, Store } from 'vacps:store';
 
 export function openMemoryStore(): Store {
-  const db = new DatabaseSync(":memory:");
+  const db = new DatabaseSync(':memory:');
   return {
     exec(sql: string): void {
       db.exec(sql);
@@ -23,16 +23,16 @@ export function openMemoryStore(): Store {
       return rows as Array<Record<string, unknown>>;
     },
     begin(): void {
-      db.exec("BEGIN IMMEDIATE;");
+      db.exec('BEGIN IMMEDIATE;');
     },
     commit(): void {
-      db.exec("COMMIT;");
+      db.exec('COMMIT;');
     },
     rollback(): void {
-      db.exec("ROLLBACK;");
+      db.exec('ROLLBACK;');
     },
     path(): string {
-      return ":memory:";
+      return ':memory:';
     },
     close(): void {
       db.close();
