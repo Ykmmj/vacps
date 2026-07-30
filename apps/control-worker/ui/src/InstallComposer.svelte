@@ -39,6 +39,8 @@
     installTags?: string;
     installRedisUrl?: string;
     installAllowApt?: boolean;
+    installRuntime?: 'node' | 'native';
+    installNativeVersion?: string;
     installTunnelMode?: TunnelMode;
     installCommand?: string;
     tokenActive?: boolean;
@@ -75,6 +77,8 @@
     installTags = $bindable(''),
     installRedisUrl = $bindable(''),
     installAllowApt = $bindable(false),
+    installRuntime = $bindable<'node' | 'native'>('node'),
+    installNativeVersion = $bindable('0.1.0'),
     installTunnelMode = $bindable<TunnelMode>('managed'),
     installCommand = '',
     tokenActive = false,
@@ -208,16 +212,54 @@
                 class="h-11 rounded-[10px] border-border bg-background shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
               />
             </label>
-            <label class="grid min-w-0 gap-1.5 sm:col-span-2">
-              <span class="field-label">{label('redisUrl', 'Redis URL')}</span>
-              <Input
-                bind:value={installRedisUrl}
-                type="password"
-                autocomplete="off"
-                placeholder="rediss://default:password@host:port"
-                class="h-11 rounded-[10px] border-border bg-background font-mono text-xs shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
-              />
-            </label>
+            <div class="grid min-w-0 gap-1.5 sm:col-span-2">
+              <span class="field-label">{label('agentRuntime', 'Agent runtime')}</span>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  class="runtime-chip"
+                  class:runtime-chip-active={installRuntime === 'node'}
+                  aria-pressed={installRuntime === 'node'}
+                  onclick={() => (installRuntime = 'node')}
+                  >{label('runtimeNode', 'Node (apps/vacps)')}</button
+                >
+                <button
+                  type="button"
+                  class="runtime-chip"
+                  class:runtime-chip-active={installRuntime === 'native'}
+                  aria-pressed={installRuntime === 'native'}
+                  onclick={() => (installRuntime = 'native')}
+                  >{label('runtimeNative', 'Native (vacps-native)')}</button
+                >
+              </div>
+              <p class="text-[12px] text-muted-foreground">
+                {installRuntime === 'native'
+                  ? 'Static musl binary from GitHub Releases; no Redis or Node.js on the VPS.'
+                  : 'Node agent with Redis/BullMQ; clones the monorepo and builds with pnpm.'}
+              </p>
+            </div>
+            {#if installRuntime === 'node'}
+              <label class="grid min-w-0 gap-1.5 sm:col-span-2">
+                <span class="field-label">{label('redisUrl', 'Redis URL')}</span>
+                <Input
+                  bind:value={installRedisUrl}
+                  type="password"
+                  autocomplete="off"
+                  placeholder="rediss://default:password@host:port"
+                  class="h-11 rounded-[10px] border-border bg-background font-mono text-xs shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
+                />
+              </label>
+            {:else}
+              <label class="grid min-w-0 gap-1.5 sm:col-span-2">
+                <span class="field-label">{label('nativeVersion', 'Native version')}</span>
+                <Input
+                  bind:value={installNativeVersion}
+                  autocomplete="off"
+                  placeholder="0.1.0"
+                  class="h-11 rounded-[10px] border-border bg-background font-mono text-xs shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
+                />
+              </label>
+            {/if}
             <div class="grid min-w-0 gap-1.5 sm:col-span-2" data-od-id="registration-token">
               <span class="field-label">{label('registrationToken', 'Registration token')}</span>
               <div
@@ -867,6 +909,26 @@
   .terminal-mark :global(svg) {
     width: 0.9375rem;
     height: 0.9375rem;
+  }
+  .runtime-chip {
+    height: 2.5rem;
+    padding: 0 0.875rem;
+    border-radius: 0.625rem;
+    border: 1px solid oklch(from var(--border) l c h / 0.9);
+    background: oklch(from var(--background) l c h);
+    color: oklch(from var(--muted-foreground) l c h);
+    font-size: 0.8125rem;
+    font-weight: 550;
+    cursor: pointer;
+  }
+  .runtime-chip:hover {
+    border-color: oklch(from var(--border) l c h);
+    color: oklch(from var(--foreground) l c h);
+  }
+  .runtime-chip-active {
+    border-color: oklch(62% 0.14 250);
+    background: oklch(62% 0.14 250 / 0.12);
+    color: oklch(from var(--foreground) l c h);
   }
   .command-pending-surface {
     min-height: 3.5rem;

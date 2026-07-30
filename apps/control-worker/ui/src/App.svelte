@@ -48,6 +48,9 @@
   let generatingToken = $state(false);
   let now = $state(Date.now());
   let installAllowApt = $state(false);
+  /** node = apps/vacps; native = vacps-native static binary. */
+  let installRuntime = $state<'node' | 'native'>('node');
+  let installNativeVersion = $state('0.1.0');
   let installTunnelMode = $state<TunnelMode>('managed');
   let managedProvision = $state<any>();
   let provisioningTunnel = $state(false);
@@ -143,6 +146,10 @@
       tags: m.tags(),
       redisUrl: m.redisUrl(),
       redisUrlHint: m.redisUrlHint(),
+      agentRuntime: 'Agent runtime',
+      runtimeNode: 'Node (apps/vacps)',
+      runtimeNative: 'Native (vacps-native)',
+      nativeVersion: 'Native version',
       registrationToken: m.registrationToken(),
       registrationTokenHint: m.registrationTokenHint(),
       generateRegistrationToken: m.generateRegistrationToken(),
@@ -695,12 +702,21 @@
       return `# ${text.installTokenPending}`;
     const lines = [
       `curl -fsSL ${origin}/agent.sh | sudo bash -s -- install \\`,
-      `  --repo ${shellQuote(repositoryUrl)} \\`,
+      `  --runtime ${installRuntime} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
       `  --registration-token ${shellQuote(registrationToken.token)} \\`,
-      `  --control-plane-public-key ${shellQuote(registrationToken.controlPlanePublicKey)} \\`,
-      `  --redis-url ${shellQuote(installRedisUrl || '<REDIS_URL>')}`,
+      `  --control-plane-public-key ${shellQuote(registrationToken.controlPlanePublicKey)}`,
     ];
+    if (installRuntime === 'node') {
+      lines[lines.length - 1] += ' \\';
+      lines.push(
+        `  --repo ${shellQuote(repositoryUrl)} \\`,
+        `  --redis-url ${shellQuote(installRedisUrl || '<REDIS_URL>')}`,
+      );
+    } else {
+      lines[lines.length - 1] += ' \\';
+      lines.push(`  --native-version ${shellQuote(installNativeVersion.trim() || '0.1.0')}`);
+    }
     if (installTunnelMode === 'managed') {
       lines[lines.length - 1] += ' \\';
       lines.push(
@@ -735,6 +751,8 @@
         tags: installTags,
         redisUrl: installRedisUrl,
         allowApt: installAllowApt,
+        runtime: installRuntime,
+        nativeVersion: installNativeVersion,
         tunnelMode: installTunnelMode,
       }),
     );
@@ -748,6 +766,11 @@
       installTags = draft.tags ?? installTags;
       installRedisUrl = draft.redisUrl ?? '';
       installAllowApt = draft.allowApt === true;
+      installRuntime = draft.runtime === 'native' ? 'native' : 'node';
+      installNativeVersion =
+        typeof draft.nativeVersion === 'string' && draft.nativeVersion
+          ? draft.nativeVersion
+          : installNativeVersion;
       installTunnelMode = draft.tunnelMode === 'quick' ? 'quick' : 'managed';
     } catch {
     } finally {
@@ -851,6 +874,8 @@
           bind:installTags
           bind:installRedisUrl
           bind:installAllowApt
+          bind:installRuntime
+          bind:installNativeVersion
           bind:installTunnelMode
           {installCommand}
           {tokenActive}
