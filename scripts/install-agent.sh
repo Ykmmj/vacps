@@ -14,7 +14,7 @@ export NVM_DIR=/usr/local/lib/vacps/nvm
 NODE_MAJOR_VERSION=24
 # Agent runtime: node (default, apps/vacps) | native (static musl binary + vacps.mjs)
 AGENT_RUNTIME=node
-NATIVE_VERSION=0.1.4
+NATIVE_VERSION=0.1.5
 NATIVE_INSTALL_DIR=/opt/vacps/native
 NATIVE_BIN_NAME=vacps-agent-linux-x86_64
 NATIVE_SCRIPT_NAME=vacps.mjs
@@ -87,7 +87,7 @@ Required for --runtime node:
   --redis-url <url>         Redis URL: prefer rediss://; redis:// only on private networks.
 
 Optional for --runtime native:
-  --native-version <ver>    GitHub release version (default: 0.1.4 → tag vacps-native-v0.1.4).
+  --native-version <ver>    GitHub release version (default: 0.1.5 → tag vacps-native-v0.1.5).
   --native-github-repo <o/r>
                             owner/repo for release assets (default: Ykmmj/vacps).
   --repo <git-url>          Optional; used only if you prefer building from source later.

@@ -11,6 +11,7 @@
   import SunIcon from '@lucide/svelte/icons/sun';
   import FleetView from './FleetView.svelte';
   import InstallComposer from './InstallComposer.svelte';
+  import LogsView from './LogsView.svelte';
   import { m } from './paraglide/messages.js';
   import { getLocale, setLocale } from './paraglide/runtime.js';
 
@@ -34,7 +35,7 @@
   let authState = $state<AuthState>('checking');
   let loginPassword = $state('');
   let authenticating = $state(false);
-  let activeView = $state<'fleet' | 'install'>('fleet');
+  let activeView = $state<'fleet' | 'logs' | 'install'>('fleet');
   let filter = $state<Filter>('all');
   let actingId = $state<string | undefined>();
   let locale = $state<Locale>(getLocale() as Locale);
@@ -82,6 +83,7 @@
     locale;
     return {
       nodes: m.nodes(),
+      logs: m.logs(),
       install: m.install(),
       refresh: m.refresh(),
       light: m.light(),
@@ -188,9 +190,8 @@
       download: m.download(),
       upload: m.upload(),
       unavailable: m.unavailable(),
-      recentFailures: m.recentFailures(),
-      recentFailuresHint: m.recentFailuresHint({ days: '{days}' }),
-      noRecentFailures: m.noRecentFailures(),
+      logsHint: m.logsHint({ days: '{days}' }),
+      noLogs: m.noLogs(),
       clearTestHistory: m.clearTestHistory({ count: '{count}' }),
       clearingTestHistory: m.clearingTestHistory(),
       confirmClearTestHistory: m.confirmClearTestHistory({ count: '{count}' }),
@@ -816,6 +817,15 @@
           >
           <Button
             variant="ghost"
+            class={`nav-button h-11 rounded-xl px-3 text-sm ${activeView === 'logs' ? 'nav-active' : ''}`}
+            aria-current={activeView === 'logs' ? 'page' : undefined}
+            onclick={() => {
+              activeView = 'logs';
+              void refresh(true);
+            }}>{text.logs}</Button
+          >
+          <Button
+            variant="ghost"
             class={`nav-button h-11 rounded-xl px-3 text-sm ${activeView === 'install' ? 'nav-active' : ''}`}
             aria-current={activeView === 'install' ? 'page' : undefined}
             onclick={() => (activeView = 'install')}>{text.install}</Button
@@ -849,7 +859,7 @@
       </div>
     </header>
     <main
-      class={`app-authenticated-main relative z-10 mx-auto w-[min(1392px,calc(100%-1.5rem))] sm:w-[min(1392px,calc(100%-3rem))] ${activeView === 'fleet' ? 'py-6 sm:py-8' : 'py-9 sm:py-14'}`}
+      class={`app-authenticated-main relative z-10 mx-auto w-[min(1392px,calc(100%-1.5rem))] sm:w-[min(1392px,calc(100%-3rem))] ${activeView === 'install' ? 'py-9 sm:py-14' : 'py-6 sm:py-8'}`}
     >
       {#if activeView === 'fleet'}
         <FleetView
@@ -858,14 +868,21 @@
           {loading}
           bind:filter
           {actingId}
-          {cleaningTestHistory}
           {approve}
           {reject}
           {testBackend}
           {deleteBackend}
-          {clearTestHistory}
           {refresh}
           {copyToClipboard}
+        />
+      {:else if activeView === 'logs'}
+        <LogsView
+          {text}
+          {dashboard}
+          {loading}
+          {cleaningTestHistory}
+          {clearTestHistory}
+          {refresh}
         />
       {:else}
         <InstallComposer

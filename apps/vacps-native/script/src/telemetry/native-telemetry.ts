@@ -129,6 +129,27 @@ export class NativeTelemetryCollector {
   }
 
   private async diskMetrics(): Promise<BackendMetrics['disk']> {
+    // Prefer portable `df -Pk` (POSIX 1024-blocks); fall back to GNU --output.
+    try {
+      const r = await process.run(['df', '-Pk', '/'], { timeoutMs: 3_000 });
+      const line = r.stdout
+        .trim()
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .pop();
+      if (line && !line.toLowerCase().startsWith('filesystem')) {
+        const cols = line.split(/\s+/);
+        // Filesystem 1024-blocks Used Available Capacity Mounted
+        const totalKb = Number(cols[1]);
+        const usedKb = Number(cols[2]);
+        if (Number.isFinite(totalKb) && totalKb > 0 && Number.isFinite(usedKb)) {
+          return { totalBytes: totalKb * 1024, usedBytes: usedKb * 1024 };
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     try {
       const r = await process.run(['df', '-B1', '--output=size,used', '/'], {
         timeoutMs: 3_000,

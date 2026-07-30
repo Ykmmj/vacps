@@ -109,7 +109,18 @@ export function computeExpiresAt(
   return new Date(base + days * 86_400_000).toISOString();
 }
 
-export function computeOutputExpiresAt(terminalAtIso: string): string {
+/**
+ * @param retentionSeconds Per-task output.retention_seconds when known; else default 7d policy.
+ */
+export function computeOutputExpiresAt(
+  terminalAtIso: string,
+  retentionSeconds?: number | null,
+): string {
+  if (typeof retentionSeconds === 'number' && Number.isFinite(retentionSeconds) && retentionSeconds > 0) {
+    const base = Date.parse(terminalAtIso);
+    const t = Number.isNaN(base) ? Date.now() : base;
+    return new Date(t + retentionSeconds * 1000).toISOString();
+  }
   return addHours(terminalAtIso, OUTPUT_RETENTION_DAYS * 24);
 }
 

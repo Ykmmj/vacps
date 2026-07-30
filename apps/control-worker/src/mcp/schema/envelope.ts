@@ -97,9 +97,12 @@ export function categoryFor(code: string): ErrorCategory {
     code.includes('revision') ||
     code === 'stream_version_conflict' ||
     code === 'task_not_terminal' ||
+    code === 'not_cancellable' ||
+    code === 'already_terminal' ||
     code === 'cleanup_scope_changed' ||
     code.endsWith('_not_terminal') ||
-    code.endsWith('_scope_changed')
+    code.endsWith('_scope_changed') ||
+    code.endsWith('_not_cancellable')
   ) {
     return 'conflict';
   }
@@ -114,6 +117,7 @@ export function categoryFor(code: string): ErrorCategory {
   }
   if (code.includes('rate_limit') || code.includes('too_many')) return 'rate_limit';
   if (code.includes('timeout') || code.includes('timed_out')) return 'timeout';
+  if (code === 'output_expired' || code.endsWith('_expired')) return 'not_found';
   if (code.includes('dependency')) return 'dependency';
   if (
     code.includes('unreachable') ||

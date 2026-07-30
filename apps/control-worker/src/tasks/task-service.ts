@@ -80,6 +80,8 @@ export interface TaskIndex {
   finishedAt?: string;
   terminalAt?: string;
   expiresAt?: string;
+  /** When set, agent/CP should refuse output reads after this instant. */
+  outputExpiresAt?: string;
   labels?: Record<string, string>;
   environment?: string;
   retentionClass?: string;
@@ -233,8 +235,9 @@ export class TaskService {
           `INSERT INTO tasks (
              id, backend_id, type, kind, source, profile, name, summary, status, schedule_id,
              idempotency_key, request_hash, created_at, updated_at,
-             labels_json, environment, retention_class, cleanup_state
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, 'none')`,
+             labels_json, environment, retention_class, cleanup_state,
+             output_retention_seconds
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?)`,
         )
         .bind(
           taskId,
@@ -254,6 +257,7 @@ export class TaskService {
           labelsJson,
           environment,
           initialRetentionClass,
+          input.output?.retention_seconds ?? 86_400,
         )
         .run();
       if (input.idempotency_key) {
@@ -413,38 +417,62 @@ export class TaskService {
       let output: unknown;
       let result: unknown = remote?.result;
       if (options.includeCommands || options.includeOutputPreview) {
-        const logs = (await this.client.getLogs(backend, id, {
-          previewMaxBytes,
-        })) as {
-          commands?: Array<Record<string, unknown>>;
-        };
-        if (options.includeCommands) {
-          commands = Array.isArray(logs.commands)
-            ? logs.commands.map((cmd) => normalizeCommandEntry(cmd, id))
-            : [];
-        }
-        if (options.includeOutputPreview) {
-          const last = Array.isArray(logs.commands) ? logs.commands.at(-1) : undefined;
-          output = {
-            stdout: streamPreview(last, 'stdout', previewMaxBytes, id),
-            stderr: streamPreview(last, 'stderr', previewMaxBytes, id),
+        const outputExpired =
+          Boolean(refreshed.outputExpiresAt) &&
+          Date.parse(refreshed.outputExpiresAt!) <= Date.now();
+        if (outputExpired) {
+          if (options.includeCommands) commands = [];
+          if (options.includeOutputPreview) {
+            output = {
+              stdout: expiredStreamPreview(id, 'stdout'),
+              stderr: expiredStreamPreview(id, 'stderr'),
+            };
+          }
+        } else {
+          const logs = (await this.client.getLogs(backend, id, {
+            previewMaxBytes,
+          })) as {
+            commands?: Array<Record<string, unknown>>;
+            expired?: boolean;
           };
-          // Prefer structured process result without embedding full stdout/stderr text twice.
-          if (result && typeof result === 'object') {
-            const r = result as Record<string, unknown>;
-            result = {
-              kind: 'process',
-              exit_code: r.exitCode ?? r.exit_code ?? null,
-              signal: r.signal ?? null,
-              timed_out: r.timedOut ?? r.timed_out ?? false,
-            };
-          } else if (last) {
-            result = {
-              kind: 'process',
-              exit_code: last.exitCode ?? last.exit_code ?? null,
-              signal: last.signal ?? null,
-              timed_out: false,
-            };
+          if (logs.expired) {
+            if (options.includeCommands) commands = [];
+            if (options.includeOutputPreview) {
+              output = {
+                stdout: expiredStreamPreview(id, 'stdout'),
+                stderr: expiredStreamPreview(id, 'stderr'),
+              };
+            }
+          } else {
+            if (options.includeCommands) {
+              commands = Array.isArray(logs.commands)
+                ? logs.commands.map((cmd) => normalizeCommandEntry(cmd, id))
+                : [];
+            }
+            if (options.includeOutputPreview) {
+              const last = Array.isArray(logs.commands) ? logs.commands.at(-1) : undefined;
+              output = {
+                stdout: streamPreview(last, 'stdout', previewMaxBytes, id),
+                stderr: streamPreview(last, 'stderr', previewMaxBytes, id),
+              };
+              // Prefer structured process result without embedding full stdout/stderr text twice.
+              if (result && typeof result === 'object') {
+                const r = result as Record<string, unknown>;
+                result = {
+                  kind: 'process',
+                  exit_code: r.exitCode ?? r.exit_code ?? null,
+                  signal: r.signal ?? null,
+                  timed_out: r.timedOut ?? r.timed_out ?? false,
+                };
+              } else if (last) {
+                result = {
+                  kind: 'process',
+                  exit_code: last.exitCode ?? last.exit_code ?? null,
+                  signal: last.signal ?? null,
+                  timed_out: false,
+                };
+              }
+            }
           }
         }
       }
@@ -476,6 +504,15 @@ export class TaskService {
     },
   ): Promise<unknown> {
     const task = await this.get(id);
+    // Enforce CP-side output TTL when recorded (defaults to 7d; agent may use tighter retention_seconds).
+    if (task.outputExpiresAt && Date.parse(task.outputExpiresAt) <= Date.now()) {
+      throw new AppError(
+        'output_expired',
+        'Task output has expired per retention policy.',
+        410,
+        { stream: input.stream, output_expires_at: task.outputExpiresAt },
+      );
+    }
     const backend = await this.backends.get(task.backendId);
     try {
       const payload = (await this.client.getLogs(backend, id, {
@@ -495,7 +532,17 @@ export class TaskService {
       };
     } catch (error) {
       if (error instanceof AppError && error.code === 'stream_version_conflict') throw error;
-      // Backend may return current_stream_version in details/message body.
+      // Native agent returns 410 output_expired when retention_seconds elapsed.
+      if (error instanceof AppError && error.code === 'output_expired') throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('output_expired') || message.includes('410')) {
+        throw new AppError(
+          'output_expired',
+          'Task output has expired per retention policy.',
+          410,
+          { stream: input.stream },
+        );
+      }
       throw error;
     }
   }
@@ -1423,7 +1470,7 @@ export class TaskService {
 
     const row = await this.db
       .prepare(
-        'SELECT labels_json, environment, terminal_at, retention_class FROM tasks WHERE id = ?',
+        'SELECT labels_json, environment, terminal_at, retention_class, output_retention_seconds FROM tasks WHERE id = ?',
       )
       .bind(id)
       .first<{
@@ -1431,13 +1478,17 @@ export class TaskService {
         environment: string | null;
         terminal_at: string | null;
         retention_class: string | null;
+        output_retention_seconds: number | null;
       }>();
     const labels = parseLabelsJson(row?.labels_json);
     const environment = row?.environment ?? environmentFromLabels(labels);
     const retentionClass = retentionClassFor(status, labels, environment);
     const terminalAt = row?.terminal_at ?? now;
     const expiresAt = computeExpiresAt(terminalAt, retentionClass, status);
-    const outputExpiresAt = computeOutputExpiresAt(terminalAt);
+    const outputExpiresAt = computeOutputExpiresAt(
+      terminalAt,
+      row?.output_retention_seconds ?? null,
+    );
 
     await this.db
       .prepare(
@@ -1615,6 +1666,7 @@ function toTaskIndex(row: TaskRow): TaskIndex {
     ...(row.finished_at ? { finishedAt: row.finished_at } : {}),
     ...(row.terminal_at ? { terminalAt: row.terminal_at } : {}),
     ...(row.expires_at ? { expiresAt: row.expires_at } : {}),
+    ...(row.output_expires_at ? { outputExpiresAt: row.output_expires_at } : {}),
     ...(Object.keys(labels).length ? { labels } : {}),
     ...(row.environment ? { environment: row.environment } : {}),
     ...(row.retention_class ? { retentionClass: row.retention_class } : {}),
@@ -1689,6 +1741,18 @@ function extractStatus(value: unknown): TaskStatus | undefined {
     : undefined;
 }
 
+function expiredStreamPreview(taskId: string, stream: 'stdout' | 'stderr') {
+  return {
+    available: false,
+    bytes: 0,
+    complete: true,
+    truncated: false,
+    preview: '',
+    state: 'expired',
+    resource_uri: `vacps://tasks/${taskId}/output/${stream}`,
+  };
+}
+
 function streamPreview(
   command: Record<string, unknown> | undefined,
   stream: 'stdout' | 'stderr',
@@ -1707,6 +1771,8 @@ function streamPreview(
   }
   const previewKey = stream === 'stdout' ? 'stdoutPreview' : 'stderrPreview';
   const bytesKey = stream === 'stdout' ? 'stdoutBytes' : 'stderrBytes';
+  const bytesSnake = stream === 'stdout' ? 'stdout_bytes' : 'stderr_bytes';
+  const completeSnake = stream === 'stdout' ? 'stdout_complete' : 'stderr_complete';
   const text =
     typeof command[stream] === 'string'
       ? (command[stream] as string)
@@ -1714,16 +1780,25 @@ function streamPreview(
         ? (command[previewKey] as string)
         : '';
   const bytes =
-    typeof command[bytesKey] === 'number' ? (command[bytesKey] as number) : utf8ByteLength(text);
+    typeof command[bytesKey] === 'number'
+      ? (command[bytesKey] as number)
+      : typeof command[bytesSnake] === 'number'
+        ? (command[bytesSnake] as number)
+        : utf8ByteLength(text);
   const truncated = utf8ByteLength(text) > maxBytes || bytes > maxBytes;
   const preview =
     utf8ByteLength(text) > maxBytes
       ? new TextDecoder().decode(new TextEncoder().encode(text).slice(0, maxBytes))
       : text;
+  const complete =
+    command.status === 'succeeded' ||
+    command.status === 'failed' ||
+    command[completeSnake] === true ||
+    Boolean(command.finishedAt ?? command.finished_at);
   return {
     available: Boolean(text) || bytes > 0,
     bytes,
-    complete: command.status === 'succeeded' || command.status === 'failed',
+    complete,
     truncated,
     preview,
     resource_uri: `vacps://tasks/${taskId}/output/${stream}`,
