@@ -200,8 +200,28 @@ export class NativeTelemetryCollector {
     } catch {
       /* ignore */
     }
+    // /etc is host metadata (not MCP tools); pure vacps:fs may read it.
+    let distribution: string | undefined;
+    let version: string | undefined;
+    try {
+      const release = await fs.readText('/etc/os-release');
+      const map = new Map<string, string>();
+      for (const line of release.split('\n')) {
+        const m = line.match(/^([A-Z_]+)=(.*)$/);
+        if (!m?.[1]) continue;
+        map.set(m[1], (m[2] ?? '').replace(/^"|"$/g, ''));
+      }
+      const pretty = map.get('PRETTY_NAME') || map.get('NAME');
+      if (pretty) distribution = pretty.slice(0, 120);
+      const ver = map.get('VERSION_ID');
+      if (ver) version = ver.slice(0, 120);
+    } catch {
+      /* ignore */
+    }
     return {
       platform: 'linux',
+      ...(distribution ? { distribution } : {}),
+      ...(version ? { version } : {}),
       kernel,
       architecture: arch,
     };

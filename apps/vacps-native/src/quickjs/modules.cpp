@@ -583,14 +583,15 @@ JSModuleDef* init_module_http(JSContext* ctx, const char* name) {
   return m;
 }
 
-// ── vacps:fs (async: stream_file and/or thread_pool; path-guard sync) ──
+// ── vacps:fs (async: stream_file and/or thread_pool; pure path resolve) ──
+// Product path policy (MCP tools) is JS runtime/path-guard.ts — not here.
 
 Result<std::filesystem::path> resolve_user_path(JSContext* ctx, JSValueConst path_v) {
   auto* host = host_from(ctx);
   if (!host) return std::unexpected(Error{"fs: host not initialized"});
   auto p = converter<std::string>::from_js(ctx, path_v);
   if (!p) return std::unexpected(std::move(p.error()));
-  // Relative paths use dataDir as workspace (like Node workspace/cwd).
+  // Relative → dataDir join only (no policy). Absolute paths pass through.
   return vacps::fs::resolve_path(host->config().data_dir, *p);
 }
 

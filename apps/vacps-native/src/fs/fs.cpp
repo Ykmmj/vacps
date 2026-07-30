@@ -13,8 +13,6 @@
 namespace vacps::fs {
 namespace {
 
-constexpr std::string_view kForbiddenPrefixes[] = {"/proc", "/sys", "/dev"};
-
 VoidResult io_error(std::string_view op, const std::filesystem::path& p, const std::error_code& ec) {
   return std::unexpected(Error{std::format("{} failed ({}): {}", op, p.string(), ec.message())});
 }
@@ -23,48 +21,7 @@ bool contains_null(std::string_view s) {
   return s.find('\0') != std::string_view::npos;
 }
 
-bool is_forbidden_prefix(const std::filesystem::path& p) {
-  const std::string s = p.lexically_normal().string();
-  for (const auto prefix : kForbiddenPrefixes) {
-    if (s == prefix || s.starts_with(std::string(prefix) + "/")) {
-      return true;
-    }
-  }
-  return false;
-}
-
-std::filesystem::path normalize_existing_or_lexical(const std::filesystem::path& p) {
-  std::error_code ec;
-  auto canon = std::filesystem::weakly_canonical(p, ec);
-  if (!ec) {
-    return canon;
-  }
-  return std::filesystem::absolute(p, ec).lexically_normal();
-}
-
 }  // namespace
-
-Result<std::filesystem::path> assert_safe_absolute_path(std::string_view file_path) {
-  if (file_path.empty()) {
-    return std::unexpected(Error{"path is required"});
-  }
-  if (contains_null(file_path)) {
-    return std::unexpected(Error{"path contains a null byte"});
-  }
-  const std::filesystem::path input{std::string{file_path}};
-  if (!input.is_absolute()) {
-    return std::unexpected(Error{"path must be absolute"});
-  }
-  const auto normalized = normalize_existing_or_lexical(input);
-  if (is_forbidden_prefix(normalized)) {
-    return std::unexpected(Error{std::format(
-        "path under {} is not allowed",
-        normalized.string().starts_with("/proc")   ? "/proc"
-        : normalized.string().starts_with("/sys")  ? "/sys"
-                                                   : "/dev")});
-  }
-  return normalized;
-}
 
 Result<std::filesystem::path> resolve_path(
     const std::filesystem::path& workspace_root,
@@ -72,21 +29,14 @@ Result<std::filesystem::path> resolve_path(
   if (user_path.empty()) {
     return std::unexpected(Error{"path is required"});
   }
+  // Embedded NUL cannot be expressed to open(2); technical limit, not product policy.
   if (contains_null(user_path)) {
     return std::unexpected(Error{"path contains a null byte"});
   }
 
   const std::filesystem::path input{std::string{user_path}};
   if (input.is_absolute()) {
-    // Node: absolute paths are allowed (path guard only).
-    return assert_safe_absolute_path(user_path);
-  }
-
-  // Relative: no ".." segments (Node path-guard).
-  for (const auto& part : input) {
-    if (part == "..") {
-      return std::unexpected(Error{"relative path must not contain \"..\""});
-    }
+    return input.lexically_normal();
   }
 
   std::error_code ec;
@@ -97,37 +47,7 @@ Result<std::filesystem::path> resolve_path(
       return std::unexpected(Error{std::format("invalid workspace root: {}", ec.message())});
     }
   }
-  auto root_ok = assert_safe_absolute_path(root.string());
-  if (!root_ok) {
-    // Workspace itself under /proc etc. is invalid.
-    return std::unexpected(std::move(root_ok.error()));
-  }
-  root = *root_ok;
-
-  const auto resolved = (root / input).lexically_normal();
-  const auto rel = std::filesystem::relative(resolved, root, ec);
-  if (ec) {
-    return std::unexpected(Error{std::format("path resolve failed: {}", ec.message())});
-  }
-  const auto rel_s = rel.string();
-  if (rel_s.starts_with("..") || rel.is_absolute()) {
-    return std::unexpected(Error{"path escapes workspace"});
-  }
-
-  // If path exists (or parents do), reject symlink escapes outside workspace.
-  auto canon = std::filesystem::weakly_canonical(resolved, ec);
-  if (!ec) {
-    const auto crel = std::filesystem::relative(canon, root, ec);
-    if (!ec) {
-      const auto crel_s = crel.string();
-      if (crel_s.starts_with("..") || crel.is_absolute()) {
-        return std::unexpected(Error{"path escapes workspace (symlink)"});
-      }
-    }
-    return assert_safe_absolute_path(canon.string());
-  }
-
-  return assert_safe_absolute_path(resolved.string());
+  return (root / input).lexically_normal();
 }
 
 Result<std::string> read_text(const std::filesystem::path& path) {
@@ -273,7 +193,6 @@ Result<FileStat> file_stat(const std::filesystem::path& path) {
   }
   auto ftime = std::filesystem::last_write_time(path, ec);
   if (!ec) {
-    // Convert file_time_type to system_clock ms (C++20/23 portable-ish).
     using namespace std::chrono;
     const auto sctp = time_point_cast<system_clock::duration>(
         ftime - std::filesystem::file_time_type::clock::now() + system_clock::now());
@@ -281,7 +200,6 @@ Result<FileStat> file_stat(const std::filesystem::path& path) {
         duration_cast<milliseconds>(sctp.time_since_epoch()).count();
   }
 #if defined(__linux__)
-  // access(2) for effective UID readability/writability.
   st.readable = (::access(path.c_str(), R_OK) == 0);
   st.writable = (::access(path.c_str(), W_OK) == 0);
 #else

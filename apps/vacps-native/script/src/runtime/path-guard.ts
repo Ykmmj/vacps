@@ -1,6 +1,9 @@
 /**
- * Path rules aligned with apps/vacps/src/runtime/path-guard.ts.
- * Absolute paths only for control-plane file APIs (C++ vacps:fs also enforces).
+ * MCP / tool path policy (aligned with apps/vacps/src/runtime/path-guard.ts).
+ *
+ * Apply only at business tool boundaries (files.*, process cwd, …).
+ * Host telemetry and other agent-internal code use vacps:fs directly —
+ * C++ vacps:fs is pure I/O with no product path bans.
  */
 
 const FORBIDDEN_PREFIXES = ['/proc', '/sys', '/dev'] as const;

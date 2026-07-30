@@ -161,7 +161,7 @@ apps/vacps-native/
 │   ├── storage/      # SQLite
 │   ├── http/
 │   ├── crypto/
-│   └── fs/           # path-guard + file IO
+│   └── fs/           # pure file I/O (policy in JS path-guard)
 ├── tests/            # gtest
 └── README.md
 ```

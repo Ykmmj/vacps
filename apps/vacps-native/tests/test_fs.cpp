@@ -26,35 +26,34 @@ class FsTest : public ::testing::Test {
   fs::path root_;
 };
 
-TEST_F(FsTest, AbsoluteAllowedExceptKernelFs) {
-  // Node path-guard: absolute paths OK (e.g. /etc).
-  auto etc = vacps::fs::assert_safe_absolute_path("/etc/passwd");
+TEST_F(FsTest, AbsolutePathsIncludingKernelFs) {
+  auto etc = vacps::fs::resolve_path(root_, "/etc/passwd");
   ASSERT_TRUE(etc) << etc.error().message;
   EXPECT_TRUE(etc->is_absolute());
 
-  auto via_resolve = vacps::fs::resolve_path(root_, "/etc/hosts");
-  ASSERT_TRUE(via_resolve) << via_resolve.error().message;
+  // Pure I/O: no product ban on /proc /sys /dev (JS path-guard owns that).
+  auto proc = vacps::fs::resolve_path(root_, "/proc/self/status");
+  ASSERT_TRUE(proc) << proc.error().message;
+  EXPECT_EQ(proc->string(), "/proc/self/status");
 
-  EXPECT_FALSE(vacps::fs::assert_safe_absolute_path("/proc/self/status"));
-  EXPECT_FALSE(vacps::fs::assert_safe_absolute_path("/sys/kernel"));
-  EXPECT_FALSE(vacps::fs::assert_safe_absolute_path("/dev/null"));
-  EXPECT_FALSE(vacps::fs::resolve_path(root_, "/proc/cpuinfo"));
+  auto sys = vacps::fs::resolve_path(root_, "/sys/kernel");
+  ASSERT_TRUE(sys) << sys.error().message;
+
+  auto dev = vacps::fs::resolve_path(root_, "/dev/null");
+  ASSERT_TRUE(dev) << dev.error().message;
 }
 
-TEST_F(FsTest, RelativeMustStayInWorkspace) {
+TEST_F(FsTest, RelativeJoinsWorkspaceNoPolicy) {
+  // ".." is allowed at the I/O layer; tool APIs must filter in JS.
   auto up = vacps::fs::resolve_path(root_, "../escape");
-  EXPECT_FALSE(up);
+  ASSERT_TRUE(up) << up.error().message;
+  EXPECT_EQ(up->filename(), "escape");
 
   auto ok = vacps::fs::resolve_path(root_, "a/b.txt");
   ASSERT_TRUE(ok) << ok.error().message;
   EXPECT_EQ(ok->filename(), "b.txt");
-  // Must be under root_
   const auto rel = fs::relative(*ok, fs::absolute(root_));
   EXPECT_FALSE(rel.string().starts_with(".."));
-}
-
-TEST_F(FsTest, RelativeRejectsAbsoluteRequirementOnAssert) {
-  EXPECT_FALSE(vacps::fs::assert_safe_absolute_path("relative.txt"));
 }
 
 TEST_F(FsTest, FileStatMetadata) {
@@ -122,19 +121,18 @@ TEST_F(FsTest, NullByteRejected) {
   rel += "b";
   EXPECT_FALSE(vacps::fs::resolve_path(root_, rel));
 
-  // C string literals truncate at \0 — build an explicit embedded-null path.
   std::string abs = "/tmp/x";
   abs.push_back('\0');
   abs += "y";
-  EXPECT_FALSE(vacps::fs::assert_safe_absolute_path(abs));
+  EXPECT_FALSE(vacps::fs::resolve_path(root_, abs));
 }
 
 TEST_F(FsTest, EmptyPathRejected) {
   EXPECT_FALSE(vacps::fs::resolve_path(root_, ""));
-  EXPECT_FALSE(vacps::fs::assert_safe_absolute_path(""));
 }
 
-TEST_F(FsTest, SymlinkEscapeRejected) {
+TEST_F(FsTest, SymlinkResolveIsPureIo) {
+  // I/O layer does not inspect or reject symlink targets.
   const auto outside = fs::temp_directory_path() / "vacps_fs_outside" /
                        std::to_string(::getpid());
   fs::create_directories(outside);
@@ -149,7 +147,10 @@ TEST_F(FsTest, SymlinkEscapeRejected) {
   }
 
   auto r = vacps::fs::resolve_path(root_, "escape-link");
-  EXPECT_FALSE(r) << (r ? r->string() : r.error().message);
+  ASSERT_TRUE(r) << r.error().message;
+  auto text = vacps::fs::read_text(*r);
+  ASSERT_TRUE(text) << text.error().message;
+  EXPECT_EQ(*text, "nope");
 
   fs::remove_all(outside, ec);
 }
@@ -161,4 +162,14 @@ TEST_F(FsTest, NestedRelativeOk) {
   auto rd = vacps::fs::read_text(*p);
   ASSERT_TRUE(rd);
   EXPECT_EQ(*rd, "z");
+}
+
+TEST_F(FsTest, ReadProcLoadavgWhenPresent) {
+  auto path = vacps::fs::resolve_path(root_, "/proc/loadavg");
+  ASSERT_TRUE(path);
+  auto text = vacps::fs::read_text(*path);
+  if (!text) {
+    GTEST_SKIP() << "no /proc/loadavg: " << text.error().message;
+  }
+  EXPECT_FALSE(text->empty());
 }

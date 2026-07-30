@@ -124,7 +124,9 @@ const res = await http.request({
 
 ## `vacps:fs`
 
-路径规则对齐 Node `path-guard`（禁止 `/proc` `/sys` `/dev`；相对路径相对 dataDir）。
+**纯 I/O**：C++ 不做产品路径策略。相对路径仅拼到 `dataDir` 下；绝对路径原样使用。  
+MCP / 文件工具的黑名单与 workspace 约束在 JS `runtime/path-guard.ts`（与 Node agent 一致）。  
+宿主内部（如 telemetry 读 `/proc`）直接 `fs.readText`，不经 path-guard。
 
 全部 API 返回 **`Promise`**（不阻塞 Host `io_context` 线程）：
 

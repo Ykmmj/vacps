@@ -17,7 +17,7 @@ struct DirEntry {
   std::uint64_t size{0};
 };
 
-/** Metadata for vacps:fs.stat (path-guarded absolute path). */
+/** Metadata for vacps:fs.stat. */
 struct FileStat {
   std::string path;
   /** "file" | "directory" | "symlink" | "other" */
@@ -31,23 +31,19 @@ struct FileStat {
 };
 
 /**
- * Path rules aligned with Node agent `runtime/path-guard.ts`:
- * - Absolute paths allowed except under /proc, /sys, /dev.
- * - Relative paths resolve under workspace_root; must not contain ".." segments
- *   and must not escape the workspace.
- * - Not a process sandbox / chroot (design §29).
- */
-[[nodiscard]] Result<std::filesystem::path> assert_safe_absolute_path(std::string_view file_path);
-
-/**
- * @param workspace_root  Base for relative paths (e.g. VACPS_DATA_DIR or cwd).
- *                        Made absolute if needed.
+ * Pure path resolution (no product policy).
+ *
+ * - Empty path / embedded NUL → error (cannot open).
+ * - Absolute: returned lexically normalized.
+ * - Relative: joined under workspace_root, then lexically normalized.
+ *
+ * MCP / tool path policy (forbid /proc, workspace escape, …) lives in JS
+ * `runtime/path-guard.ts`, not here.
  */
 [[nodiscard]] Result<std::filesystem::path> resolve_path(
     const std::filesystem::path& workspace_root,
     std::string_view user_path);
 
-/** @deprecated Prefer resolve_path — kept as alias for call-site clarity. */
 [[nodiscard]] inline Result<std::filesystem::path> resolve_under(
     const std::filesystem::path& root,
     std::string_view user_path) {
