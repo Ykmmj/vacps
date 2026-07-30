@@ -90,7 +90,19 @@ else
 fi
 
 # Business script (TypeScript) builds on the host — Alpine image has no Node.
+# typecheck path-maps @vacps/contracts → packages/contracts/src, so contracts must
+# have its deps (zod) installed (pnpm workspace or local npm in packages/contracts).
 if [[ -f "$ROOT/apps/vacps-native/script/package.json" ]]; then
+  echo "==> ensure monorepo contracts deps for script typecheck/esbuild"
+  if command -v pnpm >/dev/null 2>&1 && [[ -f "$ROOT/pnpm-lock.yaml" ]]; then
+    if [[ ! -d "$ROOT/node_modules" ]]; then
+      (cd "$ROOT" && pnpm install --frozen-lockfile)
+    fi
+    (cd "$ROOT" && pnpm --filter @vacps/contracts build) || true
+  elif [[ -f "$ROOT/packages/contracts/package.json" ]]; then
+    (cd "$ROOT/packages/contracts" && npm install --omit=dev --no-fund --no-audit)
+  fi
+
   echo "==> npm run build + test (script/)"
   if [[ -f "$ROOT/apps/vacps-native/script/package-lock.json" ]]; then
     (cd "$ROOT/apps/vacps-native/script" && npm ci && npm run build && npm test)
