@@ -1,0 +1,13 @@
+/build/
+/cmake-build-*/
+/.cache/
+compile_commands.json
+*.o
+*.a
+*.so
+CMakeUserPresets.json
+
+# Host-side TypeScript package (built in CI / docker/build.sh)
+/script/node_modules/
+/script/dist/
+/script/coverage/

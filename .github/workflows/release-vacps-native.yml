@@ -1,0 +1,148 @@
+# Build and publish the vacps-native agent (Linux x86_64 musl static binary).
+#
+# Triggers:
+#   - Push tag: vacps-native-v*   (e.g. vacps-native-v0.1.0)
+#   - workflow_dispatch with optional tag name
+#
+# Assets on the GitHub Release:
+#   - vacps-agent-linux-x86_64
+#   - vacps.mjs                  (business script bundle)
+#   - vacps-native-<version>.tar.gz  (binary + script + SHA256SUMS)
+#   - SHA256SUMS
+name: Release vacps-native
+
+on:
+  push:
+    tags:
+      - 'vacps-native-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label without prefix (e.g. 0.1.0). Used only for asset naming when not on a tag.'
+        required: false
+        default: 'dev'
+      create_release:
+        description: 'Create a GitHub Release (true/false). On tag pushes always true.'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-vacps-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: Build musl static agent + publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME}" == vacps-native-v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#vacps-native-v}"
+          else
+            VERSION="${{ github.event.inputs.version || 'dev' }}"
+            TAG="vacps-native-v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG}"
+
+      - name: Setup Node (script package)
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Build agent (Docker + ctest)
+        run: bash apps/vacps-native/docker/build.sh release --test --rebuild-image
+
+      - name: Collect artifacts
+        id: art
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          OUT="$ROOT/dist/vacps-native"
+          mkdir -p "$OUT" "$ROOT/dist"
+          BIN="apps/vacps-native/build/release/vacps-agent-linux-x86_64"
+          SCRIPT="apps/vacps-native/script/dist/vacps.mjs"
+          test -x "$BIN" || test -f "$BIN"
+          test -f "$SCRIPT"
+          cp -a "$BIN" "$OUT/vacps-agent-linux-x86_64"
+          chmod +x "$OUT/vacps-agent-linux-x86_64"
+          cp -a "$SCRIPT" "$OUT/vacps.mjs"
+          TAR_FILES=(vacps-agent-linux-x86_64 vacps.mjs)
+          if [[ -f apps/vacps-native/script/dist/vacps.mjs.map ]]; then
+            cp -a apps/vacps-native/script/dist/vacps.mjs.map "$OUT/vacps.mjs.map"
+            TAR_FILES+=(vacps.mjs.map)
+          fi
+          VERSION="${{ steps.ver.outputs.version }}"
+          TARBALL="$ROOT/dist/vacps-native-${VERSION}-linux-x86_64.tar.gz"
+          (
+            cd "$OUT"
+            sha256sum "${TAR_FILES[@]}" > SHA256SUMS
+            tar -czf "$TARBALL" "${TAR_FILES[@]}" SHA256SUMS
+          )
+          ls -la "$OUT" "$ROOT/dist"
+          file "$OUT/vacps-agent-linux-x86_64" || true
+          "$OUT/vacps-agent-linux-x86_64" --version || true
+          echo "dir=$OUT" >> "$GITHUB_OUTPUT"
+          echo "tarball=dist/vacps-native-${VERSION}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vacps-native-${{ steps.ver.outputs.version }}-linux-x86_64
+          path: |
+            dist/vacps-native/**
+            ${{ steps.art.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: >-
+          github.ref_type == 'tag' ||
+          github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: vacps-native ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          # workflow_dispatch without existing tag: create tag from current SHA
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/vacps-native/vacps-agent-linux-x86_64
+            dist/vacps-native/vacps.mjs
+            dist/vacps-native/SHA256SUMS
+            ${{ steps.art.outputs.tarball }}
+          body: |
+            ## vacps-native ${{ steps.ver.outputs.version }}
+
+            Linux **x86_64 musl static** agent binary + QuickJS business script.
+
+            ### Assets
+            | File | Description |
+            |------|-------------|
+            | `vacps-agent-linux-x86_64` | Static ELF agent |
+            | `vacps.mjs` | Bundled business script (load with `--script`) |
+            | `vacps-native-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz` | Binary + script + checksums |
+            | `SHA256SUMS` | SHA-256 of binary and script |
+
+            ### Smoke
+            ```bash
+            tar -xzf vacps-native-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz
+            ./vacps-agent-linux-x86_64 --version
+            ./vacps-agent-linux-x86_64 --script ./vacps.mjs --port 8788 --data-dir ./data
+            ```
+
+            Built from `${{ github.sha }}` via `apps/vacps-native/docker/build.sh release --test`.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
