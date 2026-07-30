@@ -123,6 +123,7 @@ add_library(vacps_native_core STATIC
   src/quickjs/context.cpp
   src/quickjs/host.cpp
   src/quickjs/modules.cpp
+  src/quickjs/url_globals.cpp
 )
 
 target_include_directories(vacps_native_core PUBLIC
@@ -147,6 +148,7 @@ target_link_libraries(vacps_native_core PUBLIC
   vacps_sqlite
   vacps_quickjs
   vacps_boost_process
+  ada
   spdlog::spdlog
   nlohmann_json::nlohmann_json
   OpenSSL::SSL
@@ -204,6 +206,7 @@ if(VACPS_BUILD_TESTS)
     tests/test_config.cpp
     tests/test_host.cpp
     tests/test_js_native_api.cpp
+    tests/test_url_global.cpp
     tests/test_http_client.cpp
     tests/test_js_tasks.cpp
   )
