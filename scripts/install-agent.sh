@@ -400,18 +400,27 @@ EOF
 }
 
 install_quick_tunnel_service() {
+  # Both node and native installers listen on 3100 so managed/quick tunnels share origin.
+  local agent_port=3100
   install -d /usr/local/lib/vacps
-  cat >/usr/local/lib/vacps/quick-tunnel.sh <<'EOF'
+  # Expand agent_port into the helper (not quoted heredoc).
+  cat >/usr/local/lib/vacps/quick-tunnel.sh <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
 ENVIRONMENT_FILE=/etc/vacps/vacps.env
+AGENT_LOCAL_URL=http://127.0.0.1:${agent_port}
 while true; do
-  cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3100 2>&1 | while IFS= read -r line; do
-    printf '%s\n' "$line"
-    if [[ $line =~ https://[-a-z0-9]+\.trycloudflare\.com ]]; then
-      public_url=${BASH_REMATCH[0]}
-      sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=$public_url|" "$ENVIRONMENT_FILE"
+  cloudflared tunnel --no-autoupdate --url "\$AGENT_LOCAL_URL" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "\$line"
+    if [[ \$line =~ https://[-a-z0-9]+\\.trycloudflare\\.com ]]; then
+      public_url=\${BASH_REMATCH[0]}
+      if grep -q '^PUBLIC_BASE_URL=' "\$ENVIRONMENT_FILE" 2>/dev/null; then
+        sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=\$public_url|" "\$ENVIRONMENT_FILE"
+      else
+        printf 'PUBLIC_BASE_URL=%s\n' "\$public_url" >>"\$ENVIRONMENT_FILE"
+      fi
+      # Reload EnvironmentFile so the agent re-registers with the new public URL.
       systemctl try-restart vacps
     fi
   done || true
@@ -436,6 +445,7 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now vacps-quick-tunnel
+  echo "Quick Tunnel helper targets $agent_port (runtime: $AGENT_RUNTIME)."
 }
 
 # Create/repair the agent system user with a full login home (required for shell.exec).
@@ -551,6 +561,9 @@ EOF
 }
 
 write_systemd_unit_native() {
+  # Port 3100 matches control-plane managed tunnel ingress (http://127.0.0.1:3100)
+  # and Node vacps default, so the same Cloudflare Tunnel token works for both runtimes.
+  local agent_port=3100
   install -d /etc/systemd/system/vacps.service.d
   cat >/etc/systemd/system/vacps.service <<EOF
 [Unit]
@@ -571,8 +584,8 @@ EnvironmentFile=$ENVIRONMENT_FILE
 Environment=VACPS_DATA_DIR=$DATA_DIRECTORY
 Environment=VACPS_SCRIPT=$NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME
 Environment=VACPS_LISTEN_HOST=127.0.0.1
-Environment=VACPS_LISTEN_PORT=8788
-ExecStart=$NATIVE_INSTALL_DIR/$NATIVE_BIN_NAME --script $NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME --data-dir $DATA_DIRECTORY --host 127.0.0.1 --port 8788
+Environment=VACPS_LISTEN_PORT=$agent_port
+ExecStart=$NATIVE_INSTALL_DIR/$NATIVE_BIN_NAME --script $NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME --data-dir $DATA_DIRECTORY --host 127.0.0.1 --port $agent_port
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -940,6 +953,8 @@ upgrade_agent() {
 write_environment_file() {
   install -d /etc/vacps
   install -m 640 -o root -g "$SERVICE_USER" /dev/null "$ENVIRONMENT_FILE"
+  # Always write PUBLIC_BASE_URL= so quick-tunnel sed can update the line later.
+  # For --quick-tunnel the value starts empty; discovery fills it before re-register.
   if is_native_runtime; then
     cat >"$ENVIRONMENT_FILE" <<EOF
 AGENT_RUNTIME=native
@@ -957,7 +972,7 @@ TELEMETRY_FALLBACK_INTERVAL_SECONDS=120
 VACPS_DATA_DIR=$DATA_DIRECTORY
 VACPS_SCRIPT=$NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME
 VACPS_LISTEN_HOST=127.0.0.1
-VACPS_LISTEN_PORT=8788
+VACPS_LISTEN_PORT=3100
 DATABASE_PATH=$DATA_DIRECTORY/agent.db
 LOG_DIR=$DATA_DIRECTORY/logs
 EOF

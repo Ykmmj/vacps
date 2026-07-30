@@ -33,12 +33,18 @@ function bodyText(body: ArrayBuffer): string {
 
 /** POST /api/registrations — parity with apps/vacps registration module. */
 export async function registerWithControlPlane(config: AgentConfig): Promise<string | undefined> {
-  if (!registrationConfigured(config)) return undefined;
+  // Skip until PUBLIC_BASE_URL is a real absolute URL (managed --public-url or quick-tunnel).
+  if (!registrationConfigured(config) || !config.PUBLIC_BASE_URL) {
+    log.info(
+      'registration skipped: waiting for PUBLIC_BASE_URL (managed --public-url or quick-tunnel)',
+    );
+    return undefined;
+  }
 
   const payload = registerBackendSchema.parse({
     backendId: config.BACKEND_ID,
     name: config.BACKEND_NAME,
-    baseUrl: config.PUBLIC_BASE_URL!,
+    baseUrl: config.PUBLIC_BASE_URL,
     tags: config.BACKEND_TAGS,
     publicIps: [],
     agentVersion: host.version().slice(0, 48) || '0.1.0',
