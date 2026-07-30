@@ -57,10 +57,23 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Resolved version=${VERSION} tag=${TAG}"
 
-      - name: Setup Node (script package)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.14.0
+
+      - name: Setup Node
         uses: actions/setup-node@v7
         with:
           node-version: 22
+          cache: pnpm
+
+      # Script typecheck path-maps into packages/contracts/src; zod must resolve from monorepo.
+      - name: Install monorepo deps + build contracts
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm --filter @vacps/contracts build
 
       - name: Build agent (Docker + ctest)
         run: bash apps/vacps-native/docker/build.sh release --test --rebuild-image
