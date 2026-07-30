@@ -231,12 +231,50 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     if (!task) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
+
+    // Output TTL: task.output.retention_seconds from terminal time (agent-local).
+    const retentionSec = Math.max(
+      60,
+      Number(task.task.output?.retention_seconds ?? 86_400) || 86_400,
+    );
+    const terminalAt = task.finishedAt ? Date.parse(task.finishedAt) : NaN;
+    const outputExpired =
+      isTerminalTaskStatus(task.status) &&
+      Number.isFinite(terminalAt) &&
+      Date.now() - terminalAt > retentionSec * 1000;
+
     const offset = Math.max(0, Number(request.query.offset ?? '0') || 0);
     const stream = request.query.stream;
     const maxBytes = Math.min(
       Math.max(Number(request.query.max_bytes ?? '65536') || 65_536, 1),
       1_048_576,
     );
+    const previewMax = Math.min(
+      Math.max(Number(request.query.preview_max_bytes ?? '8192') || 8192, 0),
+      65_536,
+    );
+
+    if (outputExpired) {
+      if (stream === 'stdout' || stream === 'stderr') {
+        return reply.code(410).send({
+          error: {
+            code: 'output_expired',
+            message: 'Task output has expired per retention_seconds.',
+          },
+          task_id: id,
+          stream,
+          expired: true,
+        });
+      }
+      return {
+        task_id: id,
+        taskId: id,
+        expired: true,
+        commands: [],
+        logs: [],
+      };
+    }
+
     const logs = input.queue.listLogs(id, {
       offset,
       ...(stream ? { stream } : {}),
@@ -263,13 +301,63 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         eof: terminal && more.length === 0,
         total_bytes: content.length,
         truncated: false,
+        expired: false,
         encoding: 'utf-8',
         content,
+        stream_version: `native-seq:${nextOffset}`,
         logs,
       };
     }
 
-    return { task_id: id, logs };
+    // Control-plane tasks.get preview expects `commands[]` (Node shape), not raw log rows.
+    const allStdout = input.queue
+      .listLogs(id, { stream: 'stdout', offset: 0, limit: 2000 })
+      .map((r) => r.data)
+      .join('');
+    const allStderr = input.queue
+      .listLogs(id, { stream: 'stderr', offset: 0, limit: 2000 })
+      .map((r) => r.data)
+      .join('');
+    const clip = (s: string) => (s.length > previewMax ? s.slice(0, previewMax) : s);
+    const cmdStatus =
+      task.status === 'succeeded'
+        ? 'succeeded'
+        : task.status === 'failed' || task.status === 'timed_out' || task.status === 'cancelled'
+          ? 'failed'
+          : task.status;
+    const result = task.result as Record<string, unknown> | undefined;
+    const commands = [
+      {
+        id: '1',
+        sequence: 1,
+        command:
+          task.task.kind === 'command'
+            ? [task.task.program, ...(task.task.arguments ?? [])].join(' ')
+            : task.task.kind === 'shell'
+              ? task.task.command
+              : null,
+        cwd: task.task.working_directory ?? null,
+        status: cmdStatus,
+        exitCode: result?.exitCode ?? result?.exit_code ?? null,
+        exit_code: result?.exitCode ?? result?.exit_code ?? null,
+        startedAt: task.startedAt ?? null,
+        finishedAt: task.finishedAt ?? null,
+        stdout: clip(allStdout),
+        stderr: clip(allStderr),
+        stdoutPreview: clip(allStdout),
+        stderrPreview: clip(allStderr),
+        stdout_bytes: allStdout.length,
+        stderr_bytes: allStderr.length,
+        stdoutBytes: allStdout.length,
+        stderrBytes: allStderr.length,
+        stdout_truncated: allStdout.length > previewMax,
+        stderr_truncated: allStderr.length > previewMax,
+        stdout_complete: isTerminalTaskStatus(task.status),
+        stderr_complete: isTerminalTaskStatus(task.status),
+      },
+    ];
+
+    return { task_id: id, taskId: id, commands, logs };
   });
 
   app.post('/tasks/:id/cancel', async (request, reply) => {
@@ -567,7 +655,17 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return {
         ok: true,
         backend_id: input.config.BACKEND_ID,
-        ...(await files.filesDelete({ path: body.path })),
+        ...(await files.filesDelete({
+          path: body.path,
+          recursive: body.recursive === true,
+          dryRun: body.dry_run === true,
+          ...(typeof body.expected_sha256 === 'string'
+            ? { expectedSha256: body.expected_sha256 }
+            : {}),
+          ...(body.expected_type === 'file' || body.expected_type === 'directory'
+            ? { expectedType: body.expected_type }
+            : {}),
+        })),
       };
     } catch (error) {
       return runtimeError(reply, error);

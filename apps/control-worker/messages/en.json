@@ -1,5 +1,6 @@
 {
   "nodes": "Nodes",
+  "logs": "Logs",
   "install": "Install",
   "refresh": "Refresh",
   "light": "Light",
@@ -112,9 +113,8 @@
   "download": "Download",
   "upload": "Upload",
   "unavailable": "Unavailable",
-  "recentFailures": "Recent failures",
-  "recentFailuresHint": "Last {days} days · test tasks hidden · soft-deleted hidden",
-  "noRecentFailures": "No recent non-test failures in this window.",
+  "logsHint": "Last {days} days · test tasks hidden · soft-deleted hidden",
+  "noLogs": "No recent non-test failures in this window.",
   "clearTestHistory": "Clear test history ({count})",
   "clearingTestHistory": "Clearing…",
   "confirmClearTestHistory": "Soft-delete {count} terminal test task(s)? They stay recoverable for 24 hours, then auto hard-delete.",

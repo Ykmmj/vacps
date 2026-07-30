@@ -1,5 +1,6 @@
 {
   "nodes": "节点",
+  "logs": "日志",
   "install": "安装",
   "refresh": "刷新",
   "light": "浅色",
@@ -112,9 +113,8 @@
   "download": "下载",
   "upload": "上传",
   "unavailable": "暂不可用",
-  "recentFailures": "近期失败任务",
-  "recentFailuresHint": "最近 {days} 天 · 默认隐藏测试任务与软删除",
-  "noRecentFailures": "该时间窗内没有非测试失败任务。",
+  "logsHint": "最近 {days} 天 · 默认隐藏测试任务与软删除",
+  "noLogs": "该时间窗内没有非测试失败任务。",
   "clearTestHistory": "清理测试历史（{count}）",
   "clearingTestHistory": "清理中…",
   "confirmClearTestHistory": "将软删除 {count} 条终态测试任务？24 小时内可恢复，之后自动硬删。",

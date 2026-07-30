@@ -233,13 +233,69 @@ export async function filesMkdir(input: { path: string; recursive?: boolean }) {
   return { path, operation: 'created', type: 'directory' };
 }
 
-export async function filesDelete(input: { path: string }) {
+export async function filesDelete(input: {
+  path: string;
+  recursive?: boolean;
+  expectedSha256?: string;
+  expectedType?: 'file' | 'directory';
+  dryRun?: boolean;
+}) {
   const path = assertSafeAbsolutePath(input.path);
-  if (!(await fs.exists(path))) {
+  let st: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    st = await fs.stat(path);
+  } catch {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
+  const type = st.type === 'directory' ? 'directory' : 'file';
+  if (input.expectedType && input.expectedType !== type) {
+    throw runtimeError(
+      `Expected ${input.expectedType} but found ${type}.`,
+      'type_mismatch',
+      409,
+    );
+  }
+  if (type === 'file' && input.expectedSha256) {
+    const current = crypto.sha256Hex(await fs.readText(path));
+    if (normalizeHash(input.expectedSha256) !== current) {
+      const err = runtimeError('The file changed after it was read.', 'file_version_conflict', 409);
+      Object.assign(err, { current_sha256: current });
+      throw err;
+    }
+  }
+
+  if (input.dryRun) {
+    if (type === 'file') {
+      return {
+        path,
+        operation: 'delete_preview',
+        dry_run: true,
+        type,
+        file_count: 1,
+        total_bytes: st.size,
+      };
+    }
+    let fileCount = 0;
+    let totalBytes = 0;
+    await walk(path, true, async (_full, isDir, size) => {
+      if (!isDir) {
+        fileCount += 1;
+        totalBytes += size;
+      }
+    });
+    return {
+      path,
+      operation: 'delete_preview',
+      dry_run: true,
+      type,
+      file_count: fileCount,
+      total_bytes: totalBytes,
+    };
+  }
+
+  // Directory deletes are recursive (matches Node agent: recursive flag or directory type).
   await fs.remove(path);
-  return { path, operation: 'deleted', dry_run: false };
+  return { path, operation: 'deleted', dry_run: false, type };
 }
 
 export async function filesMove(input: { from: string; to: string }) {

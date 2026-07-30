@@ -29,42 +29,19 @@
   type Filter = 'all' | 'online' | 'offline' | 'pending';
   type NodeRecord = Record<string, any>;
 
-  type TaskRecord = {
-    id?: string;
-    backendId?: string;
-    kind?: string;
-    status?: string;
-    name?: string;
-    summary?: string;
-    environment?: string;
-    retentionClass?: string;
-    finishedAt?: string;
-    terminalAt?: string;
-    createdAt?: string;
-  };
-
   type Props = {
     text: Record<string, string>;
     dashboard?: {
       nodes?: NodeRecord[];
       totals?: Record<string, number>;
-      failed?: TaskRecord[];
-      retention?: {
-        hide_test_by_default?: boolean;
-        range_days?: number;
-        test_deletable_count?: number;
-        test_status_breakdown?: Record<string, number>;
-      };
     };
     loading: boolean;
     filter?: Filter;
     actingId?: string | undefined;
-    cleaningTestHistory?: boolean;
     approve: (node: NodeRecord) => void | Promise<void>;
     reject: (node: NodeRecord) => void | Promise<void>;
     testBackend: (node: NodeRecord) => void | Promise<void>;
     deleteBackend: (node: NodeRecord) => void | Promise<void>;
-    clearTestHistory?: () => void | Promise<void>;
     refresh: () => void | Promise<void>;
     copyToClipboard?: (value: string, success?: string) => void | Promise<void>;
   };
@@ -75,12 +52,10 @@
     loading,
     filter = $bindable<Filter>('all'),
     actingId,
-    cleaningTestHistory = false,
     approve,
     reject,
     testBackend,
     deleteBackend,
-    clearTestHistory,
     refresh,
     copyToClipboard,
   }: Props = $props();
@@ -118,25 +93,8 @@
   const pendingCount = $derived(
     allNodes.filter((node) => node.registration?.status === 'pending').length,
   );
-  const failedTasks = $derived(dashboard?.failed ?? []);
-  const testDeletable = $derived(
-    dashboard?.retention?.test_deletable_count ?? dashboard?.totals?.testDeletable ?? 0,
-  );
-  const rangeDays = $derived(dashboard?.retention?.range_days ?? 7);
-  const queueWaiting = $derived(dashboard?.totals?.queued ?? 0);
-  const queueActive = $derived(dashboard?.totals?.active ?? 0);
-
   function label(key: string, fallback: string) {
     return text[key] ?? fallback;
-  }
-
-  function taskTitle(task: TaskRecord) {
-    return task.name || task.summary || task.id || '—';
-  }
-
-  function shortId(id?: string) {
-    if (!id) return '—';
-    return id.length > 12 ? `${id.slice(0, 8)}…` : id;
   }
 
   function nodeStatus(node: NodeRecord): string {
@@ -341,65 +299,6 @@
     >
       <RefreshCwIcon class={loading ? 'spin' : undefined} />
     </Button>
-  </div>
-
-  <div class="task-panel" aria-label={label('recentFailures', 'Recent failures')}>
-    <div class="task-panel-head">
-      <div>
-        <h2>{label('recentFailures', 'Recent failures')}</h2>
-        <p>
-          {label(
-            'recentFailuresHint',
-            'Last {days} days · test tasks hidden · soft-deleted hidden',
-          ).replace('{days}', String(rangeDays))}
-        </p>
-      </div>
-      <div class="task-panel-meta">
-        <span class="queue-pill">{label('queue', 'Queue')}: {queueWaiting}/{queueActive}</span>
-        {#if testDeletable > 0 && clearTestHistory}
-          <Button
-            variant="outline"
-            size="sm"
-            class="cleanup-button"
-            disabled={cleaningTestHistory || loading}
-            onclick={() => clearTestHistory()}
-          >
-            <Trash2Icon />
-            {cleaningTestHistory
-              ? label('clearingTestHistory', 'Clearing…')
-              : label('clearTestHistory', 'Clear test history').replace(
-                  '{count}',
-                  String(testDeletable),
-                )}
-          </Button>
-        {/if}
-      </div>
-    </div>
-    {#if failedTasks.length === 0}
-      <p class="task-empty">
-        {label('noRecentFailures', 'No recent non-test failures in this window.')}
-      </p>
-    {:else}
-      <ul class="task-list">
-        {#each failedTasks as task (task.id)}
-          <li class="task-row">
-            <div class="task-main">
-              <span class={`task-status ${task.status ?? 'failed'}`}>{task.status ?? 'failed'}</span
-              >
-              <span class="task-title" title={taskTitle(task)}>{taskTitle(task)}</span>
-            </div>
-            <div class="task-sub">
-              <span>{shortId(task.backendId)}</span>
-              <span>{task.kind ?? '—'}</span>
-              <span>{relativeTime(task.terminalAt ?? task.finishedAt ?? task.createdAt)}</span>
-              {#if task.environment}
-                <span class="task-env">{task.environment}</span>
-              {/if}
-            </div>
-          </li>
-        {/each}
-      </ul>
-    {/if}
   </div>
 
   {#if loading && !dashboard}
@@ -748,100 +647,6 @@
     align-items: center;
     gap: 0.625rem;
     margin-bottom: 1.25rem;
-  }
-  .task-panel {
-    margin-bottom: 1.25rem;
-    padding: 1rem 1.1rem;
-    border: 1px solid color-mix(in oklch, var(--border) 76%, transparent);
-    border-radius: 1rem;
-    background: color-mix(in oklch, var(--surface-soft) 92%, transparent);
-  }
-  .task-panel-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 0.75rem;
-  }
-  .task-panel-head h2 {
-    margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-  }
-  .task-panel-head p {
-    margin: 0.2rem 0 0;
-    font-size: 0.78rem;
-    color: color-mix(in oklch, var(--muted-foreground) 92%, transparent);
-  }
-  .task-panel-meta {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .queue-pill {
-    font-size: 0.75rem;
-    padding: 0.25rem 0.55rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
-    color: color-mix(in oklch, var(--muted-foreground) 95%, transparent);
-  }
-  .cleanup-button {
-    gap: 0.35rem;
-  }
-  .task-empty {
-    margin: 0;
-    font-size: 0.85rem;
-    color: color-mix(in oklch, var(--muted-foreground) 95%, transparent);
-  }
-  .task-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: 0.45rem;
-  }
-  .task-row {
-    display: grid;
-    gap: 0.2rem;
-    padding: 0.55rem 0.65rem;
-    border-radius: 0.75rem;
-    background: color-mix(in oklch, var(--background) 70%, transparent);
-    border: 1px solid color-mix(in oklch, var(--border) 55%, transparent);
-  }
-  .task-main {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-  }
-  .task-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.86rem;
-  }
-  .task-status {
-    flex-shrink: 0;
-    font-size: 0.68rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-    padding: 0.12rem 0.4rem;
-    border-radius: 0.4rem;
-    background: color-mix(in oklch, oklch(0.65 0.18 25) 18%, transparent);
-    color: oklch(0.55 0.18 25);
-  }
-  .task-sub {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.55rem;
-    font-size: 0.72rem;
-    color: color-mix(in oklch, var(--muted-foreground) 95%, transparent);
-  }
-  .task-env {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .field-shell {
     height: 2.75rem;
