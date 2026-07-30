@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(vacps-native
-  VERSION 0.1.0
+  VERSION 0.1.3
   LANGUAGES C CXX
   DESCRIPTION "VACPS native agent (musl static ELF)"
 )
