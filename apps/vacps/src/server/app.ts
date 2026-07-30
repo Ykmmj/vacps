@@ -808,6 +808,9 @@ export async function createServer(input: {
       enabled?: unknown;
       task?: unknown;
       taskTemplate?: unknown;
+      next_run_at?: unknown;
+      revision?: unknown;
+      policy?: unknown;
     };
     // Schema v3 hard break: only `task` is accepted (not taskTemplate).
     if (body.taskTemplate !== undefined) {
