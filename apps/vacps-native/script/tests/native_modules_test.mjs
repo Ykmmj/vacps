@@ -153,14 +153,10 @@ await test('fs write/read/append/exists/list/rename/remove', async () => {
   assert(!(await fs.exists('js_api/fs/c.txt')), 'removed');
 });
 
-await test('fs path-guard rejects /proc', async () => {
-  let threw = false;
-  try {
-    await fs.readText('/proc/self/status');
-  } catch {
-    threw = true;
-  }
-  assert(threw, 'expected path-guard reject for /proc');
+// Pure I/O: vacps:fs has no product path ban. MCP path-guard is JS-only.
+await test('fs pure I/O can read /proc', async () => {
+  const text = await fs.readText('/proc/self/status');
+  assert(typeof text === 'string' && text.includes('Name:'), 'read /proc/self/status');
 });
 
 // ── vacps:crypto ──────────────────────────────────────────────────
