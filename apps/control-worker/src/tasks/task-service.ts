@@ -416,11 +416,12 @@ export class TaskService {
       let commands: unknown;
       let output: unknown;
       let result: unknown = remote?.result;
+      const outputExpiredByCp =
+        Boolean(refreshed.outputExpiresAt) &&
+        Date.parse(refreshed.outputExpiresAt!) <= Date.now();
+      let logsExpired = false;
       if (options.includeCommands || options.includeOutputPreview) {
-        const outputExpired =
-          Boolean(refreshed.outputExpiresAt) &&
-          Date.parse(refreshed.outputExpiresAt!) <= Date.now();
-        if (outputExpired) {
+        if (outputExpiredByCp) {
           if (options.includeCommands) commands = [];
           if (options.includeOutputPreview) {
             output = {
@@ -435,7 +436,8 @@ export class TaskService {
             commands?: Array<Record<string, unknown>>;
             expired?: boolean;
           };
-          if (logs.expired) {
+          logsExpired = logs.expired === true;
+          if (logsExpired) {
             if (options.includeCommands) commands = [];
             if (options.includeOutputPreview) {
               output = {
@@ -457,13 +459,7 @@ export class TaskService {
               };
               // Prefer structured process result without embedding full stdout/stderr text twice.
               if (result && typeof result === 'object') {
-                const r = result as Record<string, unknown>;
-                result = {
-                  kind: 'process',
-                  exit_code: r.exitCode ?? r.exit_code ?? null,
-                  signal: r.signal ?? null,
-                  timed_out: r.timedOut ?? r.timed_out ?? false,
-                };
+                result = processResultWithoutOutput(result as Record<string, unknown>);
               } else if (last) {
                 result = {
                   kind: 'process',
@@ -476,9 +472,14 @@ export class TaskService {
           }
         }
       }
+      // Output TTL must apply to every result path (including include_output_preview=false).
+      if (outputExpiredByCp || logsExpired) {
+        result = redactExpiredTaskResult(result);
+      }
       return {
         task: refreshed,
-        remote,
+        // Do not leak raw remote.result with stdout/stderr after TTL.
+        remote: sanitizeRemoteForOutputTtl(remote, outputExpiredByCp || logsExpired),
         ...(result !== undefined ? { result } : {}),
         ...(output ? { output } : {}),
         ...(commands ? { commands } : {}),
@@ -1750,6 +1751,42 @@ function expiredStreamPreview(taskId: string, stream: 'stdout' | 'stderr') {
     preview: '',
     state: 'expired',
     resource_uri: `vacps://tasks/${taskId}/output/${stream}`,
+  };
+}
+
+/** Drop captured stream bodies; keep process exit metadata. */
+function processResultWithoutOutput(r: Record<string, unknown>): Record<string, unknown> {
+  return {
+    kind: 'process',
+    exit_code: r.exitCode ?? r.exit_code ?? null,
+    signal: r.signal ?? null,
+    timed_out: r.timedOut ?? r.timed_out ?? false,
+    output_state: 'retained',
+  };
+}
+
+function redactExpiredTaskResult(result: unknown): unknown {
+  if (!result || typeof result !== 'object') {
+    return { kind: 'process', output_state: 'expired' };
+  }
+  const r = result as Record<string, unknown>;
+  return {
+    kind: 'process',
+    exit_code: r.exitCode ?? r.exit_code ?? null,
+    signal: r.signal ?? null,
+    timed_out: r.timedOut ?? r.timed_out ?? false,
+    output_state: 'expired',
+  };
+}
+
+function sanitizeRemoteForOutputTtl(
+  remote: { status?: unknown; result?: unknown; task?: { status?: unknown } },
+  expired: boolean,
+): unknown {
+  if (!expired) return remote;
+  return {
+    ...remote,
+    result: redactExpiredTaskResult(remote.result),
   };
 }
 

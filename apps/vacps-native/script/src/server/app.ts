@@ -214,14 +214,37 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     if (!task) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
+    const retentionSec = Math.max(
+      60,
+      Number(task.task.output?.retention_seconds ?? 86_400) || 86_400,
+    );
+    const terminalAt = task.finishedAt ? Date.parse(task.finishedAt) : NaN;
+    const outputExpired =
+      isTerminalTaskStatus(task.status) &&
+      Number.isFinite(terminalAt) &&
+      Date.now() - terminalAt > retentionSec * 1000;
+
+    let result: unknown = task.result;
+    if (outputExpired && result && typeof result === 'object') {
+      const r = result as Record<string, unknown>;
+      result = {
+        kind: 'process',
+        exit_code: r.exitCode ?? r.exit_code ?? null,
+        signal: r.signal ?? null,
+        timed_out: r.timedOut ?? r.timed_out ?? false,
+        output_state: 'expired',
+      };
+    }
+
     return {
       task: task.task,
       status: task.status,
-      result: task.result,
+      result,
       error: task.error,
       createdAt: task.createdAt,
       startedAt: task.startedAt,
       finishedAt: task.finishedAt,
+      ...(outputExpired ? { output_expired: true } : {}),
     };
   });
 
