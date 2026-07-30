@@ -1,5 +1,7 @@
 #include "quickjs/modules.hpp"
 
+#include "quickjs/url_globals.hpp"
+
 #include "crypto/crypto.hpp"
 #include "fs/async.hpp"
 #include "fs/fs.hpp"
@@ -1548,6 +1550,9 @@ VoidResult install_native_modules(JSRuntime* rt, JSContext* ctx) {
     return std::unexpected(Error{"install_native_modules: null runtime/context"});
   }
   JS_SetModuleLoaderFunc(rt, nullptr, module_loader, nullptr);
+  if (auto url = install_url_global(ctx); !url) {
+    return url;
+  }
   return {};
 }
 

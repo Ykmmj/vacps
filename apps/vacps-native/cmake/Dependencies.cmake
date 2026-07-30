@@ -152,6 +152,29 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 message(STATUS "Using nlohmann/json ${VACPS_NLOHMANN_JSON_VERSION}")
 
+# ── Ada URL 4.0.0 (WHATWG; powers globalThis.URL for QuickJS / Zod z.url()) ──
+# https://github.com/ada-url/ada/releases/tag/v4.0.0
+set(VACPS_ADA_VERSION 4.0.0)
+set(VACPS_ADA_URL
+  "https://github.com/ada-url/ada/archive/refs/tags/v${VACPS_ADA_VERSION}.tar.gz")
+set(VACPS_ADA_SHA256
+  "6d6c7ef7dd2e329320d34eb2ab29ccdc879ee3935af9dfb894a6640e58dc381d")
+
+message(STATUS "Fetching Ada ${VACPS_ADA_VERSION} ...")
+# Embed as library only — skip Ada's own tests/tools/CPM.
+set(ADA_TESTING OFF CACHE BOOL "" FORCE)
+set(ADA_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(ADA_TOOLS OFF CACHE BOOL "" FORCE)
+set(ADA_USE_SIMDUTF OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  ada
+  URL ${VACPS_ADA_URL}
+  URL_HASH SHA256=${VACPS_ADA_SHA256}
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(ada)
+message(STATUS "Using Ada ${VACPS_ADA_VERSION}")
+
 # ── QuickJS (bellard official release; static, no quickjs-libc host yet) ──
 # Design §25.6 / §23: RAII host owns Runtime+Context; pure engine only for now.
 # Official release: https://bellard.org/quickjs/ (2026-06-04)
