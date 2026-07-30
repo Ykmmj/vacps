@@ -505,11 +505,8 @@ export class ScheduleService {
           ? new Date(Date.parse(scheduledForRaw))
           : now;
       const nextRunAt = schedule.enabled
-        ? (nextCronRunAtIso(
-            schedule.trigger.expression,
-            schedule.trigger.timezone,
-            advanceFrom,
-          ) ?? null)
+        ? (nextCronRunAtIso(schedule.trigger.expression, schedule.trigger.timezone, advanceFrom) ??
+          null)
         : null;
       const nextCanonical = nextRunAt ? (canonicalUtcIso(nextRunAt) ?? nextRunAt) : null;
       const nowIso = now.toISOString();
@@ -520,14 +517,7 @@ export class ScheduleService {
              SET last_run_at = ?, next_run_at = ?, updated_at = ?
              WHERE id = ? AND revision = ? AND next_run_at = ?`,
           )
-          .bind(
-            nowIso,
-            nextCanonical,
-            nowIso,
-            id,
-            schedule.revision,
-            scheduledForRaw,
-          )
+          .bind(nowIso, nextCanonical, nowIso, id, schedule.revision, scheduledForRaw)
           .run();
       } else {
         await this.db
@@ -575,7 +565,11 @@ export class ScheduleService {
     try {
       schedule = await this.get(input.schedule_id);
     } catch {
-      throw new AppError('schedule_not_found', `Schedule '${input.schedule_id}' was not found.`, 404);
+      throw new AppError(
+        'schedule_not_found',
+        `Schedule '${input.schedule_id}' was not found.`,
+        404,
+      );
     }
 
     if (schedule.backend_id !== input.backend_id) {
@@ -636,7 +630,11 @@ export class ScheduleService {
     }
 
     // Cursor must still be at scheduled_for for CAS (or equal after canonicalize).
-    if (currentNext && currentNext !== scheduledFor && schedule.next_run_at !== input.scheduled_for) {
+    if (
+      currentNext &&
+      currentNext !== scheduledFor &&
+      schedule.next_run_at !== input.scheduled_for
+    ) {
       // raw string may differ from canonical; compare epochs
       const rawMs = schedule.next_run_at ? Date.parse(schedule.next_run_at) : Number.NaN;
       if (!(Number.isFinite(rawMs) && rawMs === scheduledMs)) {
@@ -655,9 +653,7 @@ export class ScheduleService {
     const enqueued = input.enqueued_count ?? (input.occurrence_id ? 1 : 0);
     // skip path: 0 enqueued still advances past backlog (same as run_once on CP).
     const misfire =
-      schedule.policy.misfire === 'catch_up' && enqueued === 0
-        ? 'skip'
-        : schedule.policy.misfire;
+      schedule.policy.misfire === 'catch_up' && enqueued === 0 ? 'skip' : schedule.policy.misfire;
 
     const computed = authoritativeNextAfterOccurrence(
       schedule.trigger.expression,
@@ -757,11 +753,7 @@ export class ScheduleService {
     const computed =
       schedule.next_run_at ??
       (schedule.enabled
-        ? nextCronRunAtIso(
-            schedule.trigger.expression,
-            schedule.trigger.timezone,
-            new Date(),
-          )
+        ? nextCronRunAtIso(schedule.trigger.expression, schedule.trigger.timezone, new Date())
         : undefined);
     const nextRunAt = computed ? canonicalUtcIso(computed) : undefined;
     await this.client.upsertScheduler(backend, schedule.id, {

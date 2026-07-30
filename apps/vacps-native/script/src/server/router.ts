@@ -1,4 +1,4 @@
-import type { HostRequest, HostResponse } from "../contracts/http";
+import type { HostRequest, HostResponse } from '../contracts/http';
 
 /**
  * Minimal Fastify-shaped router for vacps:http Host.
@@ -48,31 +48,28 @@ export class Reply {
     if (body === undefined || body === null) {
       return {
         status: this.statusCode,
-        headers: { "content-type": "application/json; charset=utf-8" },
-        body: "",
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: '',
       };
     }
-    if (typeof body === "string") {
+    if (typeof body === 'string') {
       return {
         status: this.statusCode,
-        headers: { "content-type": "text/plain; charset=utf-8" },
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
         body,
       };
     }
     return {
       status: this.statusCode,
-      headers: { "content-type": "application/json; charset=utf-8" },
+      headers: { 'content-type': 'application/json; charset=utf-8' },
       body: JSON.stringify(body),
     };
   }
 }
 
-export type RouteHandler = (
-  request: AppRequest,
-  reply: Reply,
-) => unknown | Promise<unknown>;
+export type RouteHandler = (request: AppRequest, reply: Reply) => unknown | Promise<unknown>;
 
-type HookName = "preValidation";
+type HookName = 'preValidation';
 
 interface CompiledRoute {
   method: string;
@@ -81,27 +78,27 @@ interface CompiledRoute {
   handler: RouteHandler;
 }
 
-const INVALID_JSON = Symbol("vacps.invalid_json");
+const INVALID_JSON = Symbol('vacps.invalid_json');
 
 function compilePath(path: string): { keys: string[]; pattern: RegExp } {
   const keys: string[] = [];
-  const parts = path.split("/").map((seg) => {
-    if (seg.startsWith(":")) {
+  const parts = path.split('/').map((seg) => {
+    if (seg.startsWith(':')) {
       keys.push(seg.slice(1));
-      return "([^/]+)";
+      return '([^/]+)';
     }
-    return seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   });
   return {
     keys,
-    pattern: new RegExp(`^${parts.join("/")}$`),
+    pattern: new RegExp(`^${parts.join('/')}$`),
   };
 }
 
 function normalizePath(path: string): string {
-  const p = path.split("?")[0] ?? path;
-  if (p.length > 1 && p.endsWith("/")) return p.slice(0, -1);
-  return p || "/";
+  const p = path.split('?')[0] ?? path;
+  if (p.length > 1 && p.endsWith('/')) return p.slice(0, -1);
+  return p || '/';
 }
 
 function headerMap(h: Readonly<Record<string, string>>): Record<string, string> {
@@ -112,25 +109,25 @@ function headerMap(h: Readonly<Record<string, string>>): Record<string, string> 
 
 function parseQuery(query: string): QueryParams {
   const out: QueryParams = {};
-  const q = query.startsWith("?") ? query.slice(1) : query;
+  const q = query.startsWith('?') ? query.slice(1) : query;
   if (!q) return out;
-  for (const part of q.split("&")) {
+  for (const part of q.split('&')) {
     if (!part) continue;
-    const eq = part.indexOf("=");
+    const eq = part.indexOf('=');
     const k = decodeURIComponent(eq >= 0 ? part.slice(0, eq) : part);
-    const v = decodeURIComponent(eq >= 0 ? part.slice(eq + 1) : "");
+    const v = decodeURIComponent(eq >= 0 ? part.slice(eq + 1) : '');
     if (k) out[k] = v;
   }
   return out;
 }
 
 function parseBody(raw: HostRequest, headers: Record<string, string>): unknown {
-  const ct = headers["content-type"] ?? "";
+  const ct = headers['content-type'] ?? '';
   if (!raw.body) return undefined;
   if (
-    ct.includes("application/json") ||
-    raw.body.trimStart().startsWith("{") ||
-    raw.body.trimStart().startsWith("[")
+    ct.includes('application/json') ||
+    raw.body.trimStart().startsWith('{') ||
+    raw.body.trimStart().startsWith('[')
   ) {
     try {
       return JSON.parse(raw.body);
@@ -153,19 +150,19 @@ export class App {
   }
 
   get(path: string, handler: RouteHandler): this {
-    return this.route("GET", path, handler);
+    return this.route('GET', path, handler);
   }
 
   post(path: string, handler: RouteHandler): this {
-    return this.route("POST", path, handler);
+    return this.route('POST', path, handler);
   }
 
   put(path: string, handler: RouteHandler): this {
-    return this.route("PUT", path, handler);
+    return this.route('PUT', path, handler);
   }
 
   delete(path: string, handler: RouteHandler): this {
-    return this.route("DELETE", path, handler);
+    return this.route('DELETE', path, handler);
   }
 
   route(method: string, path: string, handler: RouteHandler): this {
@@ -188,7 +185,7 @@ export class App {
 
     if (body === INVALID_JSON) {
       reply.code(400).send({
-        error: { code: "invalid_json", message: "Body must be JSON." },
+        error: { code: 'invalid_json', message: 'Body must be JSON.' },
       });
       return reply.toHostResponse();
     }
@@ -203,7 +200,7 @@ export class App {
       params = {};
       for (let i = 0; i < r.keys.length; i++) {
         const key = r.keys[i]!;
-        params[key] = decodeURIComponent(m[i + 1] ?? "");
+        params[key] = decodeURIComponent(m[i + 1] ?? '');
       }
       break;
     }
@@ -215,7 +212,7 @@ export class App {
       headers,
       body,
       params,
-      query: parseQuery(raw.query ?? ""),
+      query: parseQuery(raw.query ?? ''),
       requestId: raw.requestId,
       raw,
     };
@@ -228,7 +225,7 @@ export class App {
 
     if (!match) {
       reply.code(404).send({
-        error: { code: "not_found", message: "route not found" },
+        error: { code: 'not_found', message: 'route not found' },
       });
       return reply.toHostResponse();
     }
@@ -240,7 +237,7 @@ export class App {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       reply.code(500).send({
-        error: { code: "internal_error", message: msg },
+        error: { code: 'internal_error', message: msg },
       });
       return reply.toHostResponse();
     }

@@ -1,4 +1,4 @@
-declare module "vacps:store" {
+declare module 'vacps:store' {
   export type SqlParam = null | number | string | ArrayBuffer | Uint8Array;
 
   export interface RunResult {
@@ -12,10 +12,7 @@ declare module "vacps:store" {
   export interface Store {
     exec(sql: string): void;
     run(sql: string, params?: readonly SqlParam[]): RunResult;
-    query(
-      sql: string,
-      params?: readonly SqlParam[],
-    ): Array<Record<string, unknown>>;
+    query(sql: string, params?: readonly SqlParam[]): Array<Record<string, unknown>>;
     begin(): void;
     commit(): void;
     rollback(): void;

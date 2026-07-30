@@ -1,4 +1,4 @@
-import type { Store } from "vacps:store";
+import type { Store } from 'vacps:store';
 
 /** Apply ordered schema migrations (idempotent). */
 export function migrateAgentDb(db: Store): void {
@@ -11,9 +11,7 @@ export function migrateAgentDb(db: Store): void {
   `);
 
   const applied = new Set(
-    db
-      .query("SELECT version FROM schema_migrations;")
-      .map((r) => Number(r["version"])),
+    db.query('SELECT version FROM schema_migrations;').map((r) => Number(r['version'])),
   );
 
   const migrations: Array<{ version: number; sql: string }> = [
@@ -113,7 +111,7 @@ export function migrateAgentDb(db: Store): void {
     db.begin();
     try {
       db.exec(m.sql);
-      db.run("INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?);", [
+      db.run('INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?);', [
         m.version,
         new Date().toISOString(),
       ]);

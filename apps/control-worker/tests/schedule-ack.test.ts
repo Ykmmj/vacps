@@ -50,9 +50,7 @@ describe('ScheduleService.ackOccurrence', () => {
     expect(result.revision).toBe(3);
     // From 09:00 with run_once and now ≈ real wall clock (years later) → jumps far
     expect(result.next_run_at).toBeTruthy();
-    expect(Date.parse(result.next_run_at!)).toBeGreaterThan(
-      Date.parse('2024-06-01T09:00:00.000Z'),
-    );
+    expect(Date.parse(result.next_run_at!)).toBeGreaterThan(Date.parse('2024-06-01T09:00:00.000Z'));
     expect(db.schedules[0]!.next_run_at).toBe(result.next_run_at);
     expect(db.schedules[0]!.last_run_at).toBeTruthy();
     expect(upsertScheduler).toHaveBeenCalledTimes(1);

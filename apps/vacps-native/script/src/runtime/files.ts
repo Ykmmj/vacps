@@ -1,8 +1,8 @@
-import * as crypto from "vacps:crypto";
-import * as fs from "vacps:fs";
-import * as process from "vacps:process";
+import * as crypto from 'vacps:crypto';
+import * as fs from 'vacps:fs';
+import * as process from 'vacps:process';
 
-import { assertSafeAbsolutePath, resolveWorkspacePath } from "./path-guard";
+import { assertSafeAbsolutePath, resolveWorkspacePath } from './path-guard';
 
 function clamp(n: number, min: number, max: number): number {
   if (!Number.isFinite(n)) return min;
@@ -26,30 +26,30 @@ function runtimeError(
 }
 
 function joinPath(dir: string, name: string): string {
-  if (dir === "/") return `/${name}`;
-  return `${dir.replace(/\/$/, "")}/${name}`;
+  if (dir === '/') return `/${name}`;
+  return `${dir.replace(/\/$/, '')}/${name}`;
 }
 
 function basename(p: string): string {
-  const i = p.lastIndexOf("/");
+  const i = p.lastIndexOf('/');
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
 function dirname(p: string): string {
-  const i = p.lastIndexOf("/");
-  if (i <= 0) return "/";
+  const i = p.lastIndexOf('/');
+  if (i <= 0) return '/';
   return p.slice(0, i);
 }
 
 function relativeTo(root: string, full: string): string {
-  if (full === root) return "";
-  const prefix = root.endsWith("/") ? root : `${root}/`;
+  if (full === root) return '';
+  const prefix = root.endsWith('/') ? root : `${root}/`;
   if (full.startsWith(prefix)) return full.slice(prefix.length);
   return full;
 }
 
 function normalizeHash(h: string): string {
-  return h.startsWith("sha256:") ? h.slice(7) : h;
+  return h.startsWith('sha256:') ? h.slice(7) : h;
 }
 
 // ── Core CRUD ─────────────────────────────────────────────────────
@@ -60,11 +60,11 @@ export async function filesStat(pathInput: string) {
   try {
     st = await fs.stat(path);
   } catch {
-    throw runtimeError(`Path not found: ${path}`, "path_not_found", 404);
+    throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
 
   let digest: string | null = null;
-  if (st.type === "file" && st.size <= 8 * 1024 * 1024) {
+  if (st.type === 'file' && st.size <= 8 * 1024 * 1024) {
     try {
       digest = crypto.sha256Hex(await fs.readText(path));
     } catch {
@@ -76,8 +76,7 @@ export async function filesStat(pathInput: string) {
     path: st.path,
     type: st.type,
     size_bytes: st.size,
-    modified_at:
-      st.mtimeMs > 0 ? new Date(st.mtimeMs).toISOString() : (null as string | null),
+    modified_at: st.mtimeMs > 0 ? new Date(st.mtimeMs).toISOString() : (null as string | null),
     sha256: digest,
     readable: st.readable,
     writable: st.writable,
@@ -89,10 +88,10 @@ export async function filesRead(input: {
   startLine?: number;
   endLine?: number;
   maxBytes?: number;
-  encoding?: "utf-8" | "base64";
+  encoding?: 'utf-8' | 'base64';
 }) {
   const path = assertSafeAbsolutePath(input.path);
-  const encoding = input.encoding ?? "utf-8";
+  const encoding = input.encoding ?? 'utf-8';
   const maxBytes = clamp(input.maxBytes ?? 32_768, 1, 256 * 1024);
 
   if (
@@ -102,26 +101,26 @@ export async function filesRead(input: {
   ) {
     throw runtimeError(
       `end_line (${input.endLine}) must be >= start_line (${input.startLine}).`,
-      "invalid_line_range",
+      'invalid_line_range',
       400,
     );
   }
 
   if (!(await fs.exists(path))) {
-    throw runtimeError(`Path not found: ${path}`, "path_not_found", 404);
+    throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
 
   const text = await fs.readText(path);
   const totalBytes = text.length;
   const digest = crypto.sha256Hex(text);
 
-  if (encoding === "base64") {
+  if (encoding === 'base64') {
     const slice = text.slice(0, maxBytes);
     return {
       path,
       content: crypto.base64Encode(slice),
       file: {
-        kind: "binary" as const,
+        kind: 'binary' as const,
         size_bytes: totalBytes,
         sha256: digest,
         truncated: slice.length < totalBytes,
@@ -133,12 +132,12 @@ export async function filesRead(input: {
   let startLine = 1;
   let endLine = 0;
   if (input.startLine !== undefined || input.endLine !== undefined) {
-    const lines = text.split("\n");
+    const lines = text.split('\n');
     const from = Math.max(1, input.startLine ?? 1);
     const to = Math.min(lines.length, input.endLine ?? lines.length);
     startLine = from;
     endLine = to;
-    content = lines.slice(from - 1, to).join("\n");
+    content = lines.slice(from - 1, to).join('\n');
   }
   if (content.length > maxBytes) {
     content = content.slice(0, maxBytes);
@@ -148,7 +147,7 @@ export async function filesRead(input: {
     path,
     content,
     file: {
-      kind: "text" as const,
+      kind: 'text' as const,
       size_bytes: totalBytes,
       sha256: digest,
       start_line: startLine,
@@ -161,36 +160,36 @@ export async function filesRead(input: {
 export async function filesWrite(input: {
   path: string;
   content: string;
-  mode: "create" | "overwrite" | "create_or_overwrite";
+  mode: 'create' | 'overwrite' | 'create_or_overwrite';
   createParentDirectories?: boolean;
   expectedSha256?: string;
 }) {
   const path = assertSafeAbsolutePath(input.path);
   const exists = await fs.exists(path);
-  if (input.mode === "create" && exists) {
-    throw runtimeError("Path already exists.", "path_exists", 409);
+  if (input.mode === 'create' && exists) {
+    throw runtimeError('Path already exists.', 'path_exists', 409);
   }
-  if (input.mode === "overwrite" && !exists) {
-    throw runtimeError("Path not found.", "path_not_found", 404);
+  if (input.mode === 'overwrite' && !exists) {
+    throw runtimeError('Path not found.', 'path_not_found', 404);
   }
   if (exists && input.expectedSha256) {
     const current = crypto.sha256Hex(await fs.readText(path));
     if (normalizeHash(input.expectedSha256) !== current) {
-      throw runtimeError("The file changed after it was read.", "file_version_conflict", 409, {
+      throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
         current_sha256: current,
       });
     }
   }
   if (input.createParentDirectories !== false) {
     const parent = dirname(path);
-    if (parent && parent !== "/") {
+    if (parent && parent !== '/') {
       await fs.mkdir(parent);
     }
   }
   await fs.writeText(path, input.content);
   return {
     path,
-    operation: exists ? "overwritten" : "created",
+    operation: exists ? 'overwritten' : 'created',
     size_bytes: input.content.length,
     sha256: crypto.sha256Hex(input.content),
   };
@@ -204,13 +203,13 @@ export async function filesList(input: {
 }) {
   const path = assertSafeAbsolutePath(input.path);
   if (!(await fs.exists(path))) {
-    throw runtimeError(`Path not found: ${path}`, "path_not_found", 404);
+    throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
   const limit = clamp(input.limit ?? 200, 1, 2000);
   const includeHidden = input.includeHidden === true;
   const offset = decodeOffsetCursor(input.cursor);
   const entries = await fs.list(path);
-  const filtered = entries.filter((e) => includeHidden || !e.name.startsWith("."));
+  const filtered = entries.filter((e) => includeHidden || !e.name.startsWith('.'));
   const slice = filtered.slice(offset, offset + limit);
   const nextOffset = offset + slice.length;
   const truncated = nextOffset < filtered.length;
@@ -219,7 +218,7 @@ export async function filesList(input: {
     entries: slice.map((e) => ({
       path: joinPath(path, e.name),
       name: e.name,
-      type: e.isDir ? "directory" : "file",
+      type: e.isDir ? 'directory' : 'file',
       size_bytes: e.size,
     })),
     returned_count: slice.length,
@@ -231,26 +230,26 @@ export async function filesList(input: {
 export async function filesMkdir(input: { path: string; recursive?: boolean }) {
   const path = assertSafeAbsolutePath(input.path);
   await fs.mkdir(path);
-  return { path, operation: "created", type: "directory" };
+  return { path, operation: 'created', type: 'directory' };
 }
 
 export async function filesDelete(input: { path: string }) {
   const path = assertSafeAbsolutePath(input.path);
   if (!(await fs.exists(path))) {
-    throw runtimeError(`Path not found: ${path}`, "path_not_found", 404);
+    throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
   await fs.remove(path);
-  return { path, operation: "deleted", dry_run: false };
+  return { path, operation: 'deleted', dry_run: false };
 }
 
 export async function filesMove(input: { from: string; to: string }) {
   const from = assertSafeAbsolutePath(input.from);
   const to = assertSafeAbsolutePath(input.to);
   if (!(await fs.exists(from))) {
-    throw runtimeError(`Path not found: ${from}`, "path_not_found", 404);
+    throw runtimeError(`Path not found: ${from}`, 'path_not_found', 404);
   }
   await fs.rename(from, to);
-  return { from, to, operation: "moved" };
+  return { from, to, operation: 'moved' };
 }
 
 // ── Glob / Grep / Edit / Patch ────────────────────────────────────
@@ -262,7 +261,7 @@ export async function filesGlob(input: {
   limit?: number;
   cursor?: string;
 }) {
-  const root = assertSafeAbsolutePath(input.path ?? "/tmp");
+  const root = assertSafeAbsolutePath(input.path ?? '/tmp');
   const limit = clamp(input.limit ?? 200, 1, 2000);
   const includeHidden = Boolean(input.includeHidden);
   const pattern = input.pattern;
@@ -270,19 +269,19 @@ export async function filesGlob(input: {
 
   // Prefer ripgrep --files when available.
   try {
-    const args = ["--files", "--glob", pattern];
-    if (pattern.startsWith("**/")) args.push("--glob", pattern.slice(3));
-    if (!includeHidden) args.push("--glob", "!.*/**");
-    const listed = await process.run(["rg", ...args], { cwd: root, timeoutMs: 30_000 });
+    const args = ['--files', '--glob', pattern];
+    if (pattern.startsWith('**/')) args.push('--glob', pattern.slice(3));
+    if (!includeHidden) args.push('--glob', '!.*/**');
+    const listed = await process.run(['rg', ...args], { cwd: root, timeoutMs: 30_000 });
     if (listed.exitCode === 0 || listed.stdout) {
       const allLines = listed.stdout
-        .split("\n")
+        .split('\n')
         .map((line) => line.trim())
         .filter(Boolean);
       const page = allLines.slice(offset, offset + limit);
       const matches = page.map((rel) => ({
         path: joinPath(root, rel),
-        type: "file" as const,
+        type: 'file' as const,
         size_bytes: 0,
       }));
       const nextOffset = offset + matches.length;
@@ -292,7 +291,7 @@ export async function filesGlob(input: {
         returned_count: matches.length,
         truncated,
         next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
-        engine: "rg" as const,
+        engine: 'rg' as const,
       };
     }
   } catch {
@@ -305,7 +304,7 @@ export async function filesGlob(input: {
     if (!globMatch(pattern, rel) && !globMatch(pattern, basename(full))) return;
     all.push({
       path: full,
-      type: isDir ? "directory" : "file",
+      type: isDir ? 'directory' : 'file',
       size_bytes: size,
     });
   });
@@ -317,7 +316,7 @@ export async function filesGlob(input: {
     returned_count: page.length,
     truncated,
     next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
-    engine: "walk" as const,
+    engine: 'walk' as const,
   };
 }
 
@@ -332,7 +331,7 @@ export async function filesGrep(input: {
   maxMatches?: number;
   maxBytes?: number;
 }) {
-  const target = assertSafeAbsolutePath(input.path ?? "/tmp");
+  const target = assertSafeAbsolutePath(input.path ?? '/tmp');
   const maxMatches = clamp(input.maxMatches ?? 100, 1, 500);
   const contextBefore = clamp(input.contextBefore ?? 0, 0, 10);
   const contextAfter = clamp(input.contextAfter ?? 0, 0, 10);
@@ -342,14 +341,14 @@ export async function filesGrep(input: {
 
   // Prefer rg
   try {
-    const args = ["--json", "--max-count", String(maxMatches)];
-    if (!caseSensitive) args.push("-i");
-    if (fixed) args.push("-F");
-    if (contextBefore > 0) args.push("-B", String(contextBefore));
-    if (contextAfter > 0) args.push("-A", String(contextAfter));
-    if (input.filePattern) args.push("--glob", input.filePattern);
-    args.push("--", input.pattern, target);
-    const result = await process.run(["rg", ...args], { timeoutMs: 30_000 });
+    const args = ['--json', '--max-count', String(maxMatches)];
+    if (!caseSensitive) args.push('-i');
+    if (fixed) args.push('-F');
+    if (contextBefore > 0) args.push('-B', String(contextBefore));
+    if (contextAfter > 0) args.push('-A', String(contextAfter));
+    if (input.filePattern) args.push('--glob', input.filePattern);
+    args.push('--', input.pattern, target);
+    const result = await process.run(['rg', ...args], { timeoutMs: 30_000 });
     if (result.stdout) {
       const matches = parseRgJson(result.stdout, maxMatches, maxBytes);
       if (matches.length > 0 || result.exitCode === 0 || result.exitCode === 1) {
@@ -357,7 +356,7 @@ export async function filesGrep(input: {
           matches,
           match_count: matches.length,
           truncated: matches.length >= maxMatches,
-          engine: "rg" as const,
+          engine: 'rg' as const,
         };
       }
     }
@@ -368,9 +367,7 @@ export async function filesGrep(input: {
   const matches: Array<Record<string, unknown>> = [];
   let bytes = 0;
   let truncated = false;
-  const re = fixed
-    ? null
-    : new RegExp(input.pattern, caseSensitive ? "g" : "gi");
+  const re = fixed ? null : new RegExp(input.pattern, caseSensitive ? 'g' : 'gi');
 
   const visitFile = async (filePath: string) => {
     if (matches.length >= maxMatches || bytes >= maxBytes) {
@@ -389,7 +386,7 @@ export async function filesGrep(input: {
     } catch {
       return;
     }
-    const lines = text.split("\n");
+    const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
       if (matches.length >= maxMatches || bytes >= maxBytes) {
         truncated = true;
@@ -401,7 +398,7 @@ export async function filesGrep(input: {
           ? line.includes(input.pattern)
           : line.toLowerCase().includes(input.pattern.toLowerCase())
         : re
-          ? new RegExp(input.pattern, caseSensitive ? "" : "i").test(line)
+          ? new RegExp(input.pattern, caseSensitive ? '' : 'i').test(line)
           : false;
       if (!hit) continue;
       const before = lines.slice(Math.max(0, i - contextBefore), i);
@@ -432,7 +429,7 @@ export async function filesGrep(input: {
     matches,
     match_count: matches.length,
     truncated: truncated || matches.length >= maxMatches,
-    engine: "walk" as const,
+    engine: 'walk' as const,
   };
 }
 
@@ -447,18 +444,18 @@ export async function filesEdit(input: {
   const text = await fs.readText(path);
   const beforeHash = crypto.sha256Hex(text);
   if (input.expectedSha256 && normalizeHash(input.expectedSha256) !== beforeHash) {
-    throw runtimeError("The file changed after it was read.", "file_version_conflict", 409, {
+    throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
       current_sha256: beforeHash,
     });
   }
   const count = countOccurrences(text, input.oldText);
   if (count === 0) {
-    throw runtimeError("old_text was not found.", "old_text_not_found", 409);
+    throw runtimeError('old_text was not found.', 'old_text_not_found', 409);
   }
   if (count > 1 && !input.replaceAll) {
     throw runtimeError(
-      "old_text is not unique; set replace_all=true to replace all.",
-      "old_text_not_unique",
+      'old_text is not unique; set replace_all=true to replace all.',
+      'old_text_not_unique',
       409,
       { match_count: count },
     );
@@ -482,12 +479,10 @@ export async function applyPatch(input: {
   dryRun?: boolean;
   atomic?: boolean;
 }) {
-  const workspace = input.workspacePath
-    ? assertSafeAbsolutePath(input.workspacePath)
-    : "/tmp";
+  const workspace = input.workspacePath ? assertSafeAbsolutePath(input.workspacePath) : '/tmp';
   const operations = parsePatch(input.patch);
   if (operations.length === 0) {
-    throw runtimeError("Patch contained no operations.", "invalid_patch", 400);
+    throw runtimeError('Patch contained no operations.', 'invalid_patch', 400);
   }
 
   const planned = operations.map((op) => ({
@@ -500,29 +495,29 @@ export async function applyPatch(input: {
 
   try {
     for (const op of planned) {
-      if (op.kind === "add") {
+      if (op.kind === 'add') {
         if (await fs.exists(op.absolute)) {
-          throw runtimeError(`Cannot add existing file ${op.path}`, "file_exists", 409);
+          throw runtimeError(`Cannot add existing file ${op.path}`, 'file_exists', 409);
         }
         if (!input.dryRun) {
           await fs.mkdir(dirname(op.absolute));
-          await fs.writeText(op.absolute, op.content ?? "");
+          await fs.writeText(op.absolute, op.content ?? '');
           backups.set(op.absolute, null);
         }
-        results.push({ path: op.path, operation: "add", dry_run: Boolean(input.dryRun) });
-      } else if (op.kind === "delete") {
+        results.push({ path: op.path, operation: 'add', dry_run: Boolean(input.dryRun) });
+      } else if (op.kind === 'delete') {
         if (!(await fs.exists(op.absolute))) {
-          throw runtimeError(`Cannot delete missing file ${op.path}`, "path_not_found", 404);
+          throw runtimeError(`Cannot delete missing file ${op.path}`, 'path_not_found', 404);
         }
         if (!input.dryRun) {
           const before = await fs.readText(op.absolute);
           backups.set(op.absolute, before);
           await fs.remove(op.absolute);
         }
-        results.push({ path: op.path, operation: "delete", dry_run: Boolean(input.dryRun) });
-      } else if (op.kind === "update") {
+        results.push({ path: op.path, operation: 'delete', dry_run: Boolean(input.dryRun) });
+      } else if (op.kind === 'update') {
         if (!(await fs.exists(op.absolute))) {
-          throw runtimeError(`Cannot update missing file ${op.path}`, "path_not_found", 404);
+          throw runtimeError(`Cannot update missing file ${op.path}`, 'path_not_found', 404);
         }
         const before = await fs.readText(op.absolute);
         const after = applyHunks(before, op.hunks ?? []);
@@ -532,7 +527,7 @@ export async function applyPatch(input: {
         }
         results.push({
           path: op.path,
-          operation: "update",
+          operation: 'update',
           dry_run: Boolean(input.dryRun),
           before_sha256: crypto.sha256Hex(before),
           after_sha256: crypto.sha256Hex(after),
@@ -565,10 +560,10 @@ export async function detectCapabilities() {
   let rgAvailable = false;
   let rgVersion: string | null = null;
   try {
-    const r = await process.run(["rg", "--version"], { timeoutMs: 3_000 });
+    const r = await process.run(['rg', '--version'], { timeoutMs: 3_000 });
     rgAvailable = r.exitCode === 0 || r.stdout.length > 0;
     if (rgAvailable) {
-      rgVersion = (r.stdout.split("\n")[0] ?? "").trim() || null;
+      rgVersion = (r.stdout.split('\n')[0] ?? '').trim() || null;
     }
   } catch {
     rgAvailable = false;
@@ -617,7 +612,7 @@ async function walk(
     return;
   }
   for (const e of entries) {
-    if (!includeHidden && e.name.startsWith(".")) continue;
+    if (!includeHidden && e.name.startsWith('.')) continue;
     const full = joinPath(root, e.name);
     await visit(full, e.isDir, e.size);
     if (e.isDir) await walk(full, includeHidden, visit, depth + 1);
@@ -625,38 +620,38 @@ async function walk(
 }
 
 function globMatch(pattern: string, value: string): boolean {
-  return globToRegExp(pattern.replace(/\\/g, "/")).test(value.replace(/\\/g, "/"));
+  return globToRegExp(pattern.replace(/\\/g, '/')).test(value.replace(/\\/g, '/'));
 }
 
 function globToRegExp(pattern: string): RegExp {
-  let source = "^";
-  for (let index = 0; index < pattern.length; ) {
+  let source = '^';
+  for (let index = 0; index < pattern.length;) {
     const char = pattern[index]!;
-    if (char === "*") {
-      if (pattern[index + 1] === "*") {
-        if (pattern[index + 2] === "/") {
-          source += "(?:.*/)?";
+    if (char === '*') {
+      if (pattern[index + 1] === '*') {
+        if (pattern[index + 2] === '/') {
+          source += '(?:.*/)?';
           index += 3;
         } else {
-          source += ".*";
+          source += '.*';
           index += 2;
         }
       } else {
-        source += "[^/]*";
+        source += '[^/]*';
         index += 1;
       }
       continue;
     }
-    if (char === "?") {
-      source += "[^/]";
+    if (char === '?') {
+      source += '[^/]';
       index += 1;
       continue;
     }
-    if ("+.^${}()|[]\\".includes(char)) source += `\\${char}`;
+    if ('+.^${}()|[]\\'.includes(char)) source += `\\${char}`;
     else source += char;
     index += 1;
   }
-  source += "$";
+  source += '$';
   return new RegExp(source);
 }
 
@@ -681,12 +676,12 @@ function decodeOffsetCursor(cursor: string | undefined): number {
   if (!cursor) return 0;
   try {
     const bytes = new Uint8Array(crypto.base64UrlDecode(cursor));
-    let json = "";
+    let json = '';
     for (let i = 0; i < bytes.length; i++) json += String.fromCharCode(bytes[i]!);
     const decoded = JSON.parse(json) as { o?: number };
-    return typeof decoded.o === "number" && decoded.o >= 0 ? Math.trunc(decoded.o) : 0;
+    return typeof decoded.o === 'number' && decoded.o >= 0 ? Math.trunc(decoded.o) : 0;
   } catch {
-    throw runtimeError("Invalid cursor.", "validation_error", 400);
+    throw runtimeError('Invalid cursor.', 'validation_error', 400);
   }
 }
 
@@ -697,7 +692,7 @@ function parseRgJson(
 ): Array<Record<string, unknown>> {
   const matches: Array<Record<string, unknown>> = [];
   let bytes = 0;
-  for (const line of stdout.split("\n")) {
+  for (const line of stdout.split('\n')) {
     if (!line.trim() || matches.length >= maxMatches || bytes >= maxBytes) break;
     try {
       const obj = JSON.parse(line) as {
@@ -708,9 +703,9 @@ function parseRgJson(
           lines?: { text?: string };
         };
       };
-      if (obj.type !== "match" || !obj.data) continue;
-      const path = obj.data.path?.text ?? "";
-      const text = (obj.data.lines?.text ?? "").replace(/\n$/, "");
+      if (obj.type !== 'match' || !obj.data) continue;
+      const path = obj.data.path?.text ?? '';
+      const text = (obj.data.lines?.text ?? '').replace(/\n$/, '');
       matches.push({
         path,
         line_number: obj.data.line_number ?? 0,
@@ -725,46 +720,46 @@ function parseRgJson(
 }
 
 function parsePatch(patch: string): Array<{
-  kind: "add" | "update" | "delete";
+  kind: 'add' | 'update' | 'delete';
   path: string;
   content?: string;
   hunks?: string[][];
 }> {
-  const lines = patch.replace(/\r\n/g, "\n").split("\n");
+  const lines = patch.replace(/\r\n/g, '\n').split('\n');
   const ops: Array<{
-    kind: "add" | "update" | "delete";
+    kind: 'add' | 'update' | 'delete';
     path: string;
     content?: string;
     hunks?: string[][];
   }> = [];
   let i = 0;
   while (i < lines.length) {
-    const line = lines[i] ?? "";
-    if (line.startsWith("*** Add File: ")) {
-      const path = line.slice("*** Add File: ".length).trim();
+    const line = lines[i] ?? '';
+    if (line.startsWith('*** Add File: ')) {
+      const path = line.slice('*** Add File: '.length).trim();
       i += 1;
       const contentLines: string[] = [];
-      while (i < lines.length && !lines[i]!.startsWith("*** ")) {
+      while (i < lines.length && !lines[i]!.startsWith('*** ')) {
         const row = lines[i]!;
-        contentLines.push(row.startsWith("+") ? row.slice(1) : row);
+        contentLines.push(row.startsWith('+') ? row.slice(1) : row);
         i += 1;
       }
-      ops.push({ kind: "add", path, content: contentLines.join("\n") });
+      ops.push({ kind: 'add', path, content: contentLines.join('\n') });
       continue;
     }
-    if (line.startsWith("*** Delete File: ")) {
-      ops.push({ kind: "delete", path: line.slice("*** Delete File: ".length).trim() });
+    if (line.startsWith('*** Delete File: ')) {
+      ops.push({ kind: 'delete', path: line.slice('*** Delete File: '.length).trim() });
       i += 1;
       continue;
     }
-    if (line.startsWith("*** Update File: ")) {
-      const path = line.slice("*** Update File: ".length).trim();
+    if (line.startsWith('*** Update File: ')) {
+      const path = line.slice('*** Update File: '.length).trim();
       i += 1;
       const hunks: string[][] = [];
       let current: string[] | null = null;
-      while (i < lines.length && !lines[i]!.startsWith("*** ")) {
+      while (i < lines.length && !lines[i]!.startsWith('*** ')) {
         const row = lines[i]!;
-        if (row.startsWith("@@")) {
+        if (row.startsWith('@@')) {
           if (current) hunks.push(current);
           current = [];
         } else if (current) {
@@ -773,7 +768,7 @@ function parsePatch(patch: string): Array<{
         i += 1;
       }
       if (current) hunks.push(current);
-      ops.push({ kind: "update", path, hunks });
+      ops.push({ kind: 'update', path, hunks });
       continue;
     }
     i += 1;
@@ -787,20 +782,19 @@ function applyHunks(original: string, hunks: string[][]): string {
     const oldLines: string[] = [];
     const newLines: string[] = [];
     for (const row of hunk) {
-      if (row.startsWith("-")) oldLines.push(row.slice(1));
-      else if (row.startsWith("+")) newLines.push(row.slice(1));
-      else if (row.startsWith(" ")) {
+      if (row.startsWith('-')) oldLines.push(row.slice(1));
+      else if (row.startsWith('+')) newLines.push(row.slice(1));
+      else if (row.startsWith(' ')) {
         oldLines.push(row.slice(1));
         newLines.push(row.slice(1));
       }
     }
-    const oldBlock = oldLines.join("\n");
-    const newBlock = newLines.join("\n");
+    const oldBlock = oldLines.join('\n');
+    const newBlock = newLines.join('\n');
     if (!text.includes(oldBlock)) {
-      throw runtimeError("Patch hunk did not match file content.", "patch_conflict", 409);
+      throw runtimeError('Patch hunk did not match file content.', 'patch_conflict', 409);
     }
     text = text.replace(oldBlock, newBlock);
   }
   return text;
 }
-

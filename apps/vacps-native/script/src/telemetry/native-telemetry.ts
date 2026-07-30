@@ -1,10 +1,10 @@
-import type { BackendMetrics, BackendStatus, BackendSystem } from "@vacps/contracts";
-import * as fs from "vacps:fs";
-import * as host from "vacps:host";
-import * as process from "vacps:process";
+import type { BackendMetrics, BackendStatus, BackendSystem } from '@vacps/contracts';
+import * as fs from 'vacps:fs';
+import * as host from 'vacps:host';
+import * as process from 'vacps:process';
 
-import type { AgentConfig } from "../config";
-import type { TaskStore } from "../storage/task-store";
+import type { AgentConfig } from '../config';
+import type { TaskStore } from '../storage/task-store';
 
 interface CpuSample {
   idle: number;
@@ -57,7 +57,7 @@ export class NativeTelemetryCollector {
       health: {
         ok: true,
         backendId: this.config.BACKEND_ID,
-        version: host.version().slice(0, 48) || "0.1.0",
+        version: host.version().slice(0, 48) || '0.1.0',
         uptimeSeconds: this.uptimeSeconds(),
         worker: { running: true, concurrency: 1 },
         redis: { connected: false },
@@ -68,22 +68,22 @@ export class NativeTelemetryCollector {
     };
   }
 
-  private queueMetrics(): BackendMetrics["queue"] {
+  private queueMetrics(): BackendMetrics['queue'] {
     return this.store.queueCounts();
   }
 
-  private async cpuMetrics(): Promise<BackendMetrics["cpu"]> {
+  private async cpuMetrics(): Promise<BackendMetrics['cpu']> {
     let load1 = 0;
     let cores = 1;
     try {
-      const loadavg = await fs.readText("/proc/loadavg");
+      const loadavg = await fs.readText('/proc/loadavg');
       load1 = Number(loadavg.trim().split(/\s+/)[0] ?? 0) || 0;
     } catch {
       /* ignore */
     }
     try {
-      const stat = await fs.readText("/proc/stat");
-      const line = stat.split("\n").find((l) => l.startsWith("cpu "));
+      const stat = await fs.readText('/proc/stat');
+      const line = stat.split('\n').find((l) => l.startsWith('cpu '));
       if (line) {
         const parts = line.trim().split(/\s+/).slice(1).map(Number);
         const idle = (parts[3] ?? 0) + (parts[4] ?? 0);
@@ -97,10 +97,7 @@ export class NativeTelemetryCollector {
         }
         this.prevCpu = sample;
         // count cores from cpuN lines
-        cores = Math.max(
-          1,
-          stat.split("\n").filter((l) => /^cpu\d+/.test(l)).length,
-        );
+        cores = Math.max(1, stat.split('\n').filter((l) => /^cpu\d+/.test(l)).length);
         return {
           usagePercent: Number(usagePercent.toFixed(1)),
           load1: Number(load1.toFixed(2)),
@@ -113,15 +110,15 @@ export class NativeTelemetryCollector {
     return { usagePercent: 0, load1: Number(load1.toFixed(2)), cores };
   }
 
-  private async memoryMetrics(): Promise<BackendMetrics["memory"]> {
+  private async memoryMetrics(): Promise<BackendMetrics['memory']> {
     try {
-      const text = await fs.readText("/proc/meminfo");
+      const text = await fs.readText('/proc/meminfo');
       const get = (key: string) => {
-        const m = text.match(new RegExp(`^${key}:\\s+(\\d+)`, "m"));
+        const m = text.match(new RegExp(`^${key}:\\s+(\\d+)`, 'm'));
         return m ? Number(m[1]) * 1024 : 0;
       };
-      const total = get("MemTotal");
-      const available = get("MemAvailable") || get("MemFree");
+      const total = get('MemTotal');
+      const available = get('MemAvailable') || get('MemFree');
       return {
         totalBytes: total,
         usedBytes: Math.max(0, total - available),
@@ -131,14 +128,14 @@ export class NativeTelemetryCollector {
     }
   }
 
-  private async diskMetrics(): Promise<BackendMetrics["disk"]> {
+  private async diskMetrics(): Promise<BackendMetrics['disk']> {
     try {
-      const r = await process.run(["df", "-B1", "--output=size,used", "/"], {
+      const r = await process.run(['df', '-B1', '--output=size,used', '/'], {
         timeoutMs: 3_000,
       });
       const line = r.stdout
         .trim()
-        .split("\n")
+        .split('\n')
         .map((l) => l.trim())
         .filter(Boolean)
         .pop();
@@ -156,17 +153,15 @@ export class NativeTelemetryCollector {
     return { totalBytes: 0, usedBytes: 0 };
   }
 
-  private async networkMetrics(): Promise<
-    BackendMetrics["network"] | undefined
-  > {
+  private async networkMetrics(): Promise<BackendMetrics['network'] | undefined> {
     try {
-      const text = await fs.readText("/proc/net/dev");
+      const text = await fs.readText('/proc/net/dev');
       let rx = 0;
       let tx = 0;
-      for (const line of text.split("\n")) {
-        if (!line.includes(":")) continue;
-        if (line.includes("lo:")) continue;
-        const body = line.split(":")[1];
+      for (const line of text.split('\n')) {
+        if (!line.includes(':')) continue;
+        if (line.includes('lo:')) continue;
+        const body = line.split(':')[1];
         if (!body) continue;
         const cols = body.trim().split(/\s+/).map(Number);
         rx += cols[0] ?? 0;
@@ -189,24 +184,24 @@ export class NativeTelemetryCollector {
   }
 
   private async systemInfo(): Promise<BackendSystem> {
-    let kernel = "unknown";
+    let kernel = 'unknown';
     try {
-      kernel = (await fs.readText("/proc/version")).trim().slice(0, 120) || "unknown";
+      kernel = (await fs.readText('/proc/version')).trim().slice(0, 120) || 'unknown';
       // shorten: first token after "Linux version "
       const m = kernel.match(/Linux version ([^\s]+)/);
       if (m?.[1]) kernel = m[1];
     } catch {
       /* ignore */
     }
-    let arch = "x86_64";
+    let arch = 'x86_64';
     try {
-      const r = await process.run(["uname", "-m"], { timeoutMs: 2_000 });
+      const r = await process.run(['uname', '-m'], { timeoutMs: 2_000 });
       if (r.exitCode === 0 && r.stdout.trim()) arch = r.stdout.trim().slice(0, 32);
     } catch {
       /* ignore */
     }
     return {
-      platform: "linux",
+      platform: 'linux',
       kernel,
       architecture: arch,
     };

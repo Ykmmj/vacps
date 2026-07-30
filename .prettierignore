@@ -7,3 +7,7 @@ apps/control-worker/project.inlang/README.md
 apps/control-worker/ui/src/paraglide/
 pnpm-lock.yaml
 cloudflare_mcp_bullmq_langgraph_vps_agent_requirements_v1.md
+apps/vacps-native/build/
+apps/vacps-native/script/node_modules/
+apps/vacps-native/script/dist/
+**/cmake-build-*/

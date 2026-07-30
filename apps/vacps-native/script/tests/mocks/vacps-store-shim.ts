@@ -18,5 +18,5 @@ export interface Store {
 }
 
 export function open(_path: string): Store {
-  throw new Error("vacps:store.open is not available in unit tests; use openMemoryStore()");
+  throw new Error('vacps:store.open is not available in unit tests; use openMemoryStore()');
 }

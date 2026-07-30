@@ -1,13 +1,13 @@
 /**
  * POST /api/schedules/:id/occurrences/ack — agent-signed cursor ack to control plane.
  */
-import type { ScheduleOccurrenceAck } from "@vacps/contracts";
-import * as http from "vacps:http";
-import * as log from "vacps:log";
+import type { ScheduleOccurrenceAck } from '@vacps/contracts';
+import * as http from 'vacps:http';
+import * as log from 'vacps:log';
 
-import type { AgentConfig } from "../config";
-import { telemetryConfigured } from "../config";
-import { createAgentSignatureHeaders } from "../security/request-signatures";
+import type { AgentConfig } from '../config';
+import { telemetryConfigured } from '../config';
+import { createAgentSignatureHeaders } from '../security/request-signatures';
 
 function bodyText(body: ArrayBuffer): string {
   const u8 = new Uint8Array(body);
@@ -17,11 +17,11 @@ function bodyText(body: ArrayBuffer): string {
         TextDecoder?: new (label?: string) => { decode(b: Uint8Array): string };
       }
     ).TextDecoder;
-    if (TD) return new TD("utf-8").decode(u8);
+    if (TD) return new TD('utf-8').decode(u8);
   } catch {
     /* fall through */
   }
-  let s = "";
+  let s = '';
   for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]!);
   return s;
 }
@@ -31,7 +31,7 @@ function bodyText(body: ArrayBuffer): string {
  */
 export async function reportScheduleOccurrenceAck(
   config: AgentConfig,
-  ack: Omit<ScheduleOccurrenceAck, "backend_id"> & { backend_id?: string },
+  ack: Omit<ScheduleOccurrenceAck, 'backend_id'> & { backend_id?: string },
 ): Promise<boolean> {
   if (!telemetryConfigured(config) || !config.AGENT_PRIVATE_KEY) return false;
 
@@ -51,17 +51,17 @@ export async function reportScheduleOccurrenceAck(
   const sig = createAgentSignatureHeaders(
     config.BACKEND_ID,
     config.AGENT_PRIVATE_KEY,
-    "POST",
+    'POST',
     url,
     body,
   );
 
   try {
     const res = await http.request({
-      method: "POST",
+      method: 'POST',
       url,
       headers: {
-        "content-type": "application/json",
+        'content-type': 'application/json',
         ...sig,
       },
       body,

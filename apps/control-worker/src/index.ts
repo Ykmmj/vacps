@@ -653,11 +653,7 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
       if (id && action === 'occurrences' && subAction === 'ack' && request.method === 'POST') {
         const { input, body } = await readSignedJson(request, scheduleOccurrenceAckSchema);
         if (input.schedule_id !== id) {
-          throw new AppError(
-            'invalid_request',
-            'schedule_id in body must match path id.',
-            400,
-          );
+          throw new AppError('invalid_request', 'schedule_id in body must match path id.', 400);
         }
         const publicKey = await services.registrations.getPublicKey(input.backend_id);
         const identity = await verifyAgentRequestSignature(request, publicKey, body);

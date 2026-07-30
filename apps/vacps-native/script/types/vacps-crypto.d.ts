@@ -1,4 +1,4 @@
-declare module "vacps:crypto" {
+declare module 'vacps:crypto' {
   export function randomBytes(n: number): ArrayBuffer;
   export function sha256(data: string | ArrayBuffer | Uint8Array): ArrayBuffer;
   export function sha256Hex(data: string | ArrayBuffer | Uint8Array): string;
@@ -20,9 +20,7 @@ declare module "vacps:crypto" {
   export function ed25519SeedFromPrivateKey(encoded: string): ArrayBuffer;
 
   /** Derive 32-byte public key from 32-byte Ed25519 private seed. */
-  export function ed25519PublicFromPrivate(
-    privateKey: ArrayBuffer | Uint8Array,
-  ): ArrayBuffer;
+  export function ed25519PublicFromPrivate(privateKey: ArrayBuffer | Uint8Array): ArrayBuffer;
   export function ed25519Sign(
     privateKey: ArrayBuffer | Uint8Array,
     message: string | ArrayBuffer | Uint8Array,

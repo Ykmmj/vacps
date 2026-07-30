@@ -1,4 +1,4 @@
-declare module "vacps:http" {
+declare module 'vacps:http' {
   export interface ServerOptions {
     readonly host?: string;
     readonly port?: number;

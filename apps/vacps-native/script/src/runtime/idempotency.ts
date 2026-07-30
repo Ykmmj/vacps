@@ -1,4 +1,4 @@
-import * as crypto from "vacps:crypto";
+import * as crypto from 'vacps:crypto';
 
 export interface IdempotencyMeta {
   key: string;
@@ -25,9 +25,9 @@ export class IdempotencyStore {
     if (!existing) return null;
     if (existing.requestHash !== requestHash) {
       throw Object.assign(
-        new Error("The idempotency key was previously used with different arguments."),
+        new Error('The idempotency key was previously used with different arguments.'),
         {
-          code: "idempotency_conflict",
+          code: 'idempotency_conflict',
           statusCode: 409,
           details: { tool_name: toolName, key },
         },
@@ -68,9 +68,9 @@ export function hashRequest(payload: unknown): string {
 }
 
 function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
 }

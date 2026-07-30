@@ -20,15 +20,15 @@
 
 当前锁定（节选）：
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| Boost | 1.91.0 | Asio / Beast（header-only）+ Process v2（编译 `libs/process/src`） |
-| OpenSSL | Alpine apk（`openssl-dev` + `openssl-libs-static`） | TLS / Ed25519 / RAND / SHA-256；全静态 |
-| SQLite amalgamation | 3.53.4 (`3530400`) | 本地存储 |
-| spdlog | 1.17.0 | 日志 |
-| nlohmann/json | 3.12.0 | JSON 编解码 |
-| QuickJS | 2026-06-04 | JS runtime（RAII host，主线程 only） |
-| GoogleTest | 1.17.0 | C++ 单元测试（`VACPS_BUILD_TESTS`） |
+| 依赖                | 版本                                                | 用途                                                               |
+| ------------------- | --------------------------------------------------- | ------------------------------------------------------------------ |
+| Boost               | 1.91.0                                              | Asio / Beast（header-only）+ Process v2（编译 `libs/process/src`） |
+| OpenSSL             | Alpine apk（`openssl-dev` + `openssl-libs-static`） | TLS / Ed25519 / RAND / SHA-256；全静态                             |
+| SQLite amalgamation | 3.53.4 (`3530400`)                                  | 本地存储                                                           |
+| spdlog              | 1.17.0                                              | 日志                                                               |
+| nlohmann/json       | 3.12.0                                              | JSON 编解码                                                        |
+| QuickJS             | 2026-06-04                                          | JS runtime（RAII host，主线程 only）                               |
+| GoogleTest          | 1.17.0                                              | C++ 单元测试（`VACPS_BUILD_TESTS`）                                |
 
 ---
 
@@ -79,7 +79,7 @@
 3. 单一职责：HTTP 路由、DB、进程、协议解析分层；header 里只放需要 inline 的薄封装。
 4. 魔法数：命名常量。
 5. **C++ 几乎无业务代码**：任务状态机、协议映射、领域表读写编排放在 QuickJS JS；C++ 只提供 DB 连接/`vacps:store` 能力、HTTP、进程、密码学等基础设施。
-5. **不**在热路径做无界分配（读 body、日志字段）时注意缓冲复用；先正确后优化。
+6. **不**在热路径做无界分配（读 body、日志字段）时注意缓冲复用；先正确后优化。
 
 ---
 
@@ -149,14 +149,14 @@
 
 ## 11. 代码风格（简表）
 
-| 项 | 约定 |
-|----|------|
-| 命名 | 类型 `PascalCase`；函数/变量 `snake_case`；常量 `kCamel` 或 `ALL_CAPS` 宏少用 |
-| 命名空间 | `vacps` / `vacps::http` / `vacps::log` |
-| Header | `#pragma once`；include 顺序：本模块 → 项目 → 第三方 → 标准库 |
-| 文件 | 实现放 `.cpp`；模板/薄包装可 header-only |
-| 注释 | 写“为什么”和约束；不写复述代码的废话 |
-| 提交 | 用户明确要求前不擅自 `git commit` |
+| 项       | 约定                                                                          |
+| -------- | ----------------------------------------------------------------------------- |
+| 命名     | 类型 `PascalCase`；函数/变量 `snake_case`；常量 `kCamel` 或 `ALL_CAPS` 宏少用 |
+| 命名空间 | `vacps` / `vacps::http` / `vacps::log`                                        |
+| Header   | `#pragma once`；include 顺序：本模块 → 项目 → 第三方 → 标准库                 |
+| 文件     | 实现放 `.cpp`；模板/薄包装可 header-only                                      |
+| 注释     | 写“为什么”和约束；不写复述代码的废话                                          |
+| 提交     | 用户明确要求前不擅自 `git commit`                                             |
 
 ---
 
@@ -175,11 +175,11 @@
 
 ### 12.2 与本仓库的关系
 
-| 主题 | 优先查 | 辅证 |
-|------|--------|------|
-| QuickJS 模块 / Eval / Promise / Job | Context7 `QuickJS` | `build/.../_deps/quickjs-src/quickjs.h`、`qjs.c` |
-| Asio 协程 / timer / strand | Context7 Boost.Asio | 已链接的 Boost 头 |
-| 其它锁定依赖 | Context7 对应库 | `cmake/Dependencies.cmake` 版本 |
+| 主题                                | 优先查              | 辅证                                             |
+| ----------------------------------- | ------------------- | ------------------------------------------------ |
+| QuickJS 模块 / Eval / Promise / Job | Context7 `QuickJS`  | `build/.../_deps/quickjs-src/quickjs.h`、`qjs.c` |
+| Asio 协程 / timer / strand          | Context7 Boost.Asio | 已链接的 Boost 头                                |
+| 其它锁定依赖                        | Context7 对应库     | `cmake/Dependencies.cmake` 版本                  |
 
 ### 12.3 反模式
 

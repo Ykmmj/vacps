@@ -3,21 +3,16 @@ import {
   registerBackendSchema,
   telemetrySettingsSchema,
   type BackendStatus,
-} from "@vacps/contracts";
-import * as host from "vacps:host";
-import * as http from "vacps:http";
-import * as log from "vacps:log";
+} from '@vacps/contracts';
+import * as host from 'vacps:host';
+import * as http from 'vacps:http';
+import * as log from 'vacps:log';
 
-import type { AgentConfig } from "../config";
-import { registrationConfigured, telemetryConfigured } from "../config";
-import { createAgentSignatureHeaders } from "../security/request-signatures";
+import type { AgentConfig } from '../config';
+import { registrationConfigured, telemetryConfigured } from '../config';
+import { createAgentSignatureHeaders } from '../security/request-signatures';
 
-export type RegistrationStatus =
-  | "pending"
-  | "approved"
-  | "rejected"
-  | "unknown"
-  | "disabled";
+export type RegistrationStatus = 'pending' | 'approved' | 'rejected' | 'unknown' | 'disabled';
 
 function bodyText(body: ArrayBuffer): string {
   const u8 = new Uint8Array(body);
@@ -27,19 +22,17 @@ function bodyText(body: ArrayBuffer): string {
         TextDecoder?: new (label?: string) => { decode(b: Uint8Array): string };
       }
     ).TextDecoder;
-    if (TD) return new TD("utf-8").decode(u8);
+    if (TD) return new TD('utf-8').decode(u8);
   } catch {
     /* fall through */
   }
-  let s = "";
+  let s = '';
   for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]!);
   return s;
 }
 
 /** POST /api/registrations — parity with apps/vacps registration module. */
-export async function registerWithControlPlane(
-  config: AgentConfig,
-): Promise<string | undefined> {
+export async function registerWithControlPlane(config: AgentConfig): Promise<string | undefined> {
   if (!registrationConfigured(config)) return undefined;
 
   const payload = registerBackendSchema.parse({
@@ -48,7 +41,7 @@ export async function registerWithControlPlane(
     baseUrl: config.PUBLIC_BASE_URL!,
     tags: config.BACKEND_TAGS,
     publicIps: [],
-    agentVersion: host.version().slice(0, 48) || "0.1.0",
+    agentVersion: host.version().slice(0, 48) || '0.1.0',
     publicKey: config.AGENT_PUBLIC_KEY!,
   });
   const body = JSON.stringify(payload);
@@ -56,12 +49,12 @@ export async function registerWithControlPlane(
   const sig = createAgentSignatureHeaders(
     config.BACKEND_ID,
     config.AGENT_PRIVATE_KEY!,
-    "POST",
+    'POST',
     url,
     body,
   );
   const headers: Record<string, string> = {
-    "content-type": "application/json",
+    'content-type': 'application/json',
     ...sig,
   };
   if (config.REGISTRATION_TOKEN) {
@@ -69,7 +62,7 @@ export async function registerWithControlPlane(
   }
 
   const res = await http.request({
-    method: "POST",
+    method: 'POST',
     url,
     headers,
     body,
@@ -78,12 +71,12 @@ export async function registerWithControlPlane(
   const text = bodyText(res.body);
   if (res.status < 200 || res.status >= 300) {
     throw new Error(
-      `Control-plane registration returned HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+      `Control-plane registration returned HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}`,
     );
   }
   try {
     const json = JSON.parse(text) as { status?: unknown };
-    if (typeof json.status === "string") {
+    if (typeof json.status === 'string') {
       log.info(`Control-plane registration status: ${json.status}`);
       return json.status;
     }
@@ -110,15 +103,15 @@ export async function reportTelemetry(
   const sig = createAgentSignatureHeaders(
     config.BACKEND_ID,
     config.AGENT_PRIVATE_KEY!,
-    "POST",
+    'POST',
     url,
     body,
   );
   const res = await http.request({
-    method: "POST",
+    method: 'POST',
     url,
     headers: {
-      "content-type": "application/json",
+      'content-type': 'application/json',
       ...sig,
     },
     body,
@@ -139,7 +132,7 @@ export async function reportTelemetry(
 
 /** @deprecated Prefer NativeTelemetryCollector.collect() — kept for tests. */
 export function collectNativeStatus(config: AgentConfig): BackendStatus {
-  const version = host.version().slice(0, 48) || "0.1.0";
+  const version = host.version().slice(0, 48) || '0.1.0';
   return {
     health: {
       ok: true,
@@ -151,9 +144,9 @@ export function collectNativeStatus(config: AgentConfig): BackendStatus {
       pi: { available: false },
     },
     system: {
-      platform: "linux",
-      kernel: "unknown",
-      architecture: "x86_64",
+      platform: 'linux',
+      kernel: 'unknown',
+      architecture: 'x86_64',
     },
   };
 }
