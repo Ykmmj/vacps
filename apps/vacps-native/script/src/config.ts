@@ -37,9 +37,18 @@ function stripSlash(url: string | undefined): string | undefined {
   return url.replace(/\/$/, '');
 }
 
+/** True when `url` is an absolute http(s) URL (required for control-plane baseUrl). */
+export function isAbsoluteHttpUrl(url: string | undefined): url is string {
+  if (!url || !url.trim()) return false;
+  // Avoid new URL() if the QuickJS build lacks it; mirror common absolute-URL shape.
+  return /^https?:\/\/[^\s/$.?#].[^\s]*$/i.test(url.trim());
+}
+
 export function loadConfig(): AgentConfig {
   const backendId = env('BACKEND_ID') ?? env('VACPS_BACKEND_ID') ?? 'local';
   const tagsRaw = env('BACKEND_TAGS') ?? '';
+  const publicBase = stripSlash(env('PUBLIC_BASE_URL') ?? env('VACPS_PUBLIC_BASE_URL'));
+  const controlPlane = stripSlash(env('CONTROL_PLANE_URL') ?? env('VACPS_CONTROL_PLANE_URL'));
   return {
     BACKEND_ID: backendId,
     BACKEND_NAME: env('BACKEND_NAME') ?? backendId,
@@ -47,8 +56,9 @@ export function loadConfig(): AgentConfig {
       .split(',')
       .map((t) => t.trim())
       .filter(Boolean),
-    PUBLIC_BASE_URL: stripSlash(env('PUBLIC_BASE_URL') ?? env('VACPS_PUBLIC_BASE_URL')),
-    CONTROL_PLANE_URL: stripSlash(env('CONTROL_PLANE_URL') ?? env('VACPS_CONTROL_PLANE_URL')),
+    // Drop non-absolute values so registration waits for quick-tunnel / managed URL.
+    PUBLIC_BASE_URL: isAbsoluteHttpUrl(publicBase) ? publicBase : undefined,
+    CONTROL_PLANE_URL: isAbsoluteHttpUrl(controlPlane) ? controlPlane : undefined,
     AGENT_PRIVATE_KEY: env('AGENT_PRIVATE_KEY') ?? env('VACPS_AGENT_PRIVATE_KEY'),
     AGENT_PUBLIC_KEY: env('AGENT_PUBLIC_KEY') ?? env('VACPS_AGENT_PUBLIC_KEY'),
     CONTROL_PLANE_PUBLIC_KEY:
@@ -67,7 +77,7 @@ export function loadConfig(): AgentConfig {
 export function registrationConfigured(config: AgentConfig): boolean {
   return Boolean(
     config.CONTROL_PLANE_URL &&
-    config.PUBLIC_BASE_URL &&
+    isAbsoluteHttpUrl(config.PUBLIC_BASE_URL) &&
     config.AGENT_PRIVATE_KEY &&
     config.AGENT_PUBLIC_KEY &&
     config.BACKEND_ID,

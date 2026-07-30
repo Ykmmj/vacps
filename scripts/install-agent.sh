@@ -400,18 +400,30 @@ EOF
 }
 
 install_quick_tunnel_service() {
+  # Node listens on 3100; native on 8788. Tunnel must target the active agent port.
+  local agent_port=3100
+  if is_native_runtime; then
+    agent_port=8788
+  fi
   install -d /usr/local/lib/vacps
-  cat >/usr/local/lib/vacps/quick-tunnel.sh <<'EOF'
+  # Expand agent_port into the helper (not quoted heredoc).
+  cat >/usr/local/lib/vacps/quick-tunnel.sh <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
 ENVIRONMENT_FILE=/etc/vacps/vacps.env
+AGENT_LOCAL_URL=http://127.0.0.1:${agent_port}
 while true; do
-  cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3100 2>&1 | while IFS= read -r line; do
-    printf '%s\n' "$line"
-    if [[ $line =~ https://[-a-z0-9]+\.trycloudflare\.com ]]; then
-      public_url=${BASH_REMATCH[0]}
-      sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=$public_url|" "$ENVIRONMENT_FILE"
+  cloudflared tunnel --no-autoupdate --url "\$AGENT_LOCAL_URL" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "\$line"
+    if [[ \$line =~ https://[-a-z0-9]+\\.trycloudflare\\.com ]]; then
+      public_url=\${BASH_REMATCH[0]}
+      if grep -q '^PUBLIC_BASE_URL=' "\$ENVIRONMENT_FILE" 2>/dev/null; then
+        sed -i "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=\$public_url|" "\$ENVIRONMENT_FILE"
+      else
+        printf 'PUBLIC_BASE_URL=%s\n' "\$public_url" >>"\$ENVIRONMENT_FILE"
+      fi
+      # Reload EnvironmentFile so the agent re-registers with the new public URL.
       systemctl try-restart vacps
     fi
   done || true
@@ -436,6 +448,7 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now vacps-quick-tunnel
+  echo "Quick Tunnel helper targets $agent_port (runtime: $AGENT_RUNTIME)."
 }
 
 # Create/repair the agent system user with a full login home (required for shell.exec).
@@ -940,6 +953,8 @@ upgrade_agent() {
 write_environment_file() {
   install -d /etc/vacps
   install -m 640 -o root -g "$SERVICE_USER" /dev/null "$ENVIRONMENT_FILE"
+  # Always write PUBLIC_BASE_URL= so quick-tunnel sed can update the line later.
+  # For --quick-tunnel the value starts empty; discovery fills it before re-register.
   if is_native_runtime; then
     cat >"$ENVIRONMENT_FILE" <<EOF
 AGENT_RUNTIME=native
