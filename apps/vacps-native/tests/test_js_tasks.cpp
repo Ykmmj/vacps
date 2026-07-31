@@ -41,6 +41,8 @@ class JsTasksTest : public ::testing::Test {
     cfg_.log_level = "info";
     // Match default backend id in agent-config when BACKEND_ID unset.
     setenv("BACKEND_ID", "local", 1);
+    // Integration tests dispatch unsigned HTTP; production requires a CP key.
+    setenv("VACPS_ALLOW_INSECURE_NO_AUTH", "1", 1);
   }
 
   vacps::Config cfg_{};

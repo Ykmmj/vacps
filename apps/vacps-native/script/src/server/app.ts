@@ -10,6 +10,10 @@ import { probeShellEnvironment } from '../runtime/shell-environment';
 import * as files from '../runtime/files';
 import { hashRequest, IdempotencyStore } from '../runtime/idempotency';
 import type { ProcessManager } from '../runtime/process-manager';
+import {
+  allowUnsignedWhenNoKey,
+  isPublicHttpPath,
+} from '../security/http-auth';
 import { verifyControlPlaneRequest } from '../security/control-plane-verify';
 import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
 import { createApp, type App, type Reply } from './router';
@@ -59,24 +63,22 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   const app = createApp();
   const idempotency = new IdempotencyStore();
 
-  // Public probes skip signature; mutating control-plane API requires it when key is set.
-  const publicPaths = new Set([
-    '/health',
-    '/ready',
-    '/script/ping',
-    '/status',
-    '/info',
-    '/capabilities',
-    '/metrics',
-  ]);
-
+  // Only /health is unauthenticated. GET /tasks and /fs/* previously bypassed
+  // auth and must not — loopback/Tunnel is not application-layer security.
   app.addHook('preValidation', async (request, reply) => {
-    if (publicPaths.has(request.path)) return undefined;
-    if (request.method === 'GET' && request.path.startsWith('/tasks')) return undefined;
-    if (request.method === 'GET' && request.path.startsWith('/fs/')) return undefined;
+    if (isPublicHttpPath(request.path)) return undefined;
 
     const pub = input.config.CONTROL_PLANE_PUBLIC_KEY;
-    if (!pub) return undefined;
+    if (!pub) {
+      if (allowUnsignedWhenNoKey(input.config)) return undefined;
+      return reply.code(401).send({
+        error: {
+          code: 'unauthorized',
+          message:
+            'CONTROL_PLANE_PUBLIC_KEY is required; unsigned requests are not accepted.',
+        },
+      });
+    }
 
     try {
       const { nonce } = verifyControlPlaneRequest({

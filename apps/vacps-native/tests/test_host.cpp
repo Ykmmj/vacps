@@ -112,6 +112,8 @@ class HostTest : public ::testing::Test {
     cfg_.log_level = "off";
     script_path_ = (dir_ / "biz.mjs").string();
     write_script(script_path_, kBusinessScript);
+    // Business script Application requires CP key unless insecure (tests only).
+    setenv("VACPS_ALLOW_INSECURE_NO_AUTH", "1", 1);
   }
 
   void TearDown() override {
