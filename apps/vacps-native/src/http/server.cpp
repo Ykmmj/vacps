@@ -179,13 +179,18 @@ asio::awaitable<void> Server::graceful_shutdown() {
   }
 
   if (script_) {
-    script_->cancel_host_async();
+    // Do NOT cancel_host_async before JS shutdown — that makes await_settled
+    // busy-spin and blocks db_pool completions needed by await db.close().
     script_->processes().shutdown();
     co_await script_->wait_async_idle(
         std::chrono::duration_cast<std::chrono::milliseconds>(kGracefulAsyncIdle));
     if (auto sh = co_await script_->shutdown_script(); !sh) {
       vacps::log::error("script shutdown: {}", sh.error().message);
     }
+    // Drain ops started by JS shutdown (e.g. store.close), then mark done.
+    co_await script_->wait_async_idle(
+        std::chrono::duration_cast<std::chrono::milliseconds>(kGracefulAsyncIdle));
+    script_->cancel_host_async();
     if (auto drain = script_->drain_jobs(); !drain) {
       vacps::log::debug("post-shutdown job drain: {}", drain.error().message);
     }

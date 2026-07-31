@@ -38,40 +38,56 @@ export class TaskStore {
     },
   ): Promise<boolean> {
     const now = new Date().toISOString();
-    if (task.idempotency_key) {
-      const byKey = await this.findByIdempotencyKey(task.idempotency_key);
-      if (byKey) return false;
+    const idem = task.idempotency_key ?? null;
+    // Single atomic unit: insert task only if id and optional idempotency key are free.
+    const steps = [
+      {
+        sql: `INSERT INTO tasks(
+            id, backend_id, kind, status, profile, input_json,
+            cancel_requested, created_at, updated_at,
+            schedule_id, schedule_revision, scheduled_for_ms
+          )
+          SELECT ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?
+          WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE id = ?)
+            AND (
+              ? IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM task_idempotency WHERE idempotency_key = ?
+              )
+            );`,
+        params: [
+          task.task_id,
+          task.backend_id,
+          task.kind,
+          status,
+          task.profile,
+          JSON.stringify(task),
+          now,
+          now,
+          occurrence?.scheduleId ?? null,
+          occurrence?.scheduleRevision ?? null,
+          occurrence?.scheduledForMs ?? null,
+          task.task_id,
+          idem,
+          idem,
+        ],
+      },
+    ];
+    if (idem) {
+      steps.push({
+        sql: `INSERT INTO task_idempotency(idempotency_key, task_id, created_at)
+              SELECT ?, ?, ?
+              WHERE EXISTS (
+                SELECT 1 FROM tasks WHERE id = ? AND created_at = ?
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM task_idempotency WHERE idempotency_key = ?
+              );`,
+        params: [idem, task.task_id, now, task.task_id, now, idem],
+      });
     }
-    const existing = await this.getTask(task.task_id);
-    if (existing) return false;
-    await this.db.run(
-      `INSERT INTO tasks(
-        id, backend_id, kind, status, profile, input_json,
-        cancel_requested, created_at, updated_at,
-        schedule_id, schedule_revision, scheduled_for_ms
-      ) VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?);`,
-      [
-        task.task_id,
-        task.backend_id,
-        task.kind,
-        status,
-        task.profile,
-        JSON.stringify(task),
-        now,
-        now,
-        occurrence?.scheduleId ?? null,
-        occurrence?.scheduleRevision ?? null,
-        occurrence?.scheduledForMs ?? null,
-      ],
-    );
-    if (task.idempotency_key) {
-      await this.db.run(
-        `INSERT INTO task_idempotency(idempotency_key, task_id, created_at)
-         VALUES(?, ?, ?);`,
-        [task.idempotency_key, task.task_id, now],
-      );
-    }
-    return true;
+    const results = await this.db.transaction(steps);
+    return (results[0]?.changes ?? 0) === 1;
   }
 
   /**
@@ -181,23 +197,26 @@ export class TaskStore {
     return rowToStored(rows[0]!);
   }
 
-  /** Oldest queued task, or undefined. */
+  /**
+   * Atomically claim the oldest queued task (UPDATE … RETURNING).
+   * Success is solely whether a row is returned — never re-query status.
+   */
   async claimNextQueued(): Promise<StoredTask | undefined> {
+    const now = new Date().toISOString();
     const rows = await this.db.query(
-      `SELECT * FROM tasks
-       WHERE status = 'queued' AND cancel_requested = 0
-       ORDER BY created_at ASC LIMIT 1;`,
+      `UPDATE tasks SET status = 'running', started_at = ?, updated_at = ?
+       WHERE id = (
+         SELECT id FROM tasks
+         WHERE status = 'queued' AND cancel_requested = 0
+         ORDER BY created_at ASC
+         LIMIT 1
+       )
+       AND status = 'queued'
+       RETURNING *;`,
+      [now, now],
     );
     if (rows.length === 0) return undefined;
-    const task = rowToStored(rows[0]!);
-    const now = new Date().toISOString();
-    await this.db.run(
-      `UPDATE tasks SET status = 'running', started_at = ?, updated_at = ?
-       WHERE id = ? AND status = 'queued';`,
-      [now, now, task.task.task_id],
-    );
-    const again = await this.getTask(task.task.task_id);
-    return again?.status === 'running' ? again : undefined;
+    return rowToStored(rows[0]!);
   }
 
   async updateTask(
@@ -314,16 +333,16 @@ export class TaskStore {
 
   async claimNonce(nonce: string, ttlSeconds = 600): Promise<boolean> {
     const now = Math.floor(Date.now() / 1000);
-    await this.db.run('DELETE FROM request_nonces WHERE expires_at < ?;', [now]);
-    const existing = await this.db.query('SELECT nonce FROM request_nonces WHERE nonce = ?;', [
-      nonce,
+    const results = await this.db.transaction([
+      { sql: 'DELETE FROM request_nonces WHERE expires_at < ?;', params: [now] },
+      {
+        sql: `INSERT INTO request_nonces(nonce, expires_at)
+              SELECT ?, ?
+              WHERE NOT EXISTS (SELECT 1 FROM request_nonces WHERE nonce = ?);`,
+        params: [nonce, now + ttlSeconds, nonce],
+      },
     ]);
-    if (existing.length > 0) return false;
-    await this.db.run('INSERT INTO request_nonces(nonce, expires_at) VALUES(?, ?);', [
-      nonce,
-      now + ttlSeconds,
-    ]);
-    return true;
+    return (results[1]?.changes ?? 0) === 1;
   }
 
   async hasRunning(): Promise<boolean> {

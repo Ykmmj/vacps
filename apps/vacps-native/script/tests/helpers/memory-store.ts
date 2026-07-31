@@ -26,6 +26,33 @@ export function openMemoryStore(): Store {
       const rows = db.prepare(sql).all(...(params as SqlParam[]));
       return rows as Array<Record<string, unknown>>;
     },
+    async transaction(steps) {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const out: RunResult[] = [];
+        for (const step of steps) {
+          if (step.exec) {
+            db.exec(step.sql);
+            out.push({ changes: 0, lastInsertRowid: 0 });
+          } else {
+            const info = db.prepare(step.sql).run(...((step.params ?? []) as SqlParam[]));
+            out.push({
+              changes: Number(info.changes),
+              lastInsertRowid: Number(info.lastInsertRowid),
+            });
+          }
+        }
+        db.exec('COMMIT;');
+        return out;
+      } catch (e) {
+        try {
+          db.exec('ROLLBACK;');
+        } catch {
+          /* ignore */
+        }
+        throw e;
+      }
+    },
     async begin(): Promise<void> {
       db.exec('BEGIN IMMEDIATE;');
     },

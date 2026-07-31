@@ -82,11 +82,16 @@ export class TaskQueue {
 
   /** Claim and run at most one queued task (single-flight). */
   async pumpOnce(): Promise<boolean> {
-    if (this.pumpBusy || (await this.store.hasRunning())) {
+    // Lock before any await so concurrent pumpOnce cannot both pass the gate.
+    if (this.pumpBusy) {
       return false;
     }
     this.pumpBusy = true;
     try {
+      if (await this.store.hasRunning()) {
+        return false;
+      }
+      // claimNextQueued is atomic UPDATE…RETURNING — only the winner gets a row.
       const claimed = await this.store.claimNextQueued();
       if (!claimed) return false;
       log.info(`queue claim task=${claimed.task.task_id} kind=${claimed.task.kind}`);
@@ -210,24 +215,8 @@ export class TaskQueue {
       const current = await this.schedulers.get(s.id);
       if (!current?.nextRunAt || !current.enabled) continue;
 
-      const result = await this.schedulers.claimAndEnqueue(
-        current,
-        nowMs,
-        async (slot, schedule) => {
-          const dispatch = {
-            ...schedule.task,
-            task_id: slot.occurrenceId,
-            source: 'schedule' as const,
-            schedule_id: schedule.id,
-            idempotency_key: slot.occurrenceId,
-          } as TaskDispatch;
-          await this.store.insertOccurrenceTask(dispatch, {
-            scheduleId: schedule.id,
-            scheduleRevision: slot.revision,
-            scheduledForMs: slot.scheduledForMs,
-          });
-        },
-      );
+      // Claim + task inserts are one store.transaction() inside claimAndEnqueue.
+      const result = await this.schedulers.claimAndEnqueue(current, nowMs);
 
       if (!result.claimed || !result.plan) continue;
       tasksEnqueued += result.slots.length;

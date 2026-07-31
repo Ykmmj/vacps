@@ -193,15 +193,16 @@ export class SchedulerStore {
   }
 
   /**
-   * CAS claim of current next_run_at occurrence and advance cursor.
-   * Does NOT insert tasks — caller inserts in same transaction via claimAndEnqueueWith.
+   * CAS claim of current next_run_at + insert occurrence tasks in **one**
+   * `store.transaction()` unit (BEGIN … UPDATE … INSERTs … COMMIT on db_pool).
    *
-   * Prefer {@link claimAndEnqueue} which runs UPDATE+INSERT in one transaction.
+   * `beforeInsert` is optional and must not touch the DB — tests use it to throw
+   * before the transaction to simulate insert failure / rollback of the claim.
    */
   async claimAndEnqueue(
     schedule: StoredScheduler,
     nowMs: number,
-    insertTask: (slot: ClaimEnqueueSlot, schedule: StoredScheduler) => void | Promise<void>,
+    beforeInsert?: (slot: ClaimEnqueueSlot, schedule: StoredScheduler) => void | Promise<void>,
   ): Promise<ClaimResult> {
     if (!schedule.enabled) {
       return { claimed: false, reason: 'disabled', slots: [], advancedNext: null };
@@ -231,14 +232,20 @@ export class SchedulerStore {
       };
     });
 
+    if (beforeInsert) {
+      for (const slot of slots) {
+        await beforeInsert(slot, schedule);
+      }
+    }
+
     const advanced = plan.advancedNext;
     const claimedAt = canonicalUtcIso(plan.scheduledForMs) ?? plan.scheduledForRaw;
     const nowIso = new Date().toISOString();
 
-    try {
-      await this.db.begin();
-      const upd = await this.db.run(
-        `UPDATE schedulers SET
+    type Step = { sql: string; params?: readonly (string | number | null)[] };
+    const steps: Step[] = [
+      {
+        sql: `UPDATE schedulers SET
            next_run_at = ?,
            last_claimed_at = ?,
            last_fired_minute = ?,
@@ -247,46 +254,64 @@ export class SchedulerStore {
            AND revision = ?
            AND enabled = 1
            AND next_run_at = ?;`,
-        [
+        params: [
           advanced,
           claimedAt,
-          claimedAt.slice(0, 16), // observability minute-ish
+          claimedAt.slice(0, 16),
           nowIso,
           schedule.id,
           schedule.revision,
-          plan.scheduledForRaw, // CAS: raw string from read
+          plan.scheduledForRaw,
         ],
-      );
-      if (upd.changes !== 1) {
-        await this.db.rollback();
-        return {
-          claimed: false,
-          reason: 'cas_miss',
-          plan,
-          slots: [],
-          advancedNext: null,
-        };
-      }
+      },
+    ];
 
-      for (const slot of slots) {
-        await insertTask(slot, schedule);
-      }
-
-      await this.db.commit();
-      return {
-        claimed: true,
-        plan,
-        slots,
-        advancedNext: advanced,
+    for (const slot of slots) {
+      const dispatch = {
+        ...schedule.task,
+        task_id: slot.occurrenceId,
+        source: 'schedule' as const,
+        schedule_id: schedule.id,
+        idempotency_key: slot.occurrenceId,
       };
-    } catch (e) {
-      try {
-        await this.db.rollback();
-      } catch {
-        /* ignore */
-      }
-      throw e;
+      steps.push({
+        sql: `INSERT INTO tasks(
+          id, backend_id, kind, status, profile, input_json,
+          cancel_requested, created_at, updated_at,
+          schedule_id, schedule_revision, scheduled_for_ms
+        ) VALUES(?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING;`,
+        params: [
+          dispatch.task_id,
+          dispatch.backend_id,
+          dispatch.kind,
+          dispatch.profile ?? null,
+          JSON.stringify(dispatch),
+          nowIso,
+          nowIso,
+          schedule.id,
+          slot.revision,
+          slot.scheduledForMs,
+        ],
+      });
     }
+
+    const results = await this.db.transaction(steps);
+    if ((results[0]?.changes ?? 0) !== 1) {
+      return {
+        claimed: false,
+        reason: 'cas_miss',
+        plan,
+        slots: [],
+        advancedNext: null,
+      };
+    }
+    return {
+      claimed: true,
+      plan,
+      slots,
+      advancedNext: advanced,
+    };
   }
 }
 

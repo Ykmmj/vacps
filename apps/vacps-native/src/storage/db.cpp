@@ -251,6 +251,28 @@ VoidResult Database::begin() { return exec("BEGIN IMMEDIATE;"); }
 VoidResult Database::commit() { return exec("COMMIT;"); }
 VoidResult Database::rollback() { return exec("ROLLBACK;"); }
 
+Result<std::vector<Database::TxStepResult>> Database::run_transaction(
+    const std::vector<TxStep>& steps) {
+  return with_transaction([&](Database& self) -> Result<std::vector<TxStepResult>> {
+    std::vector<TxStepResult> out;
+    out.reserve(steps.size());
+    for (const auto& step : steps) {
+      if (step.is_run) {
+        if (auto r = self.execute(step.sql, step.params); !r) {
+          return std::unexpected(std::move(r.error()));
+        }
+        out.push_back(TxStepResult{self.changes(), self.last_insert_rowid()});
+      } else {
+        if (auto r = self.exec(step.sql); !r) {
+          return std::unexpected(std::move(r.error()));
+        }
+        out.push_back(TxStepResult{self.changes(), self.last_insert_rowid()});
+      }
+    }
+    return out;
+  });
+}
+
 std::int64_t Database::last_insert_rowid() const {
   return db_ != nullptr ? static_cast<std::int64_t>(sqlite3_last_insert_rowid(db_)) : 0;
 }

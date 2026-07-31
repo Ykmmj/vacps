@@ -108,17 +108,12 @@ export async function migrateAgentDb(db: Store): Promise<void> {
 
   for (const m of migrations) {
     if (applied.has(m.version)) continue;
-    await db.begin();
-    try {
-      await db.exec(m.sql);
-      await db.run('INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?);', [
-        m.version,
-        new Date().toISOString(),
-      ]);
-      await db.commit();
-    } catch (e) {
-      await db.rollback();
-      throw e;
-    }
+    await db.transaction([
+      { sql: m.sql, exec: true },
+      {
+        sql: 'INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?);',
+        params: [m.version, new Date().toISOString()],
+      },
+    ]);
   }
 }

@@ -300,6 +300,84 @@ JSValue js_store_query(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
       });
 }
 
+/**
+ * store.transaction(steps) → Promise<RunResult[]>
+ * steps: Array<{ sql: string, params?: SqlParam[], exec?: boolean }>
+ * Entire unit runs as one BEGIN IMMEDIATE … COMMIT job on db_pool (no interleaving).
+ */
+JSValue js_store_transaction(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.transaction: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  if (argc < 1 || !is_array(ctx, argv[0])) {
+    return JS_ThrowTypeError(ctx, "store.transaction(steps: Array)");
+  }
+  Value len_v = Value::get_property_str(ctx, argv[0], "length");
+  auto len_r = converter<std::int32_t>::from_js(ctx, len_v.get());
+  if (!len_r || *len_r < 0) {
+    return JS_ThrowTypeError(ctx, "store.transaction: invalid steps length");
+  }
+  std::vector<vacps::Database::TxStep> steps;
+  steps.reserve(static_cast<std::size_t>(*len_r));
+  for (std::int32_t i = 0; i < *len_r; ++i) {
+    Value el = Value::get_property_uint32(ctx, argv[0], static_cast<std::uint32_t>(i));
+    if (!el.is_object() || el.is_null()) {
+      return JS_ThrowTypeError(ctx, "store.transaction: each step must be an object");
+    }
+    Value sql_v = Value::get_property_str(ctx, el.get(), "sql");
+    auto sql = converter<std::string>::from_js(ctx, sql_v.get());
+    if (!sql) return throw_error(ctx, sql.error());
+    vacps::Database::TxStep step;
+    step.sql = std::move(*sql);
+    step.is_run = true;
+    Value exec_v = Value::get_property_str(ctx, el.get(), "exec");
+    if (!exec_v.is_nullish()) {
+      auto b = converter<bool>::from_js(ctx, exec_v.get());
+      if (b && *b) step.is_run = false;
+    }
+    Value params_v = Value::get_property_str(ctx, el.get(), "params");
+    if (!params_v.is_nullish()) {
+      auto p = sql_params_from_js(ctx, params_v.get());
+      if (!p) return throw_error(ctx, p.error());
+      step.params = std::move(*p);
+    }
+    steps.push_back(std::move(step));
+  }
+  auto state = h->state;
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, steps = std::move(steps), host](JSContext* c, PromiseBridge& bridge) mutable
+          -> boost::asio::awaitable<void> {
+        auto r = co_await vacps::fs::async_offload(
+            host->db_pool(),
+            [state, steps = std::move(steps)]() mutable
+                -> Result<std::vector<vacps::Database::TxStepResult>> {
+              if (!state->db || !state->db->ok()) {
+                return std::unexpected(Error{"store closed"});
+              }
+              return state->db->run_transaction(steps);
+            });
+        if (!r) {
+          bridge.reject(r.error());
+          co_return;
+        }
+        auto arr = Value::new_array(c);
+        for (std::uint32_t i = 0; i < r->size(); ++i) {
+          auto obj = Value::new_object(c);
+          obj.set_property_str(
+              "changes", converter<std::int64_t>::to_js(c, (*r)[i].changes));
+          obj.set_property_str(
+              "lastInsertRowid",
+              converter<std::int64_t>::to_js(c, (*r)[i].last_insert_rowid));
+          arr.set_property_uint32(i, std::move(obj));
+        }
+        bridge.resolve(std::move(arr));
+        co_return;
+      });
+}
+
 JSValue js_store_begin(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
   auto* host = host_from(ctx);
   if (host == nullptr) return throw_msg(ctx, "store.begin: host not wired");
@@ -404,6 +482,7 @@ const JSCFunctionListEntry k_store_proto[] = {
     JS_CFUNC_DEF("exec", 1, js_store_exec),
     JS_CFUNC_DEF("run", 2, js_store_run),
     JS_CFUNC_DEF("query", 2, js_store_query),
+    JS_CFUNC_DEF("transaction", 1, js_store_transaction),
     JS_CFUNC_DEF("begin", 0, js_store_begin),
     JS_CFUNC_DEF("commit", 0, js_store_commit),
     JS_CFUNC_DEF("rollback", 0, js_store_rollback),

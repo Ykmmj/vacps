@@ -121,9 +121,13 @@ int main(int argc, char** argv) {
 
     int bootstrap_ec = 0;
     bool running = false;
+    // Tick timer is cancellable so Server graceful_shutdown / process stop
+    // does not leave a 15s timer that can fire mid-shutdown.
+    auto tick_timer = std::make_shared<asio::steady_timer>(ioc);
     asio::co_spawn(
         ioc,
-        [host, script_path, &ioc, &bootstrap_ec, &running]() -> asio::awaitable<void> {
+        [host, script_path, &ioc, &bootstrap_ec, &running, tick_timer]()
+            -> asio::awaitable<void> {
           auto init = co_await host->load_and_initialize(script_path);
           if (!init) {
             vacps::log::error("script init failed: {}", init.error().message);
@@ -133,11 +137,10 @@ int main(int argc, char** argv) {
           }
           running = true;
 
-          auto executor = co_await asio::this_coro::executor;
-          asio::steady_timer timer{executor};
           for (;;) {
-            timer.expires_after(std::chrono::seconds(15));
-            auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
+            tick_timer->expires_after(std::chrono::seconds(15));
+            auto [ec] =
+                co_await tick_timer->async_wait(asio::as_tuple(asio::use_awaitable));
             if (ec) {
               break;
             }
@@ -167,13 +170,15 @@ int main(int argc, char** argv) {
       ioc.restart();
       asio::co_spawn(
           ioc,
-          [host, &ioc]() -> asio::awaitable<void> {
-            host->cancel_host_async();
+          [host, &ioc, tick_timer]() -> asio::awaitable<void> {
+            tick_timer->cancel();
             host->processes().shutdown();
             co_await host->wait_async_idle(std::chrono::seconds{5});
             if (auto sh = co_await host->shutdown_script(); !sh) {
               vacps::log::error("script shutdown: {}", sh.error().message);
             }
+            co_await host->wait_async_idle(std::chrono::seconds{5});
+            host->cancel_host_async();
             if (auto drain = host->drain_jobs(); !drain) {
               vacps::log::debug("post-shutdown job drain: {}", drain.error().message);
             }
