@@ -10,13 +10,11 @@
 #include "quickjs/host.hpp"
 #include "quickjs/atom.hpp"
 #include "quickjs/js_bridge.hpp"
+#include "quickjs/promise_bridge.hpp"
 #include "quickjs/value.hpp"
 #include "app/log.hpp"
 #include "process/process.hpp"
 #include "app/version.hpp"
-
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 
 #include <cstdint>
 #include <cstdlib>
@@ -509,57 +507,29 @@ JSValue js_http_request(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
     }
   }
 
-  JSValue resolving[2];
-  JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-  if (is_exception(promise)) {
-    return promise;
-  }
-  Value resolve{ctx, resolving[0]};
-  Value reject{ctx, resolving[1]};
-  auto host_sp = host->shared_from_this();
-
-  boost::asio::co_spawn(
-      host->ioc(),
-      [host_sp,
-       ctx,
-       resolve = std::move(resolve),
-       reject = std::move(reject),
-       req = std::move(req)]() mutable -> boost::asio::awaitable<void> {
-        try {
-          auto result = co_await vacps::http::async_request(std::move(req));
-          if (!result) {
-            Value msg = converter<std::string>::to_js(ctx, result.error().message);
-            JSValueConst args[1] = {msg.get()};
-            Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-            (void)r;
-          } else {
-            auto obj = Value::new_object(ctx);
-            obj.set_property_str(
-                "status", converter<std::int32_t>::to_js(ctx, result->status));
-            auto hdr_obj = Value::new_object(ctx);
-            for (const auto& [k, v] : result->headers) {
-              hdr_obj.set_property_str(k.c_str(), converter<std::string>::to_js(ctx, v));
-            }
-            obj.set_property_str("headers", std::move(hdr_obj));
-            std::vector<std::uint8_t> body_bytes(
-                result->body.begin(), result->body.end());
-            obj.set_property_str("body", bytes_to_js(ctx, body_bytes));
-            JSValueConst args[1] = {obj.get()};
-            Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-            (void)r;
+  return spawn_js_promise(
+      ctx,
+      host,
+      [req = std::move(req)](JSContext* c, PromiseBridge& bridge) mutable
+          -> boost::asio::awaitable<void> {
+        auto result = co_await vacps::http::async_request(std::move(req));
+        if (!result) {
+          bridge.reject(result.error());
+        } else {
+          auto obj = Value::new_object(c);
+          obj.set_property_str(
+              "status", converter<std::int32_t>::to_js(c, result->status));
+          auto hdr_obj = Value::new_object(c);
+          for (const auto& [k, v] : result->headers) {
+            hdr_obj.set_property_str(k.c_str(), converter<std::string>::to_js(c, v));
           }
-        } catch (const std::exception& ex) {
-          Value msg = converter<std::string>::to_js(ctx, ex.what());
-          JSValueConst args[1] = {msg.get()};
-          Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          obj.set_property_str("headers", std::move(hdr_obj));
+          std::vector<std::uint8_t> body_bytes(result->body.begin(), result->body.end());
+          obj.set_property_str("body", bytes_to_js(c, body_bytes));
+          bridge.resolve(std::move(obj));
         }
-        host_sp->notify_progress();
         co_return;
-      },
-      boost::asio::detached);
-
-  return promise;
+      });
 }
 
 const JSCFunctionListEntry k_http_exports[] = {
@@ -595,60 +565,7 @@ Result<std::filesystem::path> resolve_user_path(JSContext* ctx, JSValueConst pat
   return vacps::fs::resolve_path(host->config().data_dir, *p);
 }
 
-void fs_reject(JSContext* ctx, Value& reject, const Error& e) {
-  Value msg = converter<std::string>::to_js(ctx, e.message);
-  JSValueConst args[1] = {msg.get()};
-  Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-  (void)r;
-}
-
-void fs_resolve(JSContext* ctx, Value& resolve, Value val) {
-  JSValueConst args[1] = {val.get()};
-  Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-  (void)r;
-}
-
-void fs_resolve_undefined(JSContext* ctx, Value& resolve) {
-  JSValueConst args[1] = {JS_UNDEFINED};
-  Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-  (void)r;
-}
-
-/**
- * co_spawn on host ioc; work() → awaitable that settles the Promise.
- * host_sp captured first so Value resolve/reject free while Host lives.
- */
-template <class Work>
-JSValue fs_spawn_promise(JSContext* ctx, Host* host, Work work) {
-  JSValue resolving[2];
-  JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-  if (is_exception(promise)) {
-    return promise;
-  }
-  Value resolve{ctx, resolving[0]};
-  Value reject{ctx, resolving[1]};
-  auto host_sp = host->shared_from_this();
-  boost::asio::co_spawn(
-      host->ioc(),
-      [host_sp,
-       ctx,
-       resolve = std::move(resolve),
-       reject = std::move(reject),
-       work = std::move(work)]() mutable -> boost::asio::awaitable<void> {
-        try {
-          co_await work(ctx, resolve, reject);
-        } catch (const std::exception& ex) {
-          fs_reject(ctx, reject, Error{ex.what()});
-        } catch (...) {
-          fs_reject(ctx, reject, Error{"fs: unknown error"});
-        }
-        // Always wake await_settled even if work threw before resolve/reject.
-        host_sp->notify_progress();
-        co_return;
-      },
-      boost::asio::detached);
-  return promise;
-}
+// All vacps:fs async APIs use spawn_js_promise (promise_bridge.hpp).
 
 JSValue js_fs_read_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = host_from(ctx);
@@ -656,17 +573,17 @@ JSValue js_fs_read_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.readText(path)");
   auto path = resolve_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto data = co_await vacps::fs::async_read_text(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
         if (!data) {
-          fs_reject(c, reject, data.error());
+          bridge.reject(data.error());
         } else {
-          fs_resolve(c, resolve, converter<std::string>::to_js(c, *data));
+          bridge.resolve(converter<std::string>::to_js(c, *data));
         }
         co_return;
       });
@@ -680,19 +597,19 @@ JSValue js_fs_write_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   if (!path) return throw_error(ctx, path.error());
   auto data = converter<std::string>::from_js(ctx, argv[1]);
   if (!data) return throw_error(ctx, data.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path), data = std::move(*data)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_write_text(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
             std::move(path),
             std::move(data));
         if (!r) {
-          fs_reject(c, reject, r.error());
+          bridge.reject(r.error());
         } else {
-          fs_resolve_undefined(c, resolve);
+          bridge.resolve_undefined();
         }
         co_return;
       });
@@ -706,19 +623,19 @@ JSValue js_fs_append_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
   if (!path) return throw_error(ctx, path.error());
   auto data = converter<std::string>::from_js(ctx, argv[1]);
   if (!data) return throw_error(ctx, data.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path), data = std::move(*data)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_append_text(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
             std::move(path),
             std::move(data));
         if (!r) {
-          fs_reject(c, reject, r.error());
+          bridge.reject(r.error());
         } else {
-          fs_resolve_undefined(c, resolve);
+          bridge.resolve_undefined();
         }
         co_return;
       });
@@ -730,17 +647,17 @@ JSValue js_fs_read_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.readBytes(path)");
   auto path = resolve_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto data = co_await vacps::fs::async_read_bytes(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
         if (!data) {
-          fs_reject(c, reject, data.error());
+          bridge.reject(data.error());
         } else {
-          fs_resolve(c, resolve, bytes_to_js(c, *data));
+          bridge.resolve(bytes_to_js(c, *data));
         }
         co_return;
       });
@@ -754,19 +671,19 @@ JSValue js_fs_write_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
   if (!path) return throw_error(ctx, path.error());
   auto data = bytes_from_js(ctx, argv[1]);
   if (!data) return throw_error(ctx, data.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path), data = std::move(*data)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_write_bytes(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
             std::move(path),
             std::move(data));
         if (!r) {
-          fs_reject(c, reject, r.error());
+          bridge.reject(r.error());
         } else {
-          fs_resolve_undefined(c, resolve);
+          bridge.resolve_undefined();
         }
         co_return;
       });
@@ -778,17 +695,17 @@ JSValue js_fs_mkdir(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.mkdir(path)");
   auto path = resolve_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_mkdir(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
         if (!r) {
-          fs_reject(c, reject, r.error());
+          bridge.reject(r.error());
         } else {
-          fs_resolve_undefined(c, resolve);
+          bridge.resolve_undefined();
         }
         co_return;
       });
@@ -800,15 +717,14 @@ JSValue js_fs_exists(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.exists(path)");
   auto path = resolve_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
-        (void)reject;
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         const bool ok = co_await vacps::fs::async_exists(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
-        fs_resolve(c, resolve, converter<bool>::to_js(c, ok));
+        bridge.resolve(converter<bool>::to_js(c, ok));
         co_return;
       });
 }
@@ -819,17 +735,17 @@ JSValue js_fs_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.remove(path)");
   auto path = resolve_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_remove(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
         if (!r) {
-          fs_reject(c, reject, r.error());
+          bridge.reject(r.error());
         } else {
-          fs_resolve_undefined(c, resolve);
+          bridge.resolve_undefined();
         }
         co_return;
       });
@@ -843,19 +759,19 @@ JSValue js_fs_rename(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   if (!from) return throw_error(ctx, from.error());
   auto to = resolve_user_path(ctx, argv[1]);
   if (!to) return throw_error(ctx, to.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, from = std::move(*from), to = std::move(*to)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_rename(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
             std::move(from),
             std::move(to));
         if (!r) {
-          fs_reject(c, reject, r.error());
+          bridge.reject(r.error());
         } else {
-          fs_resolve_undefined(c, resolve);
+          bridge.resolve_undefined();
         }
         co_return;
       });
@@ -867,15 +783,15 @@ JSValue js_fs_list(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.list(path)");
   auto path = resolve_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto entries = co_await vacps::fs::async_list(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
         if (!entries) {
-          fs_reject(c, reject, entries.error());
+          bridge.reject(entries.error());
           co_return;
         }
         auto arr = Value::new_array(c);
@@ -889,7 +805,7 @@ JSValue js_fs_list(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
               "size", converter<std::int64_t>::to_js(c, static_cast<std::int64_t>(e.size)));
           arr.set_property_uint32(i++, std::move(obj));
         }
-        fs_resolve(c, resolve, std::move(arr));
+        bridge.resolve(std::move(arr));
         co_return;
       });
 }
@@ -900,15 +816,15 @@ JSValue js_fs_stat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.stat(path)");
   auto path = resolve_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  return fs_spawn_promise(
+  return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
-          JSContext* c, Value& resolve, Value& reject) mutable -> boost::asio::awaitable<void> {
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto st = co_await vacps::fs::async_stat(
             vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
         if (!st) {
-          fs_reject(c, reject, st.error());
+          bridge.reject(st.error());
         } else {
           auto obj = Value::new_object(c);
           obj.set_property_str("path", converter<std::string>::to_js(c, st->path));
@@ -920,7 +836,7 @@ JSValue js_fs_stat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
           obj.set_property_str("readable", converter<bool>::to_js(c, st->readable));
           obj.set_property_str("writable", converter<bool>::to_js(c, st->writable));
           obj.set_property_str("isSymlink", converter<bool>::to_js(c, st->is_symlink));
-          fs_resolve(c, resolve, std::move(obj));
+          bridge.resolve(std::move(obj));
         }
         co_return;
       });
@@ -999,52 +915,28 @@ JSValue js_process_run(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
     }
   }
 
-  JSValue resolving[2];
-  JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-  if (is_exception(promise)) {
-    return promise;
-  }
-  Value resolve{ctx, resolving[0]};
-  Value reject{ctx, resolving[1]};
-
-  auto host_sp = host->shared_from_this();
-  // Capture order: host_sp first so it is destroyed *last* (reverse order).
-  // resolve/reject FreeValue must run while Host/Context still alive if the
-  // coroutine is abandoned when io_context is destroyed without running.
-  boost::asio::co_spawn(
-      host->ioc(),
-      [host_sp,
-       ctx,
-       resolve = std::move(resolve),
-       reject = std::move(reject),
-       av = std::move(av),
-       opts = std::move(opts)]() mutable -> boost::asio::awaitable<void> {
+  return spawn_js_promise(
+      ctx,
+      host,
+      [av = std::move(av), opts = std::move(opts)](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto result = co_await vacps::process::async_run(std::move(av), std::move(opts));
         if (!result) {
-          Value msg = converter<std::string>::to_js(ctx, result.error().message);
-          JSValueConst args[1] = {msg.get()};
-          Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          bridge.reject(result.error());
         } else {
-          auto obj = Value::new_object(ctx);
+          auto obj = Value::new_object(c);
           obj.set_property_str(
-              "exitCode", converter<std::int32_t>::to_js(ctx, result->exit_code));
+              "exitCode", converter<std::int32_t>::to_js(c, result->exit_code));
           obj.set_property_str(
-              "timedOut", converter<bool>::to_js(ctx, result->timed_out));
+              "timedOut", converter<bool>::to_js(c, result->timed_out));
           obj.set_property_str(
-              "stdout", converter<std::string>::to_js(ctx, result->stdout_str));
+              "stdout", converter<std::string>::to_js(c, result->stdout_str));
           obj.set_property_str(
-              "stderr", converter<std::string>::to_js(ctx, result->stderr_str));
-          JSValueConst args[1] = {obj.get()};
-          Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+              "stderr", converter<std::string>::to_js(c, result->stderr_str));
+          bridge.resolve(std::move(obj));
         }
-        host_sp->notify_progress();
         co_return;
-      },
-      boost::asio::detached);
-
-  return promise;
+      });
 }
 
 /**
@@ -1101,39 +993,22 @@ JSValue js_process_start(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
     }
   }
 
-  JSValue resolving[2];
-  JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-  if (is_exception(promise)) return promise;
-  Value resolve{ctx, resolving[0]};
-  Value reject{ctx, resolving[1]};
-  auto host_sp = host->shared_from_this();
-  boost::asio::co_spawn(
-      host->ioc(),
-      [host_sp,
-       ctx,
-       resolve = std::move(resolve),
-       reject = std::move(reject),
-       av = std::move(av),
-       opts = std::move(opts)]() mutable -> boost::asio::awaitable<void> {
+  return spawn_js_promise(
+      ctx,
+      host,
+      [host_sp = host->shared_from_this(), av = std::move(av), opts = std::move(opts)](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto result = co_await host_sp->processes().start(std::move(av), std::move(opts));
         if (!result) {
-          Value msg = converter<std::string>::to_js(ctx, result.error().message);
-          JSValueConst args[1] = {msg.get()};
-          Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          bridge.reject(result.error());
         } else {
-          auto obj = Value::new_object(ctx);
-          obj.set_property_str("id", converter<std::string>::to_js(ctx, result->id));
-          obj.set_property_str("pid", converter<std::int32_t>::to_js(ctx, result->pid));
-          JSValueConst args[1] = {obj.get()};
-          Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          auto obj = Value::new_object(c);
+          obj.set_property_str("id", converter<std::string>::to_js(c, result->id));
+          obj.set_property_str("pid", converter<std::int32_t>::to_js(c, result->pid));
+          bridge.resolve(std::move(obj));
         }
-        host_sp->notify_progress();
         co_return;
-      },
-      boost::asio::detached);
-  return promise;
+      });
 }
 
 /**
@@ -1171,63 +1046,46 @@ JSValue js_process_read(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
     }
   }
 
-  JSValue resolving[2];
-  JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-  if (is_exception(promise)) return promise;
-  Value resolve{ctx, resolving[0]};
-  Value reject{ctx, resolving[1]};
-  auto host_sp = host->shared_from_this();
-  boost::asio::co_spawn(
-      host->ioc(),
-      [host_sp,
-       ctx,
-       resolve = std::move(resolve),
-       reject = std::move(reject),
-       id = std::move(*id),
-       opts]() mutable -> boost::asio::awaitable<void> {
+  return spawn_js_promise(
+      ctx,
+      host,
+      [host_sp = host->shared_from_this(), id = std::move(*id), opts](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto result = co_await host_sp->processes().read(std::move(id), opts);
         if (!result) {
-          Value msg = converter<std::string>::to_js(ctx, result.error().message);
-          JSValueConst args[1] = {msg.get()};
-          Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          bridge.reject(result.error());
         } else {
-          auto obj = Value::new_object(ctx);
-          obj.set_property_str("status", converter<std::string>::to_js(ctx, result->status));
+          auto obj = Value::new_object(c);
+          obj.set_property_str("status", converter<std::string>::to_js(c, result->status));
           obj.set_property_str(
-              "exitCode", converter<std::int32_t>::to_js(ctx, result->exit_code));
-          obj.set_property_str("timedOut", converter<bool>::to_js(ctx, result->timed_out));
-          obj.set_property_str("eof", converter<bool>::to_js(ctx, result->eof));
-          obj.set_property_str("stdinOpen", converter<bool>::to_js(ctx, result->stdin_open));
+              "exitCode", converter<std::int32_t>::to_js(c, result->exit_code));
+          obj.set_property_str("timedOut", converter<bool>::to_js(c, result->timed_out));
+          obj.set_property_str("eof", converter<bool>::to_js(c, result->eof));
+          obj.set_property_str("stdinOpen", converter<bool>::to_js(c, result->stdin_open));
           obj.set_property_str(
-              "stdout", converter<std::string>::to_js(ctx, result->stdout_slice));
+              "stdout", converter<std::string>::to_js(c, result->stdout_slice));
           obj.set_property_str(
-              "stderr", converter<std::string>::to_js(ctx, result->stderr_slice));
+              "stderr", converter<std::string>::to_js(c, result->stderr_slice));
           obj.set_property_str(
               "stdoutTotal",
               converter<std::int32_t>::to_js(
-                  ctx, static_cast<std::int32_t>(result->stdout_total)));
+                  c, static_cast<std::int32_t>(result->stdout_total)));
           obj.set_property_str(
               "stderrTotal",
               converter<std::int32_t>::to_js(
-                  ctx, static_cast<std::int32_t>(result->stderr_total)));
+                  c, static_cast<std::int32_t>(result->stderr_total)));
           obj.set_property_str(
               "nextStdoutOffset",
               converter<std::int32_t>::to_js(
-                  ctx, static_cast<std::int32_t>(result->next_stdout_offset)));
+                  c, static_cast<std::int32_t>(result->next_stdout_offset)));
           obj.set_property_str(
               "nextStderrOffset",
               converter<std::int32_t>::to_js(
-                  ctx, static_cast<std::int32_t>(result->next_stderr_offset)));
-          JSValueConst args[1] = {obj.get()};
-          Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+                  c, static_cast<std::int32_t>(result->next_stderr_offset)));
+          bridge.resolve(std::move(obj));
         }
-        host_sp->notify_progress();
         co_return;
-      },
-      boost::asio::detached);
-  return promise;
+      });
 }
 
 /**
@@ -1250,41 +1108,25 @@ JSValue js_process_write(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
     }
   }
 
-  JSValue resolving[2];
-  JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-  if (is_exception(promise)) return promise;
-  Value resolve{ctx, resolving[0]};
-  Value reject{ctx, resolving[1]};
-  auto host_sp = host->shared_from_this();
-  boost::asio::co_spawn(
-      host->ioc(),
-      [host_sp,
-       ctx,
-       resolve = std::move(resolve),
-       reject = std::move(reject),
+  return spawn_js_promise(
+      ctx,
+      host,
+      [host_sp = host->shared_from_this(),
        id = std::move(*id),
        data = std::move(*data),
-       close]() mutable -> boost::asio::awaitable<void> {
+       close](JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto result = host_sp->processes().write(id, data, close);
         if (!result) {
-          Value msg = converter<std::string>::to_js(ctx, result.error().message);
-          JSValueConst args[1] = {msg.get()};
-          Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          bridge.reject(result.error());
         } else {
-          auto obj = Value::new_object(ctx);
+          auto obj = Value::new_object(c);
           obj.set_property_str(
               "writtenBytes",
-              converter<std::int32_t>::to_js(ctx, static_cast<std::int32_t>(*result)));
-          JSValueConst args[1] = {obj.get()};
-          Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+              converter<std::int32_t>::to_js(c, static_cast<std::int32_t>(*result)));
+          bridge.resolve(std::move(obj));
         }
-        host_sp->notify_progress();
         co_return;
-      },
-      boost::asio::detached);
-  return promise;
+      });
 }
 
 /**
@@ -1311,45 +1153,29 @@ JSValue js_process_terminate(JSContext* ctx, JSValueConst, int argc, JSValueCons
     }
   }
 
-  JSValue resolving[2];
-  JSValue promise = JS_NewPromiseCapability(ctx, resolving);
-  if (is_exception(promise)) return promise;
-  Value resolve{ctx, resolving[0]};
-  Value reject{ctx, resolving[1]};
-  auto host_sp = host->shared_from_this();
-  boost::asio::co_spawn(
-      host->ioc(),
-      [host_sp,
-       ctx,
-       resolve = std::move(resolve),
-       reject = std::move(reject),
+  return spawn_js_promise(
+      ctx,
+      host,
+      [host_sp = host->shared_from_this(),
        id = std::move(*id),
        signal = std::move(signal),
-       grace_ms]() mutable -> boost::asio::awaitable<void> {
+       grace_ms](JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto result = host_sp->processes().terminate(id, signal, grace_ms);
         if (!result) {
-          Value msg = converter<std::string>::to_js(ctx, result.error().message);
-          JSValueConst args[1] = {msg.get()};
-          Value r{ctx, JS_Call(ctx, reject.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          bridge.reject(result.error());
         } else {
           auto snap = host_sp->processes().snapshot(id);
-          auto obj = Value::new_object(ctx);
-          obj.set_property_str("requested", converter<bool>::to_js(ctx, *result));
+          auto obj = Value::new_object(c);
+          obj.set_property_str("requested", converter<bool>::to_js(c, *result));
           if (snap) {
-            obj.set_property_str("status", converter<std::string>::to_js(ctx, snap->status));
+            obj.set_property_str("status", converter<std::string>::to_js(c, snap->status));
             obj.set_property_str(
-                "exitCode", converter<std::int32_t>::to_js(ctx, snap->exit_code));
+                "exitCode", converter<std::int32_t>::to_js(c, snap->exit_code));
           }
-          JSValueConst args[1] = {obj.get()};
-          Value r{ctx, JS_Call(ctx, resolve.get(), JS_UNDEFINED, 1, args)};
-          (void)r;
+          bridge.resolve(std::move(obj));
         }
-        host_sp->notify_progress();
         co_return;
-      },
-      boost::asio::detached);
-  return promise;
+      });
 }
 
 const JSCFunctionListEntry k_process_exports[] = {

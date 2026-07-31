@@ -62,10 +62,17 @@ class Runtime {
   [[nodiscard]] bool ok() const noexcept { return rt_ != nullptr; }
 
   /**
-   * Execute pending promise jobs until queue.
+   * Execute pending promise jobs until the queue is empty.
    * Safe against re-entry: nested requests set drain_requested_ only.
    */
   VoidResult drain_jobs();
+
+  /**
+   * Execute at most `max_jobs` pending jobs (microtask fairness budget).
+   * Returns the number of jobs executed, or error if a job throws.
+   * Used by await_settled so long then-chains can yield to the io_context.
+   */
+  Result<std::size_t> drain_jobs_budgeted(std::size_t max_jobs);
 
   /** Request a drain; if already draining, just set the flag. */
   VoidResult request_drain() { return drain_jobs(); }

@@ -57,6 +57,30 @@ db.close();
 C++ `Host` 类本身：QuickJS runtime、脚本加载、`invoke_export`、Promise↔Asio 唤醒。  
 Context opaque = `Host*`（已删除 `HostState`）。
 
+## Event loop & Promise bridge（架构定稿）
+
+`io_context::run()` 是唯一进程级事件循环；QuickJS 只提供 Promise + job queue。  
+`await_settled()` 是 “跑到某个 Promise settle” 的协程泵（≈ `js_std_await` 的 Asio 版）。  
+所有 native 异步 API **必须** 经 `spawn_js_promise`（`promise_bridge.hpp`），禁止手抄 `JS_NewPromiseCapability + co_spawn`。
+
+### 五条规则
+
+1. `io_context::run()` 是唯一事件循环；禁止嵌套 `run_one()` / `poll()` / QuickJS `js_std_loop()`。
+2. `await_settled()` 只做状态检查、**预算内** job drain、`co_await wait_progress()`；绝不忙等。
+3. 每个 native Promise：全部终止路径 settle attempt 一次（settle-once），随后 **无条件** `notify_progress`（scope guard）。
+4. 所有 `JS_*`、`JSValue` 创建/释放与 Promise settlement 只在 JS executor（当前 = 唯一 `ioc` 线程）。
+5. 导出函数返回的 Promise 必须覆盖它启动的全部异步工作；开放后台 timer / 事件监听 / fire-and-forget 前，必须先引入全局 job pump。
+
+### 分工
+
+| 层           | 手段                                                             |
+| ------------ | ---------------------------------------------------------------- |
+| 业务错误     | `Result` / `std::expected`（尽量不 throw）                       |
+| 协程故障屏障 | `catch (std::exception)` / `catch (...)` → reject（若未 settle） |
+| 生命周期     | `spawn_js_promise`：settle-once + NotifyGuard                    |
+
+`progress_generation` + timer cancel 实现 `wait_progress` / `notify_progress` 事件版本协议。
+
 ## `vacps:http`（入站 Server + 出站 request）
 
 ### 入站 Server（工厂，JS 持有）
