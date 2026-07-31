@@ -116,7 +116,11 @@ export function computeOutputExpiresAt(
   terminalAtIso: string,
   retentionSeconds?: number | null,
 ): string {
-  if (typeof retentionSeconds === 'number' && Number.isFinite(retentionSeconds) && retentionSeconds > 0) {
+  if (
+    typeof retentionSeconds === 'number' &&
+    Number.isFinite(retentionSeconds) &&
+    retentionSeconds > 0
+  ) {
     const base = Date.parse(terminalAtIso);
     const t = Number.isNaN(base) ? Date.now() : base;
     return new Date(t + retentionSeconds * 1000).toISOString();

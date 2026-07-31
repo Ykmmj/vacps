@@ -876,14 +876,7 @@
           {copyToClipboard}
         />
       {:else if activeView === 'logs'}
-        <LogsView
-          {text}
-          {dashboard}
-          {loading}
-          {cleaningTestHistory}
-          {clearTestHistory}
-          {refresh}
-        />
+        <LogsView {text} {dashboard} {loading} {cleaningTestHistory} {clearTestHistory} {refresh} />
       {:else}
         <InstallComposer
           {text}

@@ -272,11 +272,7 @@ export async function filesDelete(input: {
   }
   const type = st.type === 'directory' ? 'directory' : 'file';
   if (input.expectedType && input.expectedType !== type) {
-    throw runtimeError(
-      `Expected ${input.expectedType} but found ${type}.`,
-      'type_mismatch',
-      409,
-    );
+    throw runtimeError(`Expected ${input.expectedType} but found ${type}.`, 'type_mismatch', 409);
   }
   if (type === 'file' && input.expectedSha256) {
     const current = crypto.sha256Hex(await fs.readBytes(path));
@@ -395,10 +391,12 @@ export async function filesGlob(input: {
     if (!includeHidden) args.push('--glob', '!.*/**');
     // rg respects .gitignore by default; --no-ignore disables it.
     if (!respectGitignore) args.push('--no-ignore');
-    const listed = await process.run(['/usr/bin/rg', ...args], {
-      cwd: root,
-      timeoutMs: 30_000,
-    }).catch(async () => process.run(['rg', ...args], { cwd: root, timeoutMs: 30_000 }));
+    const listed = await process
+      .run(['/usr/bin/rg', ...args], {
+        cwd: root,
+        timeoutMs: 30_000,
+      })
+      .catch(async () => process.run(['rg', ...args], { cwd: root, timeoutMs: 30_000 }));
     if (listed.exitCode === 0 || listed.stdout) {
       const allLines = listed.stdout
         .split('\n')

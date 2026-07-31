@@ -86,10 +86,10 @@
         <h1>{label('logs', 'Logs')}</h1>
       </div>
       <p>
-        {label(
-          'logsHint',
-          'Last {days} days · test tasks hidden · soft-deleted hidden',
-        ).replace('{days}', String(rangeDays))}
+        {label('logsHint', 'Last {days} days · test tasks hidden · soft-deleted hidden').replace(
+          '{days}',
+          String(rangeDays),
+        )}
       </p>
     </div>
     <div class="logs-toolbar-actions">
@@ -141,7 +141,8 @@
         {#each failedTasks as task (task.id)}
           <li class="task-row">
             <div class="task-main">
-              <span class={`task-status ${task.status ?? 'failed'}`}>{task.status ?? 'failed'}</span>
+              <span class={`task-status ${task.status ?? 'failed'}`}>{task.status ?? 'failed'}</span
+              >
               <span class="task-title" title={taskTitle(task)}>{taskTitle(task)}</span>
             </div>
             <div class="task-sub">

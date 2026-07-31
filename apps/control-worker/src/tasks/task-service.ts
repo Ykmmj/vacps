@@ -417,8 +417,7 @@ export class TaskService {
       let output: unknown;
       let result: unknown = remote?.result;
       const outputExpiredByCp =
-        Boolean(refreshed.outputExpiresAt) &&
-        Date.parse(refreshed.outputExpiresAt!) <= Date.now();
+        Boolean(refreshed.outputExpiresAt) && Date.parse(refreshed.outputExpiresAt!) <= Date.now();
       let logsExpired = false;
       if (options.includeCommands || options.includeOutputPreview) {
         if (outputExpiredByCp) {
@@ -507,12 +506,10 @@ export class TaskService {
     const task = await this.get(id);
     // Enforce CP-side output TTL when recorded (defaults to 7d; agent may use tighter retention_seconds).
     if (task.outputExpiresAt && Date.parse(task.outputExpiresAt) <= Date.now()) {
-      throw new AppError(
-        'output_expired',
-        'Task output has expired per retention policy.',
-        410,
-        { stream: input.stream, output_expires_at: task.outputExpiresAt },
-      );
+      throw new AppError('output_expired', 'Task output has expired per retention policy.', 410, {
+        stream: input.stream,
+        output_expires_at: task.outputExpiresAt,
+      });
     }
     const backend = await this.backends.get(task.backendId);
     try {
@@ -537,12 +534,9 @@ export class TaskService {
       if (error instanceof AppError && error.code === 'output_expired') throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes('output_expired') || message.includes('410')) {
-        throw new AppError(
-          'output_expired',
-          'Task output has expired per retention policy.',
-          410,
-          { stream: input.stream },
-        );
+        throw new AppError('output_expired', 'Task output has expired per retention policy.', 410, {
+          stream: input.stream,
+        });
       }
       throw error;
     }

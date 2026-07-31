@@ -93,7 +93,11 @@ export class ShellExecutor {
         stderrOffset: 0,
       });
 
-      const appendCap = (acc: string, chunk: string, max: number): { text: string; cut: boolean } => {
+      const appendCap = (
+        acc: string,
+        chunk: string,
+        max: number,
+      ): { text: string; cut: boolean } => {
         if (!captureOrStore(max)) return { text: acc, cut: false };
         if (acc.length >= max) return { text: acc, cut: true };
         const room = max - acc.length;
@@ -126,7 +130,16 @@ export class ShellExecutor {
           this.store.updateTask(id, {
             status: 'cancelled',
             error: { code: 'cancelled', message: 'Cancelled during execution.' },
-            result: processResult(final.exitCode, final.timedOut, stdout, stderr, captureStdout, captureStderr, stdoutTruncated, stderrTruncated),
+            result: processResult(
+              final.exitCode,
+              final.timedOut,
+              stdout,
+              stderr,
+              captureStdout,
+              captureStderr,
+              stdoutTruncated,
+              stderrTruncated,
+            ),
           });
           return;
         }
@@ -164,7 +177,16 @@ export class ShellExecutor {
         this.store.updateTask(id, {
           status: 'timed_out',
           error: { code: 'timed_out', message: `Timeout after ${task.timeout_seconds}s` },
-          result: processResult(final.exitCode, true, stdout, stderr, captureStdout, captureStderr, stdoutTruncated, stderrTruncated),
+          result: processResult(
+            final.exitCode,
+            true,
+            stdout,
+            stderr,
+            captureStdout,
+            captureStderr,
+            stdoutTruncated,
+            stderrTruncated,
+          ),
         });
         return;
       }
@@ -173,7 +195,16 @@ export class ShellExecutor {
         this.store.updateTask(id, {
           status: 'cancelled',
           error: { code: 'cancelled', message: 'Process terminated.' },
-          result: processResult(final.exitCode, false, stdout, stderr, captureStdout, captureStderr, stdoutTruncated, stderrTruncated),
+          result: processResult(
+            final.exitCode,
+            false,
+            stdout,
+            stderr,
+            captureStdout,
+            captureStderr,
+            stdoutTruncated,
+            stderrTruncated,
+          ),
         });
         return;
       }
@@ -181,7 +212,16 @@ export class ShellExecutor {
       if (final.exitCode === 0) {
         this.store.updateTask(id, {
           status: 'succeeded',
-          result: processResult(0, false, stdout, stderr, captureStdout, captureStderr, stdoutTruncated, stderrTruncated),
+          result: processResult(
+            0,
+            false,
+            stdout,
+            stderr,
+            captureStdout,
+            captureStderr,
+            stdoutTruncated,
+            stderrTruncated,
+          ),
         });
       } else {
         this.store.updateTask(id, {
@@ -190,7 +230,16 @@ export class ShellExecutor {
             code: 'exit_nonzero',
             message: `Process exited with code ${final.exitCode}`,
           },
-          result: processResult(final.exitCode, false, stdout, stderr, captureStdout, captureStderr, stdoutTruncated, stderrTruncated),
+          result: processResult(
+            final.exitCode,
+            false,
+            stdout,
+            stderr,
+            captureStdout,
+            captureStderr,
+            stdoutTruncated,
+            stderrTruncated,
+          ),
         });
       }
     } catch (e) {
