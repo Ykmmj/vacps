@@ -2,6 +2,10 @@ declare module 'vacps:process' {
   export interface RunOptions {
     readonly cwd?: string;
     readonly timeoutMs?: number;
+    /** Cap retained stdout (default 16 MiB). Excess discarded; stdoutTruncated set. */
+    readonly maxStdoutBytes?: number;
+    /** Cap retained stderr (default 16 MiB). */
+    readonly maxStderrBytes?: number;
   }
 
   export interface RunResult {
@@ -9,6 +13,11 @@ declare module 'vacps:process' {
     readonly timedOut: boolean;
     readonly stdout: string;
     readonly stderr: string;
+    /** Bytes observed on stdout (includes discarded after cap). */
+    readonly stdoutProduced?: number;
+    readonly stderrProduced?: number;
+    readonly stdoutTruncated?: boolean;
+    readonly stderrTruncated?: boolean;
   }
 
   export interface StartOptions {

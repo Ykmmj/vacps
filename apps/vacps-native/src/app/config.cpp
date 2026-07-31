@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cstdlib>
 #include <string_view>
+#include <vector>
 
 namespace vacps {
 namespace {
@@ -19,6 +20,35 @@ std::uint16_t env_port(const char* key, std::uint16_t fallback) {
   if (v == nullptr || v[0] == '\0') return fallback;
   auto p = parse_port(v);
   return p ? *p : fallback;
+}
+
+std::vector<std::string> parse_fs_allowed_roots() {
+  const char* raw = std::getenv("VACPS_FS_ALLOWED_ROOTS");
+  if (raw == nullptr || raw[0] == '\0') {
+    raw = std::getenv("FS_ALLOWED_ROOTS");
+  }
+  if (raw == nullptr || raw[0] == '\0') return {};
+  std::vector<std::string> out;
+  std::string_view sv{raw};
+  std::size_t start = 0;
+  while (start <= sv.size()) {
+    const auto pos = sv.find_first_of(":,\n", start);
+    const auto end = pos == std::string_view::npos ? sv.size() : pos;
+    auto part = sv.substr(start, end - start);
+    // trim
+    while (!part.empty() && (part.front() == ' ' || part.front() == '\t')) {
+      part.remove_prefix(1);
+    }
+    while (!part.empty() && (part.back() == ' ' || part.back() == '\t')) {
+      part.remove_suffix(1);
+    }
+    if (!part.empty() && part.front() == '/') {
+      out.emplace_back(part);
+    }
+    if (pos == std::string_view::npos) break;
+    start = pos + 1;
+  }
+  return out;
 }
 
 }  // namespace
@@ -58,6 +88,7 @@ Config Config::from_env() {
   c.log_level = env_or("VACPS_LOG_LEVEL", c.log_level);
   c.data_dir = env_or("VACPS_DATA_DIR", c.data_dir);
   c.ca_bundle = env_or("VACPS_CA_BUNDLE", c.ca_bundle);
+  c.fs_allowed_roots = parse_fs_allowed_roots();
   apply_remote_bind_policy(c);
   return c;
 }

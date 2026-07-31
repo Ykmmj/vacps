@@ -112,6 +112,7 @@ add_library(vacps_native_core STATIC
   src/app/log.cpp
   src/storage/db.cpp
   src/fs/fs.cpp
+  src/fs/sandbox.cpp
   src/fs/async.cpp
   src/fs/io_uring_probe.cpp
   src/process/process.cpp
@@ -200,6 +201,7 @@ if(VACPS_BUILD_TESTS)
   add_executable(vacps-native-tests
     tests/test_crypto.cpp
     tests/test_fs.cpp
+    tests/test_fs_sandbox.cpp
     tests/test_fs_async.cpp
     tests/test_db.cpp
     tests/test_process.cpp

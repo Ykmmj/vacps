@@ -94,6 +94,26 @@ TEST(ProcessTest, CaptureStderr) {
   EXPECT_NE(r->stderr_str.find("err-msg"), std::string::npos);
 }
 
+TEST(ProcessTest, RunStdoutHardCapTruncates) {
+  vacps::process::RunOptions opts;
+  opts.max_stdout_bytes = 16;
+  // ~100 bytes of 'x'
+  auto r = sync_run({"/bin/sh", "-c", "printf '%0100d' 0 | tr '0' 'x'"}, opts);
+  ASSERT_TRUE(r) << r.error().message;
+  EXPECT_EQ(r->exit_code, 0);
+  EXPECT_LE(r->stdout_str.size(), 16u);
+  EXPECT_TRUE(r->stdout_truncated);
+  EXPECT_GE(r->stdout_produced, 100u);
+}
+
+TEST(ProcessTest, ExitCodeNineIsNotTimeout) {
+  // Programs may legitimately exit with status 9; only cancel_after sets timed_out.
+  auto r = sync_run({"/bin/sh", "-c", "exit 9"});
+  ASSERT_TRUE(r) << r.error().message;
+  EXPECT_EQ(r->exit_code, 9);
+  EXPECT_FALSE(r->timed_out);
+}
+
 // Design §19.2: timeout must kill process group (shell grandchildren), not just /bin/sh.
 TEST(ProcessTest, TimeoutKillsProcessGroup) {
   vacps::process::RunOptions opts;
