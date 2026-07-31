@@ -1,4 +1,5 @@
 import { createTaskSchema, taskDispatchSchema, isTerminalTaskStatus } from '@vacps/contracts';
+import * as crypto from 'vacps:crypto';
 import * as host from 'vacps:host';
 
 import type { AgentConfig } from '../config';
@@ -298,39 +299,52 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       };
     }
 
-    const logs = input.queue.listLogs(id, {
-      offset,
-      ...(stream ? { stream } : {}),
-      limit: 500,
-    });
-
-    // Stream-style read (control-plane / Node parity): concatenate rows after offset.
+    // Stream-style read: absolute **byte** offsets over concatenated stream text.
     if (stream === 'stdout' || stream === 'stderr') {
-      let content = '';
-      let nextOffset = offset;
-      for (const row of logs) {
-        if (content.length >= maxBytes) break;
-        const room = maxBytes - content.length;
-        content += row.data.length > room ? row.data.slice(0, room) : row.data;
-        nextOffset = row.sequence;
+      const rows = input.queue.listLogs(id, { stream, offset: 0, limit: 50_000 });
+      const full = rows.map((r) => r.data).join('');
+      const totalBytes = full.length;
+      const streamVersion = `sha256:${crypto.sha256Hex(full)}`;
+      const expected =
+        typeof request.query.expected_stream_version === 'string'
+          ? request.query.expected_stream_version
+          : undefined;
+      if (expected && expected !== streamVersion) {
+        return reply.code(409).send({
+          error: {
+            code: 'stream_version_conflict',
+            message:
+              'Stream version changed (log rotated, rebuilt, or replaced). Restart from offset 0 with the new stream_version.',
+            current_stream_version: streamVersion,
+            details: {
+              expected_stream_version: expected,
+              current_stream_version: streamVersion,
+              restart_offset: 0,
+            },
+          },
+        });
       }
-      const more = input.queue.listLogs(id, { offset: nextOffset, stream, limit: 1 });
+      const start = Math.min(offset, totalBytes);
+      const end = Math.min(start + maxBytes, totalBytes);
+      const content = full.slice(start, end);
       const terminal = isTerminalTaskStatus(task.status);
       return {
         task_id: id,
         stream,
-        offset,
-        next_offset: nextOffset,
-        eof: terminal && more.length === 0,
-        total_bytes: content.length,
+        offset: start,
+        next_offset: end,
+        eof: terminal && end >= totalBytes,
+        total_bytes: totalBytes,
         truncated: false,
         expired: false,
         encoding: 'utf-8',
         content,
-        stream_version: `native-seq:${nextOffset}`,
-        logs,
+        stream_version: streamVersion,
+        // Do not re-embed full log rows (would bypass max_bytes).
       };
     }
+
+    const logs = input.queue.listLogs(id, { offset: 0, limit: 500 });
 
     // Control-plane tasks.get preview expects `commands[]` (Node shape), not raw log rows.
     const allStdout = input.queue
@@ -467,6 +481,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           path,
           limit: numberOr(request.query.limit, 200),
           includeHidden: request.query.include_hidden === 'true',
+          ...(typeof request.query.cursor === 'string' ? { cursor: request.query.cursor } : {}),
         })),
       };
     } catch (error) {
@@ -534,6 +549,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           ...(typeof body.path === 'string' ? { path: body.path } : {}),
           includeHidden: Boolean(body.include_hidden),
           limit: typeof body.limit === 'number' ? body.limit : 200,
+          respectGitignore: body.respect_gitignore !== false,
           ...(typeof body.cursor === 'string' ? { cursor: body.cursor } : {}),
         })),
       };
@@ -563,6 +579,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           contextAfter: typeof body.context_after === 'number' ? body.context_after : 0,
           maxMatches: typeof body.max_matches === 'number' ? body.max_matches : 100,
           maxBytes: typeof body.max_bytes === 'number' ? body.max_bytes : 64_000,
+          ...(typeof body.cursor === 'string' ? { cursor: body.cursor } : {}),
         })),
       };
     } catch (error) {
@@ -675,21 +692,28 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .send({ error: { code: 'validation_error', message: 'path is required.' } });
     }
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.filesDelete({
-          path: body.path,
-          recursive: body.recursive === true,
-          dryRun: body.dry_run === true,
-          ...(typeof body.expected_sha256 === 'string'
-            ? { expectedSha256: body.expected_sha256 }
-            : {}),
-          ...(body.expected_type === 'file' || body.expected_type === 'directory'
-            ? { expectedType: body.expected_type }
-            : {}),
-        })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.delete',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesDelete({
+            path: body.path as string,
+            // Default recursive for directories when flag omitted is false — require explicit true.
+            recursive: body.recursive === true,
+            dryRun: body.dry_run === true,
+            ...(typeof body.expected_sha256 === 'string'
+              ? { expectedSha256: body.expected_sha256 }
+              : {}),
+            ...(body.expected_type === 'file' || body.expected_type === 'directory'
+              ? { expectedType: body.expected_type }
+              : {}),
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -703,11 +727,24 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .send({ error: { code: 'validation_error', message: 'from and to are required.' } });
     }
     try {
-      return {
-        ok: true,
-        backend_id: input.config.BACKEND_ID,
-        ...(await files.filesMove({ from: body.from, to: body.to })),
-      };
+      return await withFileIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'files.move',
+        body,
+        async () => ({
+          ok: true,
+          backend_id: input.config.BACKEND_ID,
+          ...(await files.filesMove({
+            from: body.from as string,
+            to: body.to as string,
+            overwrite: body.overwrite === true,
+            ...(typeof body.expected_sha256 === 'string'
+              ? { expectedSha256: body.expected_sha256 }
+              : {}),
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -800,6 +837,13 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           : {}),
         timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
         closeStdin: body.tty === true ? false : body.close_stdin !== false,
+        tty: body.tty === true,
+        ...(typeof body.stdout_hard_max_bytes === 'number'
+          ? { hardMaxStdout: body.stdout_hard_max_bytes }
+          : {}),
+        ...(typeof body.stderr_hard_max_bytes === 'number'
+          ? { hardMaxStderr: body.stderr_hard_max_bytes }
+          : {}),
       });
       return { ok: true, ...result };
     } catch (error) {
@@ -826,7 +870,14 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           : {}),
         timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
         closeStdin: body.tty === true ? false : body.close_stdin !== false,
+        tty: body.tty === true,
         loadUserEnvironment,
+        ...(typeof body.stdout_hard_max_bytes === 'number'
+          ? { hardMaxStdout: body.stdout_hard_max_bytes }
+          : {}),
+        ...(typeof body.stderr_hard_max_bytes === 'number'
+          ? { hardMaxStderr: body.stderr_hard_max_bytes }
+          : {}),
       });
       return { ok: true, ...result };
     } catch (error) {

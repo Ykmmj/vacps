@@ -1,4 +1,5 @@
 import * as crypto from 'vacps:crypto';
+import * as fs from 'vacps:fs';
 import * as host from 'vacps:host';
 import * as process from 'vacps:process';
 
@@ -34,10 +35,17 @@ export type ExecInput = {
   timeoutMs?: number;
   stdoutMaxBytes?: number;
   stderrMaxBytes?: number;
+  /** Hard cap on accumulated stdout (process continues after cap). */
+  hardMaxStdout?: number;
+  hardMaxStderr?: number;
+  stdoutHardMaxBytes?: number;
+  stderrHardMaxBytes?: number;
   idempotencyKey?: string;
   loadUserEnvironment?: boolean;
   /** When false, leave stdin open for process.write (default true for exec). */
   closeStdin?: boolean;
+  /** Request TTY semantics for status reporting (native may not allocate a real PTY). */
+  tty?: boolean;
 };
 
 interface IdempotencyRecord {
@@ -51,6 +59,43 @@ interface Tracked {
   startedMs: number;
   stdoutMax: number;
   stderrMax: number;
+  hardMaxStdout?: number;
+  hardMaxStderr?: number;
+  tty?: boolean;
+}
+
+/** Resolve bare program names via common absolute paths (static agent often has empty PATH). */
+async function resolveExecutable(program: string): Promise<string> {
+  if (!program || program.includes('/')) return program;
+  const candidates: string[] = [
+    `/usr/bin/${program}`,
+    `/bin/${program}`,
+    `/usr/local/bin/${program}`,
+  ];
+  try {
+    const pathEnv = host.getenv('PATH') ?? '';
+    if (pathEnv) {
+      for (const dir of pathEnv.split(':')) {
+        if (!dir) continue;
+        const candidate = `${dir.replace(/\/$/, '')}/${program}`;
+        if (!candidates.includes(candidate)) candidates.push(candidate);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  for (const c of candidates) {
+    try {
+      if (await fs.exists(c)) {
+        const st = await fs.stat(c);
+        if (st.type === 'file' || st.type === 'symlink') return c;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  // Prefer absolute path so Boost.Process does not depend on PATH.
+  return `/usr/bin/${program}`;
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -179,6 +224,7 @@ export class ProcessManager {
     const closeStdin = input.closeStdin !== false;
 
     let argv: string[];
+    const wantTty = input.tty === true;
     if (input.command) {
       const shell = input.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
       const loadUserEnvironment =
@@ -197,19 +243,39 @@ export class ProcessManager {
           : loadUserEnvironment
             ? ['-lc', input.command]
             : ['--noprofile', '--norc', '-c', input.command];
-      argv = [shell, ...shellArgs];
+      argv = [await resolveExecutable(shell), ...shellArgs];
     } else {
-      argv = [input.program!, ...(input.arguments ?? [])];
+      argv = [await resolveExecutable(input.program!), ...(input.arguments ?? [])];
     }
 
+    const hardMaxStdout = clamp(
+      input.hardMaxStdout ?? input.stdoutHardMaxBytes ?? 16 * 1024 * 1024,
+      0,
+      64 * 1024 * 1024,
+    );
+    const hardMaxStderr = clamp(
+      input.hardMaxStderr ?? input.stderrHardMaxBytes ?? 16 * 1024 * 1024,
+      0,
+      64 * 1024 * 1024,
+    );
+
     const startedMs = host.nowMs();
-    const started = await process.start(argv, { cwd, timeoutMs, closeStdin });
+    const started = await process.start(argv, {
+      cwd,
+      timeoutMs,
+      closeStdin,
+      hardMaxStdout,
+      hardMaxStderr,
+    });
     this.tracked.set(started.id, {
       id: started.id,
       backendId: this.backendId,
       startedMs,
       stdoutMax,
       stderrMax,
+      hardMaxStdout,
+      hardMaxStderr,
+      tty: wantTty,
     });
 
     return {
@@ -223,7 +289,7 @@ export class ProcessManager {
       finished_at: null,
       duration_ms: null,
       stdin_available: !closeStdin,
-      tty: false,
+      tty: wantTty,
       output_cursor: null,
       stdout: preview('', stdoutMax),
       stderr: preview('', stderrMax),

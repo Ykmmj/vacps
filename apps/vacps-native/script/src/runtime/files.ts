@@ -2,7 +2,15 @@ import * as crypto from 'vacps:crypto';
 import * as fs from 'vacps:fs';
 import * as process from 'vacps:process';
 
+import {
+  truncateStringToUtf8Bytes,
+  utf8ByteLengthOfString,
+  utf8Decode,
+  utf8PrefixEnd,
+} from '../util/utf8';
 import { assertSafeAbsolutePath, resolveWorkspacePath } from './path-guard';
+
+export { utf8PrefixEnd } from '../util/utf8';
 
 function clamp(n: number, min: number, max: number): number {
   if (!Number.isFinite(n)) return min;
@@ -52,6 +60,10 @@ function normalizeHash(h: string): string {
   return h.startsWith('sha256:') ? h.slice(7) : h;
 }
 
+function asUint8(buf: ArrayBuffer | Uint8Array): Uint8Array {
+  return buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+}
+
 // ── Core CRUD ─────────────────────────────────────────────────────
 
 export async function filesStat(pathInput: string) {
@@ -66,7 +78,7 @@ export async function filesStat(pathInput: string) {
   let digest: string | null = null;
   if (st.type === 'file' && st.size <= 8 * 1024 * 1024) {
     try {
-      digest = crypto.sha256Hex(await fs.readText(path));
+      digest = crypto.sha256Hex(await fs.readBytes(path));
     } catch {
       digest = null;
     }
@@ -110,37 +122,46 @@ export async function filesRead(input: {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
 
-  const text = await fs.readText(path);
-  const totalBytes = text.length;
-  const digest = crypto.sha256Hex(text);
+  // Product max_bytes is on raw file bytes; sha256 is always of the full file.
+  const raw = asUint8(await fs.readBytes(path));
+  const sizeBytes = raw.byteLength;
+  const digest = crypto.sha256Hex(raw);
 
   if (encoding === 'base64') {
-    const slice = text.slice(0, maxBytes);
+    const end = Math.min(maxBytes, sizeBytes);
+    const slice = raw.subarray(0, end);
     return {
       path,
       content: crypto.base64Encode(slice),
       file: {
         kind: 'binary' as const,
-        size_bytes: totalBytes,
+        encoding: 'base64' as const,
+        size_bytes: sizeBytes,
         sha256: digest,
-        truncated: slice.length < totalBytes,
+        truncated: sizeBytes > end,
       },
     };
   }
 
-  let content = text;
   let startLine = 1;
   let endLine = 0;
+  let content: string;
+  let truncated: boolean;
+
   if (input.startLine !== undefined || input.endLine !== undefined) {
-    const lines = text.split('\n');
+    const fullText = utf8Decode(raw);
+    const lines = fullText.split('\n');
     const from = Math.max(1, input.startLine ?? 1);
     const to = Math.min(lines.length, input.endLine ?? lines.length);
     startLine = from;
     endLine = to;
-    content = lines.slice(from - 1, to).join('\n');
-  }
-  if (content.length > maxBytes) {
-    content = content.slice(0, maxBytes);
+    const segment = lines.slice(from - 1, to).join('\n');
+    content = truncateStringToUtf8Bytes(segment, maxBytes);
+    truncated = utf8ByteLengthOfString(segment) > maxBytes;
+  } else {
+    const end = utf8PrefixEnd(raw, Math.min(maxBytes, sizeBytes));
+    content = utf8Decode(raw.subarray(0, end));
+    truncated = sizeBytes > end;
   }
 
   return {
@@ -148,11 +169,13 @@ export async function filesRead(input: {
     content,
     file: {
       kind: 'text' as const,
-      size_bytes: totalBytes,
+      encoding: 'utf-8' as const,
+      size_bytes: sizeBytes,
       sha256: digest,
       start_line: startLine,
       end_line: endLine || undefined,
-      truncated: content.length < totalBytes,
+      truncated,
+      ...(truncated ? { truncation_reason: 'max_bytes' as const } : {}),
     },
   };
 }
@@ -256,11 +279,11 @@ export async function filesDelete(input: {
     );
   }
   if (type === 'file' && input.expectedSha256) {
-    const current = crypto.sha256Hex(await fs.readText(path));
+    const current = crypto.sha256Hex(await fs.readBytes(path));
     if (normalizeHash(input.expectedSha256) !== current) {
-      const err = runtimeError('The file changed after it was read.', 'file_version_conflict', 409);
-      Object.assign(err, { current_sha256: current });
-      throw err;
+      throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
+        current_sha256: current,
+      });
     }
   }
 
@@ -293,16 +316,56 @@ export async function filesDelete(input: {
     };
   }
 
-  // Directory deletes are recursive (matches Node agent: recursive flag or directory type).
+  if (type === 'directory' && !input.recursive) {
+    const entries = await fs.list(path);
+    if (entries.length > 0) {
+      throw runtimeError(
+        'Directory is not empty; pass recursive=true to delete.',
+        'directory_not_empty',
+        409,
+      );
+    }
+  }
+
   await fs.remove(path);
   return { path, operation: 'deleted', dry_run: false, type };
 }
 
-export async function filesMove(input: { from: string; to: string }) {
+export async function filesMove(input: {
+  from: string;
+  to: string;
+  overwrite?: boolean;
+  expectedSha256?: string;
+}) {
   const from = assertSafeAbsolutePath(input.from);
   const to = assertSafeAbsolutePath(input.to);
   if (!(await fs.exists(from))) {
     throw runtimeError(`Path not found: ${from}`, 'path_not_found', 404);
+  }
+  let fromSt: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    fromSt = await fs.stat(from);
+  } catch {
+    throw runtimeError(`Path not found: ${from}`, 'path_not_found', 404);
+  }
+  if (fromSt.type === 'file' && input.expectedSha256) {
+    const current = crypto.sha256Hex(await fs.readBytes(from));
+    if (normalizeHash(input.expectedSha256) !== current) {
+      throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
+        current_sha256: current,
+      });
+    }
+  }
+  const overwrite = input.overwrite === true;
+  if (!overwrite && (await fs.exists(to))) {
+    throw runtimeError('Destination already exists.', 'path_exists', 409);
+  }
+  const parent = dirname(to);
+  if (parent && parent !== '/') {
+    await fs.mkdir(parent);
+  }
+  if (overwrite && (await fs.exists(to))) {
+    await fs.remove(to);
   }
   await fs.rename(from, to);
   return { from, to, operation: 'moved' };
@@ -316,10 +379,12 @@ export async function filesGlob(input: {
   includeHidden?: boolean;
   limit?: number;
   cursor?: string;
+  respectGitignore?: boolean;
 }) {
   const root = assertSafeAbsolutePath(input.path ?? '/tmp');
   const limit = clamp(input.limit ?? 200, 1, 2000);
   const includeHidden = Boolean(input.includeHidden);
+  const respectGitignore = input.respectGitignore !== false;
   const pattern = input.pattern;
   const offset = decodeOffsetCursor(input.cursor);
 
@@ -328,7 +393,12 @@ export async function filesGlob(input: {
     const args = ['--files', '--glob', pattern];
     if (pattern.startsWith('**/')) args.push('--glob', pattern.slice(3));
     if (!includeHidden) args.push('--glob', '!.*/**');
-    const listed = await process.run(['rg', ...args], { cwd: root, timeoutMs: 30_000 });
+    // rg respects .gitignore by default; --no-ignore disables it.
+    if (!respectGitignore) args.push('--no-ignore');
+    const listed = await process.run(['/usr/bin/rg', ...args], {
+      cwd: root,
+      timeoutMs: 30_000,
+    }).catch(async () => process.run(['rg', ...args], { cwd: root, timeoutMs: 30_000 }));
     if (listed.exitCode === 0 || listed.stdout) {
       const allLines = listed.stdout
         .split('\n')
@@ -348,15 +418,18 @@ export async function filesGlob(input: {
         truncated,
         next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
         engine: 'rg' as const,
+        respects_gitignore: respectGitignore,
       };
     }
   } catch {
     /* walk fallback */
   }
 
+  const ignoreGlobs = respectGitignore ? await loadGitignore(root) : [];
   const all: Array<{ path: string; type: string; size_bytes: number }> = [];
   await walk(root, includeHidden, async (full, isDir, size) => {
     const rel = relativeTo(root, full);
+    if (respectGitignore && isGitignored(rel, ignoreGlobs)) return;
     if (!globMatch(pattern, rel) && !globMatch(pattern, basename(full))) return;
     all.push({
       path: full,
@@ -373,6 +446,7 @@ export async function filesGlob(input: {
     truncated,
     next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
     engine: 'walk' as const,
+    respects_gitignore: respectGitignore,
   };
 }
 
@@ -386,6 +460,7 @@ export async function filesGrep(input: {
   contextAfter?: number;
   maxMatches?: number;
   maxBytes?: number;
+  cursor?: string;
 }) {
   const target = assertSafeAbsolutePath(input.path ?? '/tmp');
   const maxMatches = clamp(input.maxMatches ?? 100, 1, 500);
@@ -394,42 +469,45 @@ export async function filesGrep(input: {
   const maxBytes = clamp(input.maxBytes ?? 64_000, 1, 256 * 1024);
   const caseSensitive = input.caseSensitive === true;
   const fixed = input.fixedString === true;
+  const offset = decodeOffsetCursor(input.cursor);
 
   // Prefer rg
   try {
-    const args = ['--json', '--max-count', String(maxMatches)];
+    const args = ['--json'];
     if (!caseSensitive) args.push('-i');
     if (fixed) args.push('-F');
     if (contextBefore > 0) args.push('-B', String(contextBefore));
     if (contextAfter > 0) args.push('-A', String(contextAfter));
     if (input.filePattern) args.push('--glob', input.filePattern);
     args.push('--', input.pattern, target);
-    const result = await process.run(['rg', ...args], { timeoutMs: 30_000 });
+    const result = await process
+      .run(['/usr/bin/rg', ...args], { timeoutMs: 30_000 })
+      .catch(async () => process.run(['rg', ...args], { timeoutMs: 30_000 }));
     if (result.stdout) {
-      const matches = parseRgJson(result.stdout, maxMatches, maxBytes);
-      if (matches.length > 0 || result.exitCode === 0 || result.exitCode === 1) {
-        return {
-          matches,
-          match_count: matches.length,
-          truncated: matches.length >= maxMatches,
-          engine: 'rg' as const,
-        };
-      }
+      // Collect all matches then page by cursor offset.
+      const all = parseRgJson(result.stdout, 10_000, maxBytes * 4);
+      const page = all.slice(offset, offset + maxMatches);
+      const nextOffset = offset + page.length;
+      const truncated = nextOffset < all.length || page.length >= maxMatches;
+      return {
+        matches: page,
+        match_count: page.length,
+        truncated,
+        next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
+        engine: 'rg' as const,
+      };
     }
   } catch {
     /* fallback */
   }
 
-  const matches: Array<Record<string, unknown>> = [];
+  const allMatches: Array<Record<string, unknown>> = [];
   let bytes = 0;
-  let truncated = false;
+  let hitLimit = false;
   const re = fixed ? null : new RegExp(input.pattern, caseSensitive ? 'g' : 'gi');
 
   const visitFile = async (filePath: string) => {
-    if (matches.length >= maxMatches || bytes >= maxBytes) {
-      truncated = true;
-      return;
-    }
+    if (hitLimit) return;
     if (input.filePattern) {
       const name = basename(filePath);
       if (!globMatch(input.filePattern, name) && !globMatch(input.filePattern, filePath)) {
@@ -444,8 +522,8 @@ export async function filesGrep(input: {
     }
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
-      if (matches.length >= maxMatches || bytes >= maxBytes) {
-        truncated = true;
+      if (allMatches.length >= 10_000 || bytes >= maxBytes * 4) {
+        hitLimit = true;
         break;
       }
       const line = lines[i]!;
@@ -459,19 +537,17 @@ export async function filesGrep(input: {
       if (!hit) continue;
       const before = lines.slice(Math.max(0, i - contextBefore), i);
       const after = lines.slice(i + 1, i + 1 + contextAfter);
-      const row = {
+      allMatches.push({
         path: filePath,
         line_number: i + 1,
         line,
         context_before: before,
         context_after: after,
-      };
-      matches.push(row);
+      });
       bytes += line.length + filePath.length;
     }
   };
 
-  // directory or file
   try {
     await fs.list(target);
     await walk(target, true, async (full, isDir) => {
@@ -481,10 +557,14 @@ export async function filesGrep(input: {
     await visitFile(target);
   }
 
+  const page = allMatches.slice(offset, offset + maxMatches);
+  const nextOffset = offset + page.length;
+  const truncated = nextOffset < allMatches.length || hitLimit;
   return {
-    matches,
-    match_count: matches.length,
-    truncated: truncated || matches.length >= maxMatches,
+    matches: page,
+    match_count: page.length,
+    truncated,
+    next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
     engine: 'walk' as const,
   };
 }
@@ -739,6 +819,38 @@ function decodeOffsetCursor(cursor: string | undefined): number {
   } catch {
     throw runtimeError('Invalid cursor.', 'validation_error', 400);
   }
+}
+
+/** Minimal .gitignore: bare patterns + leading / + trailing / + unanchored *.ext */
+async function loadGitignore(root: string): Promise<string[]> {
+  try {
+    const text = await fs.readText(joinPath(root, '.gitignore'));
+    return text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#') && !l.startsWith('!'));
+  } catch {
+    return [];
+  }
+}
+
+function isGitignored(relPath: string, patterns: string[]): boolean {
+  const rel = relPath.replace(/^\//, '');
+  const base = basename(rel);
+  for (const pat of patterns) {
+    if (pat.endsWith('/')) {
+      const dir = pat.slice(0, -1).replace(/^\//, '');
+      if (rel === dir || rel.startsWith(`${dir}/`)) return true;
+      continue;
+    }
+    const p = pat.replace(/^\//, '');
+    if (p.includes('*') || p.includes('?')) {
+      if (globMatch(p, rel) || globMatch(p, base) || globMatch(`**/${p}`, rel)) return true;
+    } else if (rel === p || rel.startsWith(`${p}/`) || base === p) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function parseRgJson(

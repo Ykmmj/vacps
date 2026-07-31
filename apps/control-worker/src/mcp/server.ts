@@ -1164,7 +1164,8 @@ export function createMcpServer(env: Env): McpServer {
       const parsed = gitStatusInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
       const raw = (await client.execCommand(backend, {
-        program: 'git',
+        // Absolute path: native agent static binary often has empty PATH.
+        program: '/usr/bin/git',
         arguments: ['status', '--short'],
         working_directory: parsed.working_directory,
         timeout_ms: 60_000,
@@ -1187,7 +1188,7 @@ export function createMcpServer(env: Env): McpServer {
       const backend = await requireBackend(parsed.backend_id);
       const arguments_ = parsed.staged === true ? ['diff', '--cached'] : ['diff'];
       const raw = (await client.execCommand(backend, {
-        program: 'git',
+        program: '/usr/bin/git',
         arguments: arguments_,
         working_directory: parsed.working_directory,
         timeout_ms: 60_000,
@@ -1224,7 +1225,7 @@ export function createMcpServer(env: Env): McpServer {
       });
       try {
         const raw = (await client.execCommand(backend, {
-          program: 'git',
+          program: '/usr/bin/git',
           arguments: parsed.check === true ? ['apply', '--check', path] : ['apply', path],
           working_directory: parsed.working_directory,
           timeout_ms: 60_000,

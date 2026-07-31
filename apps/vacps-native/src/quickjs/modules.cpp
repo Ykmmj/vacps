@@ -1089,6 +1089,16 @@ JSValue js_process_start(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
       auto b = converter<bool>::from_js(ctx, cs.get());
       if (b) opts.close_stdin = *b;
     }
+    Value hso = Value::get_property_str(ctx, argv[1], "hardMaxStdout");
+    if (!hso.is_nullish()) {
+      auto n = converter<std::int32_t>::from_js(ctx, hso.get());
+      if (n && *n >= 0) opts.hard_max_stdout = static_cast<std::size_t>(*n);
+    }
+    Value hse = Value::get_property_str(ctx, argv[1], "hardMaxStderr");
+    if (!hse.is_nullish()) {
+      auto n = converter<std::int32_t>::from_js(ctx, hse.get());
+      if (n && *n >= 0) opts.hard_max_stderr = static_cast<std::size_t>(*n);
+    }
   }
 
   JSValue resolving[2];
