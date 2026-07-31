@@ -74,8 +74,15 @@ struct Registry::Entry {
   std::string stderr_acc;
   std::size_t hard_max_out{16 * 1024 * 1024};
   std::size_t hard_max_err{16 * 1024 * 1024};
+  std::size_t produced_out{0};
+  std::size_t produced_err{0};
+  bool stdout_truncated{false};
+  bool stderr_truncated{false};
 
+  /** Fully done: process_exited && out_eof && err_eof. */
   bool finished{false};
+  /** Wait coroutine observed process exit (pipes may still drain). */
+  bool process_exited{false};
   bool timed_out{false};
   bool cancelled{false};
   bool stdin_open{false};
@@ -99,8 +106,12 @@ void Registry::shutdown() noexcept {
   for (auto& [_, e] : entries_) {
     if (!e || e->finished) continue;
     kill_group(*e, SIGKILL);
+    e->process_exited = true;
+    e->out_eof = true;
+    e->err_eof = true;
     e->finished = true;
     e->cancelled = true;
+    e->stdin_open = false;
     notify_waiters(*e);
   }
   entries_.clear();
@@ -135,15 +146,30 @@ void Registry::kill_group(Entry& e, int sig) noexcept {
   }
 }
 
-void Registry::mark_finished(
+void Registry::on_process_exit(
     Entry& e,
-    std::string_view /*status*/,
     std::int32_t code,
-    bool timed_out) {
-  if (e.finished) return;
-  e.finished = true;
+    bool timed_out,
+    bool cancelled) {
+  if (e.process_exited) return;
+  e.process_exited = true;
   e.exit_code = code;
-  e.timed_out = timed_out;
+  if (timed_out) e.timed_out = true;
+  if (cancelled) e.cancelled = true;
+  e.stdin_open = false;
+  if (e.timeout_timer) {
+    e.timeout_timer->cancel();
+    e.timeout_timer.reset();
+  }
+  // Grace timer may still escalate SIGKILL if already cancelled; leave until finish.
+  try_finish(e);
+  notify_waiters(e);
+}
+
+void Registry::try_finish(Entry& e) noexcept {
+  if (e.finished) return;
+  if (!e.process_exited || !e.out_eof || !e.err_eof) return;
+  e.finished = true;
   e.stdin_open = false;
   if (e.timeout_timer) {
     e.timeout_timer->cancel();
@@ -161,10 +187,10 @@ void Registry::schedule_timeout(std::shared_ptr<Entry> e, std::int32_t timeout_m
   e->timeout_timer = std::make_shared<asio::steady_timer>(ex_);
   e->timeout_timer->expires_after(std::chrono::milliseconds(timeout_ms));
   e->timeout_timer->async_wait([this, e](const boost::system::error_code& ec) {
-    if (ec || !e || e->finished) return;
+    if (ec || !e || e->finished || e->process_exited) return;
     e->timed_out = true;
     kill_group(*e, SIGKILL);
-    // wait coroutine will mark finished when process exits
+    // wait coroutine will on_process_exit; pipes still drain to EOF
   });
 }
 
@@ -244,12 +270,17 @@ asio::awaitable<Result<StartInfo>> Registry::start(
                 asio::buffer(buf), asio::redirect_error(asio::use_awaitable, ec));
             if (ec || n == 0) {
               entry->out_eof = true;
+              try_finish(*entry);
               notify_waiters(*entry);
               co_return;
             }
+            entry->produced_out += n;
             if (entry->stdout_acc.size() < entry->hard_max_out) {
               const auto room = entry->hard_max_out - entry->stdout_acc.size();
               entry->stdout_acc.append(buf.data(), std::min(n, room));
+              if (n > room) entry->stdout_truncated = true;
+            } else {
+              entry->stdout_truncated = true;
             }
             notify_waiters(*entry);
           }
@@ -267,19 +298,24 @@ asio::awaitable<Result<StartInfo>> Registry::start(
                 asio::buffer(buf), asio::redirect_error(asio::use_awaitable, ec));
             if (ec || n == 0) {
               entry->err_eof = true;
+              try_finish(*entry);
               notify_waiters(*entry);
               co_return;
             }
+            entry->produced_err += n;
             if (entry->stderr_acc.size() < entry->hard_max_err) {
               const auto room = entry->hard_max_err - entry->stderr_acc.size();
               entry->stderr_acc.append(buf.data(), std::min(n, room));
+              if (n > room) entry->stderr_truncated = true;
+            } else {
+              entry->stderr_truncated = true;
             }
             notify_waiters(*entry);
           }
         },
         boost::asio::detached);
 
-    // Wait for exit
+    // Wait for exit — do not mark fully finished until both pipes EOF.
     boost::asio::co_spawn(
         ex_,
         [this, entry]() -> asio::awaitable<void> {
@@ -291,12 +327,8 @@ asio::awaitable<Result<StartInfo>> Registry::start(
           const bool cancelled = entry->cancelled;
           if (timed) {
             kill_group(*entry, SIGKILL);
-            mark_finished(*entry, "timed_out", code, true);
-          } else if (cancelled) {
-            mark_finished(*entry, "cancelled", code, false);
-          } else {
-            mark_finished(*entry, "exited", code, false);
           }
+          on_process_exit(*entry, code, timed, cancelled);
           co_return;
         },
         boost::asio::detached);
@@ -318,12 +350,13 @@ asio::awaitable<Result<ReadInfo>> Registry::read(std::string id, ReadOptions opt
     co_return std::unexpected(Error{"process.read: unknown process id"});
   }
 
-  auto has_data = [&]() {
+  auto has_progress = [&]() {
     return entry->stdout_acc.size() > opts.stdout_offset ||
-           entry->stderr_acc.size() > opts.stderr_offset || entry->finished;
+           entry->stderr_acc.size() > opts.stderr_offset || entry->finished ||
+           (entry->process_exited && entry->out_eof && entry->err_eof);
   };
 
-  if (opts.wait_ms > 0 && !has_data()) {
+  if (opts.wait_ms > 0 && !has_progress()) {
     auto timer = std::make_shared<asio::steady_timer>(ex_);
     timer->expires_after(std::chrono::milliseconds(opts.wait_ms));
     entry->read_waiters.push_back(timer);
@@ -338,9 +371,13 @@ asio::awaitable<Result<ReadInfo>> Registry::read(std::string id, ReadOptions opt
   info.status = status_string(entry->finished, entry->timed_out, entry->cancelled);
   info.exit_code = entry->exit_code;
   info.timed_out = entry->timed_out;
-  info.stdin_open = entry->stdin_open && !entry->finished;
+  info.stdin_open = entry->stdin_open && !entry->finished && !entry->process_exited;
   info.stdout_total = entry->stdout_acc.size();
   info.stderr_total = entry->stderr_acc.size();
+  info.stdout_produced = entry->produced_out;
+  info.stderr_produced = entry->produced_err;
+  info.stdout_truncated = entry->stdout_truncated;
+  info.stderr_truncated = entry->stderr_truncated;
 
   const auto maxb = opts.max_bytes > 0 ? opts.max_bytes : 65'536;
   std::size_t budget = maxb;
@@ -365,6 +402,7 @@ asio::awaitable<Result<ReadInfo>> Registry::read(std::string id, ReadOptions opt
   const bool unread =
       info.next_stdout_offset < entry->stdout_acc.size() ||
       info.next_stderr_offset < entry->stderr_acc.size();
+  // eof only when process exited, both pipes drained, and client has all buffered data.
   info.eof = entry->finished && !unread;
   co_return info;
 }
@@ -470,7 +508,7 @@ Result<bool> Registry::terminate(
     std::int32_t grace_ms) {
   auto entry = find(id);
   if (!entry) return std::unexpected(Error{"process.terminate: unknown process id"});
-  if (entry->finished) return false;
+  if (entry->finished || entry->process_exited) return false;
 
   entry->cancelled = true;
   const int sig = parse_signal(signal);
@@ -489,9 +527,13 @@ Result<ReadInfo> Registry::snapshot(const std::string& id) const {
   info.status = status_string(entry->finished, entry->timed_out, entry->cancelled);
   info.exit_code = entry->exit_code;
   info.timed_out = entry->timed_out;
-  info.stdin_open = entry->stdin_open && !entry->finished;
+  info.stdin_open = entry->stdin_open && !entry->finished && !entry->process_exited;
   info.stdout_total = entry->stdout_acc.size();
   info.stderr_total = entry->stderr_acc.size();
+  info.stdout_produced = entry->produced_out;
+  info.stderr_produced = entry->produced_err;
+  info.stdout_truncated = entry->stdout_truncated;
+  info.stderr_truncated = entry->stderr_truncated;
   info.stdout_slice = entry->stdout_acc;
   info.stderr_slice = entry->stderr_acc;
   info.next_stdout_offset = entry->stdout_acc.size();

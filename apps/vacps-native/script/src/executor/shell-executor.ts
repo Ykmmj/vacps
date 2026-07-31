@@ -167,7 +167,9 @@ export class ShellExecutor {
           }
         }
 
-        if (final.eof || final.status !== 'running') break;
+        // Wait for full completion: process exit + both stream EOFs (eof flag).
+        // Do not stop solely on status — tail bytes may still be draining.
+        if (final.eof) break;
       }
 
       if (captureStdout && stdout) this.store.appendLog(id, 'stdout', stdout);
