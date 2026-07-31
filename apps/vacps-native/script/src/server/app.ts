@@ -921,6 +921,21 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
+  app.post('/process/close', async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.process_id !== 'string') {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+    }
+    try {
+      const result = await input.processes.close(body.process_id);
+      return { ok: true, process_id: body.process_id, ...result };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
   app.post('/process/terminate', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.process_id !== 'string') {

@@ -4,6 +4,8 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include <gtest/gtest.h>
 
@@ -111,8 +113,12 @@ TEST(ProcessTest, TimeoutKillsProcessGroup) {
 }
 
 TEST(ProcessRegistryTest, AsyncWriteToCatAndClose) {
+  // Writes "hello" to cat via async stdin, closes stdin, reads until eof.
+  // Must call close() (or use retention_ms=0): default 60s TTL keeps ioc.run() alive.
   asio::io_context ioc{1};
-  vacps::process::Registry reg(ioc.get_executor());
+  vacps::process::RegistryLimits lim;
+  lim.retention_ms = 0;  // no TTL timer in unit tests
+  vacps::process::Registry reg(ioc.get_executor(), lim);
   bool ok = false;
   std::string err;
   std::string out;
@@ -146,7 +152,7 @@ TEST(ProcessRegistryTest, AsyncWriteToCatAndClose) {
         }
 
         vacps::process::ReadOptions ro;
-        ro.wait_ms = 3'000;
+        ro.wait_ms = 500;
         ro.max_bytes = 65'536;
         for (int i = 0; i < 50; ++i) {
           auto rd = co_await reg.read(started->id, ro);
@@ -155,14 +161,15 @@ TEST(ProcessRegistryTest, AsyncWriteToCatAndClose) {
             co_return;
           }
           out += rd->stdout_slice;
-          if (rd->eof || rd->status != "running") break;
           ro.stdout_offset = rd->next_stdout_offset;
           ro.stderr_offset = rd->next_stderr_offset;
+          if (rd->eof) break;
         }
         if (out.find("hello-async-write") == std::string::npos) {
           err = "missing stdout: " + out;
           co_return;
         }
+        (void)reg.close(started->id);
         ok = true;
         co_return;
       },
@@ -173,9 +180,11 @@ TEST(ProcessRegistryTest, AsyncWriteToCatAndClose) {
 }
 
 TEST(ProcessRegistryTest, ReadWaitsUntilPipeEofAfterExit) {
-  // Process exit alone must not report terminal status while stdout is still draining.
+  // Burst 200 lines; must not treat process exit alone as complete (wait for eof).
   asio::io_context ioc{1};
-  vacps::process::Registry reg(ioc.get_executor());
+  vacps::process::RegistryLimits lim;
+  lim.retention_ms = 0;
+  vacps::process::Registry reg(ioc.get_executor(), lim);
   bool ok = false;
   std::string err;
   std::string out;
@@ -187,7 +196,6 @@ TEST(ProcessRegistryTest, ReadWaitsUntilPipeEofAfterExit) {
         vacps::process::StartOptions so;
         so.close_stdin = true;
         so.timeout_ms = 15'000;
-        // Burst many lines then exit quickly.
         auto started = co_await reg.start(
             {"/bin/sh", "-c", "i=0; while [ $i -lt 200 ]; do echo line-$i; i=$((i+1)); done"},
             so);
@@ -199,7 +207,6 @@ TEST(ProcessRegistryTest, ReadWaitsUntilPipeEofAfterExit) {
         vacps::process::ReadOptions ro;
         ro.wait_ms = 500;
         ro.max_bytes = 65'536;
-        bool saw_running_after_data = false;
         for (int i = 0; i < 200; ++i) {
           auto rd = co_await reg.read(started->id, ro);
           if (!rd) {
@@ -208,7 +215,6 @@ TEST(ProcessRegistryTest, ReadWaitsUntilPipeEofAfterExit) {
           }
           if (!rd->stdout_slice.empty()) {
             out += rd->stdout_slice;
-            if (rd->status == "running") saw_running_after_data = true;
           }
           ro.stdout_offset = rd->next_stdout_offset;
           ro.stderr_offset = rd->next_stderr_offset;
@@ -227,7 +233,7 @@ TEST(ProcessRegistryTest, ReadWaitsUntilPipeEofAfterExit) {
           err = "missing lines, got " + std::to_string(line_count) + " out=" + out.substr(0, 200);
           co_return;
         }
-        (void)saw_running_after_data;
+        (void)reg.close(started->id);
         ok = true;
         co_return;
       },
@@ -240,7 +246,9 @@ TEST(ProcessRegistryTest, ReadWaitsUntilPipeEofAfterExit) {
 
 TEST(ProcessRegistryTest, HardMaxSetsTruncatedAndProduced) {
   asio::io_context ioc{1};
-  vacps::process::Registry reg(ioc.get_executor());
+  vacps::process::RegistryLimits lim;
+  lim.retention_ms = 0;
+  vacps::process::Registry reg(ioc.get_executor(), lim);
   bool ok = false;
   std::string err;
 
@@ -300,6 +308,183 @@ TEST(ProcessRegistryTest, HardMaxSetsTruncatedAndProduced) {
           err = "produced too small: " + std::to_string(last.stdout_produced);
           co_return;
         }
+        (void)reg.close(started->id);
+        ok = true;
+        co_return;
+      },
+      asio::detached);
+
+  ioc.run();
+  ASSERT_TRUE(ok) << err;
+}
+
+TEST(ProcessRegistryTest, CloseFreesEntry) {
+  asio::io_context ioc{1};
+  vacps::process::RegistryLimits lim;
+  lim.retention_ms = 0;
+  vacps::process::Registry reg(ioc.get_executor(), lim);
+  bool ok = false;
+  std::string err;
+
+  asio::co_spawn(
+      ioc,
+      [&]() -> asio::awaitable<void> {
+        vacps::process::StartOptions so;
+        so.close_stdin = true;
+        so.timeout_ms = 5'000;
+        auto started = co_await reg.start({"/bin/true"}, so);
+        if (!started) {
+          err = started.error().message;
+          co_return;
+        }
+        vacps::process::ReadOptions ro;
+        ro.wait_ms = 2'000;
+        for (int i = 0; i < 20; ++i) {
+          auto rd = co_await reg.read(started->id, ro);
+          if (!rd) {
+            err = rd.error().message;
+            co_return;
+          }
+          if (rd->eof) break;
+        }
+        if (reg.entry_count() < 1) {
+          err = "entry missing before close";
+          co_return;
+        }
+        auto closed = reg.close(started->id);
+        if (!closed || !*closed) {
+          err = "close failed";
+          co_return;
+        }
+        if (reg.entry_count() != 0) {
+          err = "entry not freed";
+          co_return;
+        }
+        auto closed2 = reg.close(started->id);
+        if (!closed2 || *closed2) {
+          err = "second close should be false";
+          co_return;
+        }
+        ok = true;
+        co_return;
+      },
+      asio::detached);
+
+  ioc.run();
+  ASSERT_TRUE(ok) << err;
+}
+
+TEST(ProcessRegistryTest, RetentionTtlAutoReclaims) {
+  asio::io_context ioc{1};
+  vacps::process::RegistryLimits lim;
+  lim.retention_ms = 80;
+  lim.max_entries = 32;
+  vacps::process::Registry reg(ioc.get_executor(), lim);
+  bool ok = false;
+  std::string err;
+
+  asio::co_spawn(
+      ioc,
+      [&]() -> asio::awaitable<void> {
+        vacps::process::StartOptions so;
+        so.close_stdin = true;
+        so.timeout_ms = 5'000;
+        auto started = co_await reg.start({"/bin/true"}, so);
+        if (!started) {
+          err = started.error().message;
+          co_return;
+        }
+        vacps::process::ReadOptions ro;
+        ro.wait_ms = 2'000;
+        for (int i = 0; i < 20; ++i) {
+          auto rd = co_await reg.read(started->id, ro);
+          if (!rd) {
+            err = rd.error().message;
+            co_return;
+          }
+          if (rd->eof) break;
+        }
+        if (reg.entry_count() != 1) {
+          err = "expected 1 entry after finish";
+          co_return;
+        }
+        // Wait past retention TTL on the same io_context.
+        asio::steady_timer timer(ioc.get_executor());
+        timer.expires_after(std::chrono::milliseconds(200));
+        co_await timer.async_wait(asio::use_awaitable);
+        if (reg.entry_count() != 0) {
+          err = "TTL did not reclaim entry, count=" + std::to_string(reg.entry_count());
+          co_return;
+        }
+        ok = true;
+        co_return;
+      },
+      asio::detached);
+
+  ioc.run();
+  ASSERT_TRUE(ok) << err;
+}
+
+TEST(ProcessRegistryTest, MaxEntriesReclaimsFinished) {
+  asio::io_context ioc{1};
+  vacps::process::RegistryLimits lim;
+  lim.max_entries = 2;
+  lim.retention_ms = 60'000;  // long TTL; reclaim via max_entries on start
+  vacps::process::Registry reg(ioc.get_executor(), lim);
+  bool ok = false;
+  std::string err;
+
+  asio::co_spawn(
+      ioc,
+      [&]() -> asio::awaitable<void> {
+        auto run_true = [&]() -> asio::awaitable<std::string> {
+          vacps::process::StartOptions so;
+          so.close_stdin = true;
+          so.timeout_ms = 5'000;
+          auto started = co_await reg.start({"/bin/true"}, so);
+          if (!started) co_return std::string{"ERR:"} + started.error().message;
+          vacps::process::ReadOptions ro;
+          ro.wait_ms = 500;
+          for (int i = 0; i < 40; ++i) {
+            auto rd = co_await reg.read(started->id, ro);
+            if (!rd) co_return std::string{"ERR:"} + rd.error().message;
+            if (rd->eof) break;
+          }
+          co_return started->id;
+        };
+
+        auto a = co_await run_true();
+        if (a.starts_with("ERR:")) {
+          err = a;
+          co_return;
+        }
+        auto b = co_await run_true();
+        if (b.starts_with("ERR:")) {
+          err = b;
+          co_return;
+        }
+        if (reg.entry_count() != 2) {
+          err = "expected 2 finished entries, got " + std::to_string(reg.entry_count());
+          co_return;
+        }
+        // Third start must reclaim oldest finished (a) to free a slot.
+        auto c = co_await run_true();
+        if (c.starts_with("ERR:") || c.empty()) {
+          err = c.empty() ? "third start failed" : c;
+          co_return;
+        }
+        if (reg.entry_count() > 2) {
+          err = "over max_entries after reclaim: " + std::to_string(reg.entry_count());
+          co_return;
+        }
+        auto snap_a = reg.snapshot(a);
+        if (snap_a) {
+          err = "oldest finished entry should have been reclaimed";
+          co_return;
+        }
+        // Drop remaining finished entries so default-style TTL cannot pin ioc.run().
+        (void)reg.close(b);
+        (void)reg.close(c);
         ok = true;
         co_return;
       },
@@ -311,7 +496,9 @@ TEST(ProcessRegistryTest, HardMaxSetsTruncatedAndProduced) {
 
 TEST(ProcessRegistryTest, WriteRejectsOversizedPayload) {
   asio::io_context ioc{1};
-  vacps::process::Registry reg(ioc.get_executor());
+  vacps::process::RegistryLimits lim;
+  lim.retention_ms = 0;
+  vacps::process::Registry reg(ioc.get_executor(), lim);
   bool rejected = false;
   std::string err;
 

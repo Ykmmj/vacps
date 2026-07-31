@@ -1202,12 +1202,41 @@ JSValue js_process_terminate(JSContext* ctx, JSValueConst, int argc, JSValueCons
       });
 }
 
+/**
+ * process.close(id) → Promise<{ closed: boolean }>
+ * Drop registry entry and free retained stdout/stderr buffers.
+ */
+JSValue js_process_close(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "process.close: host not wired");
+  if (argc < 1) return JS_ThrowTypeError(ctx, "process.close(id)");
+  auto id = converter<std::string>::from_js(ctx, argv[0]);
+  if (!id) return throw_error(ctx, id.error());
+
+  return spawn_js_promise(
+      ctx,
+      host,
+      [host_sp = host->shared_from_this(), id = std::move(*id)](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto result = host_sp->processes().close(id);
+        if (!result) {
+          bridge.reject(result.error());
+        } else {
+          auto obj = Value::new_object(c);
+          obj.set_property_str("closed", converter<bool>::to_js(c, *result));
+          bridge.resolve(std::move(obj));
+        }
+        co_return;
+      });
+}
+
 const JSCFunctionListEntry k_process_exports[] = {
     JS_CFUNC_DEF("run", 2, js_process_run),
     JS_CFUNC_DEF("start", 2, js_process_start),
     JS_CFUNC_DEF("read", 2, js_process_read),
     JS_CFUNC_DEF("write", 3, js_process_write),
     JS_CFUNC_DEF("terminate", 2, js_process_terminate),
+    JS_CFUNC_DEF("close", 1, js_process_close),
 };
 
 int js_process_init(JSContext* ctx, JSModuleDef* m) {

@@ -255,7 +255,16 @@ export class ShellExecutor {
         });
       }
     } finally {
+      const procId = this.active.get(id);
       this.active.delete(id);
+      // Free Registry buffers promptly (TTL is a backstop for interactive processes).
+      if (procId) {
+        try {
+          await process.close(procId);
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 }
