@@ -16,6 +16,10 @@ declare module 'vacps:process' {
     readonly timeoutMs?: number;
     /** Default true. */
     readonly closeStdin?: boolean;
+    /** Cap accumulated stdout bytes (process continues after cap). */
+    readonly hardMaxStdout?: number;
+    /** Cap accumulated stderr bytes. */
+    readonly hardMaxStderr?: number;
   }
 
   export interface StartResult {

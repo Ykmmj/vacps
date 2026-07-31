@@ -100,6 +100,10 @@ export function categoryFor(code: string): ErrorCategory {
     code === 'not_cancellable' ||
     code === 'already_terminal' ||
     code === 'cleanup_scope_changed' ||
+    code === 'path_exists' ||
+    code === 'file_exists' ||
+    code === 'directory_not_empty' ||
+    code === 'old_text_not_unique' ||
     code.endsWith('_not_terminal') ||
     code.endsWith('_scope_changed') ||
     code.endsWith('_not_cancellable')

@@ -9,12 +9,12 @@ C++ 只提供**能力/工厂**（类型级 API），**不**预创建业务实例
 Host 启动时安装 `globalThis.URL`（[Ada](https://github.com/ada-url/ada) v4 WHATWG 解析）。  
 供 Zod `z.url()` 等依赖浏览器/Node URL API 的代码使用。
 
-| API | 说明 |
-| --- | --- |
-| `new URL(input, [base])` | 非法 → `TypeError: Invalid URL` |
-| `url.href` / `protocol` / `hostname` / `host` / `pathname` / `search` / `hash` / `port` / `origin` | getters |
-| `URL.canParse(input, [base])` | static boolean |
-| `toString()` / `toJSON()` | → href |
+| API                                                                                                | 说明                            |
+| -------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `new URL(input, [base])`                                                                           | 非法 → `TypeError: Invalid URL` |
+| `url.href` / `protocol` / `hostname` / `host` / `pathname` / `search` / `hash` / `port` / `origin` | getters                         |
+| `URL.canParse(input, [base])`                                                                      | static boolean                  |
+| `toString()` / `toJSON()`                                                                          | → href                          |
 
 ## `vacps:log`
 
