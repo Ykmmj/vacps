@@ -13,6 +13,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/thread_pool.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <cstddef>
 #include <list>
@@ -27,6 +28,11 @@ namespace asio = boost::asio;
 struct HostOptions {
   std::size_t heap_limit_bytes{kDefaultHeapLimitBytes};
   std::size_t stack_limit_bytes{kDefaultStackLimitBytes};
+  /**
+   * Wall-clock budget for one Host JS entry (eval / invoke_export + await).
+   * 0 disables the interrupt watchdog for that Host.
+   */
+  std::chrono::milliseconds js_time_budget{kDefaultJsTimeBudget};
 };
 
 /**
@@ -87,6 +93,10 @@ class Host : public std::enable_shared_from_this<Host> {
     return progress_generation_;
   }
 
+  [[nodiscard]] std::chrono::milliseconds js_time_budget() const noexcept {
+    return js_time_budget_;
+  }
+
   void cancel_host_async() noexcept;
 
   [[nodiscard]] asio::awaitable<VoidResult> load_and_initialize(std::string_view script_path);
@@ -102,9 +112,16 @@ class Host : public std::enable_shared_from_this<Host> {
   [[nodiscard]] asio::awaitable<Result<Value>> await_value(Value value);
 
  private:
-  Host(Runtime runtime, Context context, asio::io_context& ioc, Config cfg);
+  Host(
+      Runtime runtime,
+      Context context,
+      asio::io_context& ioc,
+      Config cfg,
+      std::chrono::milliseconds js_time_budget);
 
   [[nodiscard]] asio::awaitable<void> wait_progress();
+  /** Wait for progress or deadline; returns false if interrupt budget expired. */
+  [[nodiscard]] asio::awaitable<bool> wait_progress_or_deadline();
   [[nodiscard]] asio::awaitable<VoidResult> await_settled(Value& value);
 
   Runtime runtime_;
@@ -114,6 +131,7 @@ class Host : public std::enable_shared_from_this<Host> {
   std::unique_ptr<vacps::process::Registry> processes_;
   bool use_stream_file_{false};
   Config cfg_{};
+  std::chrono::milliseconds js_time_budget_{kDefaultJsTimeBudget};
   bool script_initialized_{false};
   bool shutting_down_{false};
 

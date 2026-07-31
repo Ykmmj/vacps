@@ -28,14 +28,20 @@ Result<std::string> read_file(std::string_view path) {
 
 }  // namespace
 
-Host::Host(Runtime runtime, Context context, asio::io_context& ioc, Config cfg)
+Host::Host(
+    Runtime runtime,
+    Context context,
+    asio::io_context& ioc,
+    Config cfg,
+    std::chrono::milliseconds js_time_budget)
     : runtime_(std::move(runtime)),
       context_(std::move(context)),
       ioc_(&ioc),
       pool_(std::make_unique<asio::thread_pool>(2)),
       processes_(std::make_unique<vacps::process::Registry>(ioc.get_executor())),
       use_stream_file_(vacps::fs::probe_io_uring()),
-      cfg_(std::move(cfg)) {}
+      cfg_(std::move(cfg)),
+      js_time_budget_(js_time_budget) {}
 
 Host::~Host() {
   cancel_host_async();
@@ -87,10 +93,41 @@ asio::awaitable<void> Host::wait_progress() {
   co_return;
 }
 
+asio::awaitable<bool> Host::wait_progress_or_deadline() {
+  if (shutting_down_) {
+    co_return true;
+  }
+  if (runtime_.interrupt_expired()) {
+    co_return false;
+  }
+  auto remaining = runtime_.interrupt_remaining();
+  if (!remaining.has_value()) {
+    co_await wait_progress();
+    co_return true;
+  }
+  if (*remaining <= std::chrono::milliseconds{0}) {
+    co_return false;
+  }
+
+  auto executor = co_await asio::this_coro::executor;
+  auto timer = std::make_shared<asio::steady_timer>(executor);
+  timer->expires_after(*remaining);
+  progress_waiters_.push_back(timer);
+  auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
+  progress_waiters_.remove(timer);
+  // Timer fired (deadline) or cancelled by notify_progress / shutdown.
+  if (runtime_.interrupt_expired()) {
+    co_return false;
+  }
+  (void)ec;
+  co_return true;
+}
+
 Result<Value> Host::eval(
     std::string_view source,
     std::string_view filename,
     int flags) {
+  InterruptScope guard{runtime_, js_time_budget_};
   auto value = context_.eval(source, filename, flags);
   if (!value) {
     return value;
@@ -119,6 +156,9 @@ asio::awaitable<VoidResult> Host::await_settled(Value& value) {
   constexpr std::size_t kMaxJobsPerTurn = 128;
 
   for (;;) {
+    if (runtime_.interrupt_expired()) {
+      co_return std::unexpected(Error{"js interrupted: time budget exceeded"});
+    }
     const JSPromiseStateEnum st = JS_PromiseState(ctx, value.get());
     if (st == JS_PROMISE_PENDING) {
       auto drained = runtime_.drain_jobs_budgeted(kMaxJobsPerTurn);
@@ -135,8 +175,10 @@ asio::awaitable<VoidResult> Host::await_settled(Value& value) {
         auto ex = co_await asio::this_coro::executor;
         co_await asio::post(ex, asio::use_awaitable);
       } else {
-        // No runnable JS; wait for native settle + notify_progress.
-        co_await wait_progress();
+        // No runnable JS; wait for native settle, or fail if budget ends first.
+        if (!co_await wait_progress_or_deadline()) {
+          co_return std::unexpected(Error{"js interrupted: time budget exceeded"});
+        }
       }
       continue;
     }
@@ -158,6 +200,8 @@ asio::awaitable<VoidResult> Host::await_settled(Value& value) {
 }
 
 asio::awaitable<Result<Value>> Host::await_value(Value value) {
+  // Cover eval_module → await_value paths (eval's InterruptScope already ended).
+  InterruptScope guard{runtime_, js_time_budget_};
   if (auto a = co_await await_settled(value); !a) {
     co_return std::unexpected(std::move(a.error()));
   }
@@ -175,6 +219,8 @@ asio::awaitable<Result<Value>> Host::invoke_export(
   if (script_ns_.empty()) {
     co_return std::unexpected(Error{"business script not loaded"});
   }
+  // One wall-clock budget for JS_Call + promise drain / await.
+  InterruptScope guard{runtime_, js_time_budget_};
   Value fn = Value::get_property_str(ctx, script_ns_.get(), name);
   if (fn.is_exception()) {
     co_return std::unexpected(context_.take_exception_error());
@@ -207,35 +253,40 @@ asio::awaitable<VoidResult> Host::load_and_initialize(std::string_view script_pa
   }
 
   const std::string filename{script_path};
-  // COMPILE_ONLY: value is a module function; EvalFunction consumes it.
-  Value compiled{
-      ctx,
-      JS_Eval(
-          ctx,
-          src->data(),
-          src->size(),
-          filename.c_str(),
-          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY)};
-  if (compiled.is_exception()) {
-    co_return std::unexpected(
-        Error{std::format("compile script failed: {}", context_.take_exception_error().message)});
-  }
-  auto* mod = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled.get()));
-  Value pending{ctx, JS_EvalFunction(ctx, compiled.release())};
-  if (pending.is_exception()) {
-    co_return std::unexpected(
-        Error{std::format("eval script failed: {}", context_.take_exception_error().message)});
-  }
-  if (auto a = co_await await_settled(pending); !a) {
-    co_return std::unexpected(
-        Error{std::format("script module failed: {}", a.error().message)});
-  }
+  JSModuleDef* mod = nullptr;
+  {
+    // Separate scope so invoke_export can arm its own InterruptScope.
+    InterruptScope load_guard{runtime_, js_time_budget_};
+    // COMPILE_ONLY: value is a module function; EvalFunction consumes it.
+    Value compiled{
+        ctx,
+        JS_Eval(
+            ctx,
+            src->data(),
+            src->size(),
+            filename.c_str(),
+            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY)};
+    if (compiled.is_exception()) {
+      co_return std::unexpected(Error{
+          std::format("compile script failed: {}", context_.take_exception_error().message)});
+    }
+    mod = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled.get()));
+    Value pending{ctx, JS_EvalFunction(ctx, compiled.release())};
+    if (pending.is_exception()) {
+      co_return std::unexpected(
+          Error{std::format("eval script failed: {}", context_.take_exception_error().message)});
+    }
+    if (auto a = co_await await_settled(pending); !a) {
+      co_return std::unexpected(
+          Error{std::format("script module failed: {}", a.error().message)});
+    }
 
-  script_ns_ = Value{ctx, JS_GetModuleNamespace(ctx, mod)};
-  if (script_ns_.is_exception()) {
-    script_ns_.reset();
-    co_return std::unexpected(
-        Error{std::format("module namespace: {}", context_.take_exception_error().message)});
+    script_ns_ = Value{ctx, JS_GetModuleNamespace(ctx, mod)};
+    if (script_ns_.is_exception()) {
+      script_ns_.reset();
+      co_return std::unexpected(
+          Error{std::format("module namespace: {}", context_.take_exception_error().message)});
+    }
   }
 
   auto init = co_await invoke_export("initialize", 0, nullptr);
@@ -279,8 +330,12 @@ Result<std::shared_ptr<Host>> Host::create(
     return std::unexpected(std::move(context.error()));
   }
 
-  auto host = std::shared_ptr<Host>(
-      new Host(std::move(*runtime), std::move(*context), ioc, cfg));
+  auto host = std::shared_ptr<Host>(new Host(
+      std::move(*runtime),
+      std::move(*context),
+      ioc,
+      cfg,
+      opts.js_time_budget));
 
   // Modules resolve Host via JS_GetContextOpaque.
   JS_SetContextOpaque(host->context().get(), host.get());
@@ -290,8 +345,9 @@ Result<std::shared_ptr<Host>> Host::create(
   }
 
   log::info(
-      "quickjs host ready (fs content={})",
-      host->use_stream_file() ? "stream_file/io_uring" : "thread_pool");
+      "quickjs host ready (fs content={} js_time_budget_ms={})",
+      host->use_stream_file() ? "stream_file/io_uring" : "thread_pool",
+      host->js_time_budget().count());
   return host;
 }
 
