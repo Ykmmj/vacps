@@ -11,15 +11,9 @@ declare class TextEncoder {
 }
 
 declare class TextDecoder {
-  constructor(
-    label?: string,
-    options?: { fatal?: boolean; ignoreBOM?: boolean },
-  );
+  constructor(label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean });
   readonly encoding: string;
   readonly fatal: boolean;
   readonly ignoreBOM: boolean;
-  decode(
-    input?: ArrayBuffer | ArrayBufferView,
-    options?: { stream?: boolean },
-  ): string;
+  decode(input?: ArrayBuffer | ArrayBufferView, options?: { stream?: boolean }): string;
 }

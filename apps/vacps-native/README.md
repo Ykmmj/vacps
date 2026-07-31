@@ -146,7 +146,6 @@ curl -sS http://127.0.0.1:8788/ready
 curl -sS http://127.0.0.1:8788/script/ping
 ```
 
-
 ## Layout
 
 ```text

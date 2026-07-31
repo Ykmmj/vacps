@@ -60,7 +60,7 @@ export class TaskQueue {
         state: before.status,
       };
     }
-    void await this.executor.cancelRunning(taskId);
+    void (await this.executor.cancelRunning(taskId));
     const after = await this.store.getTask(taskId);
     return {
       cancelled: true,
@@ -69,7 +69,9 @@ export class TaskQueue {
     };
   }
 
-  async retry(taskId: string): Promise<{ task_id: string; status: 'queued'; retry_of_task_id: string }> {
+  async retry(
+    taskId: string,
+  ): Promise<{ task_id: string; status: 'queued'; retry_of_task_id: string }> {
     const newId = randomUuidV4();
     const enqueued = await this.store.enqueueRetryOf(taskId, newId);
     if (!enqueued) {
@@ -80,7 +82,7 @@ export class TaskQueue {
 
   /** Claim and run at most one queued task (single-flight). */
   async pumpOnce(): Promise<boolean> {
-    if (this.pumpBusy || await this.store.hasRunning()) {
+    if (this.pumpBusy || (await this.store.hasRunning())) {
       return false;
     }
     this.pumpBusy = true;
@@ -208,20 +210,24 @@ export class TaskQueue {
       const current = await this.schedulers.get(s.id);
       if (!current?.nextRunAt || !current.enabled) continue;
 
-      const result = await this.schedulers.claimAndEnqueue(current, nowMs, async (slot, schedule) => {
-        const dispatch = {
-          ...schedule.task,
-          task_id: slot.occurrenceId,
-          source: 'schedule' as const,
-          schedule_id: schedule.id,
-          idempotency_key: slot.occurrenceId,
-        } as TaskDispatch;
-        await this.store.insertOccurrenceTask(dispatch, {
-          scheduleId: schedule.id,
-          scheduleRevision: slot.revision,
-          scheduledForMs: slot.scheduledForMs,
-        });
-      });
+      const result = await this.schedulers.claimAndEnqueue(
+        current,
+        nowMs,
+        async (slot, schedule) => {
+          const dispatch = {
+            ...schedule.task,
+            task_id: slot.occurrenceId,
+            source: 'schedule' as const,
+            schedule_id: schedule.id,
+            idempotency_key: slot.occurrenceId,
+          } as TaskDispatch;
+          await this.store.insertOccurrenceTask(dispatch, {
+            scheduleId: schedule.id,
+            scheduleRevision: slot.revision,
+            scheduledForMs: slot.scheduledForMs,
+          });
+        },
+      );
 
       if (!result.claimed || !result.plan) continue;
       tasksEnqueued += result.slots.length;

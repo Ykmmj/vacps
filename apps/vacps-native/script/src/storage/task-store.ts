@@ -113,9 +113,10 @@ export class TaskStore {
   }
 
   async findByIdempotencyKey(key: string): Promise<StoredTask | undefined> {
-    const rows = await this.db.query('SELECT task_id FROM task_idempotency WHERE idempotency_key = ?;', [
-      key,
-    ]);
+    const rows = await this.db.query(
+      'SELECT task_id FROM task_idempotency WHERE idempotency_key = ?;',
+      [key],
+    );
     if (rows.length === 0) return undefined;
     return this.getTask(String(rows[0]!['task_id']));
   }
@@ -267,7 +268,11 @@ export class TaskStore {
     return Number(rows[0]!['cancel_requested']) === 1;
   }
 
-  async appendLog(taskId: string, stream: 'stdout' | 'stderr' | 'system', data: string): Promise<void> {
+  async appendLog(
+    taskId: string,
+    stream: 'stdout' | 'stderr' | 'system',
+    data: string,
+  ): Promise<void> {
     const seqRows = await this.db.query(
       'SELECT COALESCE(MAX(sequence), 0) AS m FROM task_logs WHERE task_id = ?;',
       [taskId],
@@ -310,7 +315,9 @@ export class TaskStore {
   async claimNonce(nonce: string, ttlSeconds = 600): Promise<boolean> {
     const now = Math.floor(Date.now() / 1000);
     await this.db.run('DELETE FROM request_nonces WHERE expires_at < ?;', [now]);
-    const existing = await this.db.query('SELECT nonce FROM request_nonces WHERE nonce = ?;', [nonce]);
+    const existing = await this.db.query('SELECT nonce FROM request_nonces WHERE nonce = ?;', [
+      nonce,
+    ]);
     if (existing.length > 0) return false;
     await this.db.run('INSERT INTO request_nonces(nonce, expires_at) VALUES(?, ?);', [
       nonce,
@@ -327,7 +334,9 @@ export class TaskStore {
   /** Counts for /metrics queue block. */
   async queueCounts(): Promise<{ waiting: number; active: number; failed: number }> {
     const one = async (status: string) => {
-      const rows = await this.db.query('SELECT COUNT(*) AS c FROM tasks WHERE status = ?;', [status]);
+      const rows = await this.db.query('SELECT COUNT(*) AS c FROM tasks WHERE status = ?;', [
+        status,
+      ]);
       return Number(rows[0]?.['c'] ?? 0) || 0;
     };
     return {

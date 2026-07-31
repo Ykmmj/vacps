@@ -85,7 +85,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         headers: request.headers,
         body: request.raw.body ?? '',
       });
-      if (!await input.queue.claimNonce(nonce)) {
+      if (!(await input.queue.claimNonce(nonce))) {
         return reply.code(401).send({
           error: {
             code: 'replayed_request',
@@ -343,14 +343,10 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     const logs = await input.queue.listLogs(id, { offset: 0, limit: 500 });
 
     // Control-plane tasks.get preview expects `commands[]` (Node shape), not raw log rows.
-    const allStdout = (
-      await input.queue.listLogs(id, { stream: 'stdout', offset: 0, limit: 2000 })
-    )
+    const allStdout = (await input.queue.listLogs(id, { stream: 'stdout', offset: 0, limit: 2000 }))
       .map((r) => r.data)
       .join('');
-    const allStderr = (
-      await input.queue.listLogs(id, { stream: 'stderr', offset: 0, limit: 2000 })
-    )
+    const allStderr = (await input.queue.listLogs(id, { stream: 'stderr', offset: 0, limit: 2000 }))
       .map((r) => r.data)
       .join('');
     const clip = (s: string) => (s.length > previewMax ? s.slice(0, previewMax) : s);

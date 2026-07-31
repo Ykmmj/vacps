@@ -240,9 +240,13 @@ describe('claimAndEnqueue CAS + txn', () => {
     });
 
     const s = (await schedulers.get(id))!;
-    const r = await schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T10:00:00.000Z'), async () => {
-      throw new Error('should not insert');
-    });
+    const r = await schedulers.claimAndEnqueue(
+      s,
+      Date.parse('2024-06-01T10:00:00.000Z'),
+      async () => {
+        throw new Error('should not insert');
+      },
+    );
     expect(r.claimed).toBe(false);
     expect(r.reason).toBe('disabled');
     expect((await tasks.getTask('manual-1'))?.status).toBe('queued');
@@ -255,9 +259,13 @@ describe('claimAndEnqueue CAS + txn', () => {
     const s = (await schedulers.get(id))!;
     // writeRow canonicalizes
     expect(s.nextRunAt).toBe('2024-06-01T09:00:00.000Z');
-    const r = await schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T09:01:00.000Z'), async () => {
-      /* no task */
-    });
+    const r = await schedulers.claimAndEnqueue(
+      s,
+      Date.parse('2024-06-01T09:01:00.000Z'),
+      async () => {
+        /* no task */
+      },
+    );
     expect(r.claimed).toBe(true);
   });
 });
