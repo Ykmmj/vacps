@@ -58,13 +58,14 @@ std::string env_or_empty(const char* key) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  vacps::js::HostOptions host_opts;
-  host_opts.data_dir = "data";
+  vacps::js::EngineOptions engine_opts;
+  vacps::js::ModuleEnvOptions module_opts;
+  module_opts.data_dir = "data";
   if (auto d = env_or_empty("VACPS_DATA_DIR"); !d.empty()) {
-    host_opts.data_dir = std::move(d);
+    module_opts.data_dir = std::move(d);
   }
-  host_opts.ca_bundle = env_or_empty("VACPS_CA_BUNDLE");
-  host_opts.fs_extra_roots = vacps::fs::fs_extra_roots_from_env();
+  module_opts.ca_bundle = env_or_empty("VACPS_CA_BUNDLE");
+  module_opts.fs_extra_roots = vacps::fs::fs_extra_roots_from_env();
 
   std::string log_level = "info";
   if (auto l = env_or_empty("VACPS_LOG_LEVEL"); !l.empty()) {
@@ -83,7 +84,7 @@ int main(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
     if (arg == "--data-dir" && i + 1 < argc) {
-      host_opts.data_dir = argv[++i];
+      module_opts.data_dir = argv[++i];
       continue;
     }
     if (arg == "--script" && i + 1 < argc) {
@@ -111,7 +112,7 @@ int main(int argc, char** argv) {
   try {
     asio::io_context ioc{1};
 
-    auto host_r = vacps::js::Host::create(ioc, std::move(host_opts));
+    auto host_r = vacps::js::Host::create(ioc, std::move(engine_opts), std::move(module_opts));
     if (!host_r) {
       vacps::log::error("quickjs host failed: {}", host_r.error().message);
       vacps::log::flush();
@@ -172,7 +173,7 @@ int main(int argc, char** argv) {
           ioc,
           [host, &ioc, tick_timer]() -> asio::awaitable<void> {
             tick_timer->cancel();
-            host->processes().shutdown();
+            host->env().processes().shutdown();
             co_await host->wait_async_idle(std::chrono::seconds{5});
             if (auto sh = co_await host->shutdown_script(); !sh) {
               vacps::log::error("script shutdown: {}", sh.error().message);

@@ -124,6 +124,7 @@ add_library(vacps_native_core STATIC
   src/quickjs/runtime.cpp
   src/quickjs/context.cpp
   src/quickjs/host.cpp
+  src/quickjs/module_env.cpp
   src/quickjs/modules.cpp
   src/quickjs/url_globals.cpp
   src/quickjs/encoding_globals.cpp

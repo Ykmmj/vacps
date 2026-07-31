@@ -180,8 +180,8 @@ asio::awaitable<void> Server::graceful_shutdown() {
 
   if (script_) {
     // Do NOT cancel_host_async before JS shutdown — that makes await_settled
-    // busy-spin and blocks db_pool completions needed by await db.close().
-    script_->processes().shutdown();
+    // busy-spin and blocks pool completions needed by await db.close().
+    script_->env().processes().shutdown();
     co_await script_->wait_async_idle(
         std::chrono::duration_cast<std::chrono::milliseconds>(kGracefulAsyncIdle));
     if (auto sh = co_await script_->shutdown_script(); !sh) {

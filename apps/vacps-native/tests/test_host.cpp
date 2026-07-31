@@ -108,7 +108,7 @@ class HostTest : public ::testing::Test {
            std::to_string(::getpid()) /
            std::to_string(reinterpret_cast<std::uintptr_t>(this));
     fs::create_directories(dir_);
-    host_opts_.data_dir = dir_.string();
+    module_opts_.data_dir = dir_.string();
     script_path_ = (dir_ / "biz.mjs").string();
     write_script(script_path_, kBusinessScript);
     // Business script Application requires CP key unless insecure (tests only).
@@ -120,14 +120,15 @@ class HostTest : public ::testing::Test {
     fs::remove_all(dir_, ec);
   }
 
-  vacps::js::HostOptions host_opts_{};
+  vacps::js::EngineOptions engine_opts_{};
+  vacps::js::ModuleEnvOptions module_opts_{};
   fs::path dir_;
   std::string script_path_;
 };
 
 TEST_F(HostTest, EvalBasic) {
   asio::io_context ioc{1};
-  auto host = vacps::js::Host::create(ioc, host_opts_);
+  auto host = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
   ASSERT_TRUE(host) << host.error().message;
   auto value = (*host)->eval("(() => 40 + 2)()", "<test>");
   ASSERT_TRUE(value) << value.error().message;
@@ -139,7 +140,7 @@ TEST_F(HostTest, EvalBasic) {
 
 TEST_F(HostTest, NativeModulesSmoke) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, host_opts_);
+  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -169,7 +170,7 @@ TEST_F(HostTest, NativeModulesSmoke) {
 
 TEST_F(HostTest, LoadAndHandleHttpHeaders) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, host_opts_);
+  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -240,7 +241,7 @@ TEST_F(HostTest, LoadAndHandleHttpHeaders) {
 
 TEST_F(HostTest, HandleRequestInvalidStatusAndNonObject) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, host_opts_);
+  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -298,7 +299,7 @@ TEST_F(HostTest, EmptyScriptFails) {
   const auto empty_path = (dir_ / "empty.mjs").string();
   write_script(empty_path, "");
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, host_opts_);
+  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
   ASSERT_TRUE(host_r);
   auto host = std::move(*host_r);
   bool saw_err = false;
@@ -321,7 +322,7 @@ TEST_F(HostTest, EmptyScriptFails) {
 
 TEST_F(HostTest, MissingScriptFails) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, host_opts_);
+  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
   ASSERT_TRUE(host_r);
   auto host = std::move(*host_r);
   bool saw_err = false;
@@ -339,7 +340,7 @@ TEST_F(HostTest, MissingScriptFails) {
 
 TEST_F(HostTest, TypedArrayViewUsesOffsetAndLength) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, host_opts_);
+  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto* ctx = (*host_r)->context().get();
 
@@ -359,9 +360,9 @@ TEST_F(HostTest, TypedArrayViewUsesOffsetAndLength) {
 TEST_F(HostTest, InterruptBusyLoopWithinBudget) {
   using namespace std::chrono_literals;
   asio::io_context ioc{1};
-  vacps::js::HostOptions opts = host_opts_;
+  vacps::js::EngineOptions opts = engine_opts_;
   opts.js_time_budget = 50ms;
-  auto host_r = vacps::js::Host::create(ioc, opts);
+  auto host_r = vacps::js::Host::create(ioc, opts, module_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
 
   const auto t0 = std::chrono::steady_clock::now();
@@ -379,9 +380,9 @@ TEST_F(HostTest, InterruptBusyLoopWithinBudget) {
 TEST_F(HostTest, InterruptBudgetZeroAllowsShortWork) {
   using namespace std::chrono_literals;
   asio::io_context ioc{1};
-  vacps::js::HostOptions opts = host_opts_;
+  vacps::js::EngineOptions opts = engine_opts_;
   opts.js_time_budget = 0ms;  // watchdog off
-  auto host_r = vacps::js::Host::create(ioc, opts);
+  auto host_r = vacps::js::Host::create(ioc, opts, module_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto value = (*host_r)->eval("(() => 1 + 1)()", "<ok>");
   ASSERT_TRUE(value) << value.error().message;
@@ -390,9 +391,9 @@ TEST_F(HostTest, InterruptBudgetZeroAllowsShortWork) {
 TEST_F(HostTest, InterruptPromiseMicrotaskBusyLoop) {
   using namespace std::chrono_literals;
   asio::io_context ioc{1};
-  vacps::js::HostOptions opts = host_opts_;
+  vacps::js::EngineOptions opts = engine_opts_;
   opts.js_time_budget = 80ms;
-  auto host_r = vacps::js::Host::create(ioc, opts);
+  auto host_r = vacps::js::Host::create(ioc, opts, module_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 

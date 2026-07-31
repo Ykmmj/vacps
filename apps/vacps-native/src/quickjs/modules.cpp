@@ -87,8 +87,9 @@ JSModuleDef* init_module_log(JSContext* ctx, const char* name) {
 
 // ── vacps:store ───────────────────────────────────────────────────
 // Capability/factory only: JS creates instances via store.open(path).
-// All SQLite work runs on Host::db_pool() (serial thread_pool size 1);
-// every mutating API returns a Promise so the JS/io_context thread never blocks.
+// Connection lives on the JS Store handle (shared_ptr), not on Host.
+// SQL runs on Host::pool() so the io_context thread never blocks.
+// Multi-step atomicity: store.transaction([...]) = one offloaded job.
 
 struct StoreState {
   std::unique_ptr<vacps::Database> db;
@@ -97,12 +98,28 @@ struct StoreState {
 
 struct StoreHandle {
   std::shared_ptr<StoreState> state;
+  /** Only for deferred close on pool; Host does not own the connection. */
+  Host* host{nullptr};
 };
 
 JSClassID g_store_class_id = 0;
 
 void store_finalizer(JSRuntime* /*rt*/, JSValue val) {
   auto* h = static_cast<StoreHandle*>(JS_GetOpaque(val, g_store_class_id));
+  if (h != nullptr && h->state && h->state->db) {
+    auto state = h->state;
+    if (h->host != nullptr) {
+      try {
+        auto sp = h->host->shared_from_this();
+        boost::asio::post(sp->pool(), [state]() { state->db.reset(); });
+      } catch (...) {
+        // Host already tearing down — best-effort close here.
+        state->db.reset();
+      }
+    } else {
+      state->db.reset();
+    }
+  }
   delete h;
 }
 
@@ -130,9 +147,9 @@ StoreHandle* store_handle_from_this(JSContext* ctx, JSValueConst this_val) {
   return h;
 }
 
-JSValue make_store_object(JSContext* ctx, std::shared_ptr<StoreState> state) {
+JSValue make_store_object(JSContext* ctx, Host* host, std::shared_ptr<StoreState> state) {
   ensure_store_class(ctx);
-  auto* handle = new StoreHandle{std::move(state)};
+  auto* handle = new StoreHandle{std::move(state), host};
   Value obj{ctx, JS_NewObjectClass(ctx, static_cast<int>(g_store_class_id))};
   if (obj.is_exception()) {
     delete handle;
@@ -142,7 +159,7 @@ JSValue make_store_object(JSContext* ctx, std::shared_ptr<StoreState> state) {
   return obj.release();
 }
 
-/** store.open(path) → Promise<Store> — open + PRAGMA on db_pool. */
+/** store.open(path) → Promise<Store> — open + PRAGMA on host pool. */
 JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = host_from(ctx);
   if (host == nullptr) return throw_msg(ctx, "store.open: host not wired");
@@ -158,7 +175,7 @@ JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
         // Database is not default-constructible; async_offload needs a T that is
         // (Asio co_spawn error path), so return unique_ptr.
         auto opened = co_await vacps::fs::async_offload(
-            host->db_pool(),
+            host->pool(),
             [path]() -> Result<std::unique_ptr<vacps::Database>> {
               auto db = vacps::Database::open(path);
               if (!db) {
@@ -173,7 +190,7 @@ JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
         auto state = std::make_shared<StoreState>();
         state->path = path;
         state->db = std::move(*opened);
-        Value obj{c, make_store_object(c, std::move(state))};
+        Value obj{c, make_store_object(c, host, std::move(state))};
         if (obj.is_exception()) {
           bridge.reject_message("store.open: failed to allocate Store object");
           co_return;
@@ -198,7 +215,7 @@ JSValue js_store_exec(JSContext* ctx, JSValueConst this_val, int argc, JSValueCo
       host,
       [state, sql = std::move(*sql), host](JSContext*, PromiseBridge& bridge) mutable
           -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state, sql]() -> VoidResult {
+        auto r = co_await vacps::fs::async_offload(host->pool(), [state, sql]() -> VoidResult {
           if (!state->db || !state->db->ok()) {
             return std::unexpected(Error{"store closed"});
           }
@@ -239,7 +256,7 @@ JSValue js_store_run(JSContext* ctx, JSValueConst this_val, int argc, JSValueCon
           std::int64_t last_insert_rowid{0};
         };
         auto r = co_await vacps::fs::async_offload(
-            host->db_pool(),
+            host->pool(),
             [state, sql, params]() -> Result<Meta> {
               if (!state->db || !state->db->ok()) {
                 return std::unexpected(Error{"store closed"});
@@ -284,7 +301,7 @@ JSValue js_store_query(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
       [state, sql = std::move(*sql), params = std::move(params), host](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto qr = co_await vacps::fs::async_offload(
-            host->db_pool(),
+            host->pool(),
             [state, sql, params]() -> Result<QueryResult> {
               if (!state->db || !state->db->ok()) {
                 return std::unexpected(Error{"store closed"});
@@ -303,7 +320,7 @@ JSValue js_store_query(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
 /**
  * store.transaction(steps) → Promise<RunResult[]>
  * steps: Array<{ sql: string, params?: SqlParam[], exec?: boolean }>
- * Entire unit runs as one BEGIN IMMEDIATE … COMMIT job on db_pool (no interleaving).
+ * Entire unit runs as one BEGIN IMMEDIATE … COMMIT job on host pool (no interleaving).
  */
 JSValue js_store_transaction(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
   auto* host = host_from(ctx);
@@ -351,7 +368,7 @@ JSValue js_store_transaction(JSContext* ctx, JSValueConst this_val, int argc, JS
       [state, steps = std::move(steps), host](JSContext* c, PromiseBridge& bridge) mutable
           -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_offload(
-            host->db_pool(),
+            host->pool(),
             [state, steps = std::move(steps)]() mutable
                 -> Result<std::vector<vacps::Database::TxStepResult>> {
               if (!state->db || !state->db->ok()) {
@@ -388,7 +405,7 @@ JSValue js_store_begin(JSContext* ctx, JSValueConst this_val, int, JSValueConst*
       ctx,
       host,
       [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state]() -> VoidResult {
+        auto r = co_await vacps::fs::async_offload(host->pool(), [state]() -> VoidResult {
           if (!state->db || !state->db->ok()) {
             return std::unexpected(Error{"store closed"});
           }
@@ -413,7 +430,7 @@ JSValue js_store_commit(JSContext* ctx, JSValueConst this_val, int, JSValueConst
       ctx,
       host,
       [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state]() -> VoidResult {
+        auto r = co_await vacps::fs::async_offload(host->pool(), [state]() -> VoidResult {
           if (!state->db || !state->db->ok()) {
             return std::unexpected(Error{"store closed"});
           }
@@ -438,7 +455,7 @@ JSValue js_store_rollback(JSContext* ctx, JSValueConst this_val, int, JSValueCon
       ctx,
       host,
       [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state]() -> VoidResult {
+        auto r = co_await vacps::fs::async_offload(host->pool(), [state]() -> VoidResult {
           if (!state->db || !state->db->ok()) {
             return std::unexpected(Error{"store closed"});
           }
@@ -469,7 +486,7 @@ JSValue js_store_close(JSContext* ctx, JSValueConst this_val, int, JSValueConst*
       ctx,
       host,
       [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        co_await vacps::fs::async_offload(host->db_pool(), [state]() {
+        co_await vacps::fs::async_offload(host->pool(), [state]() {
           state->db.reset();
           return true;
         });
@@ -517,9 +534,9 @@ JSValue js_host_version(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 }
 
 JSValue js_host_data_dir(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  auto* host = host_from(ctx);
-  if (!host) return throw_msg(ctx, "host: not initialized");
-  return converter<std::string>::to_js(ctx, host->data_dir()).release();
+  auto* env = env_from(ctx);
+  if (!env) return throw_msg(ctx, "host: not initialized");
+  return converter<std::string>::to_js(ctx, env->data_dir()).release();
 }
 
 JSValue js_host_now_ms(JSContext* ctx, JSValueConst, int, JSValueConst*) {
@@ -707,7 +724,8 @@ JSValue js_http_request(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
   }
 
   vacps::http::ClientRequest req;
-  req.ca_bundle = host->ca_bundle();
+  auto* env = env_from(ctx);
+  if (env) req.ca_bundle = env->ca_bundle();
 
   Value url_v = Value::get_property_str(ctx, argv[0], "url");
   if (url_v.is_nullish()) {
@@ -818,12 +836,12 @@ JSModuleDef* init_module_http(JSContext* ctx, const char* name) {
 // Tool-layer path-guard.ts remains defense-in-depth; C++ enforces allowlist
 // + openat2(RESOLVE_BENEATH) so symlink escape cannot leave configured roots.
 
-Result<std::filesystem::path> resolve_user_path(JSContext* ctx, JSValueConst path_v) {
+Result<std::string> parse_user_path(JSContext* ctx, JSValueConst path_v) {
   auto* host = host_from(ctx);
   if (!host) return std::unexpected(Error{"fs: host not initialized"});
   auto p = converter<std::string>::from_js(ctx, path_v);
   if (!p) return std::unexpected(std::move(p.error()));
-  return host->path_sandbox().authorize(*p, host->data_dir());
+  return *p;
 }
 
 // All vacps:fs async APIs use spawn_js_promise (promise_bridge.hpp).
@@ -832,15 +850,16 @@ JSValue js_fs_read_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.readText(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto data = co_await vacps::fs::async_read_text(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        auto data = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().read_text(path, host->env().data_dir());
+        });
         if (!data) {
           bridge.reject(data.error());
         } else {
@@ -854,7 +873,7 @@ JSValue js_fs_write_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 2) return JS_ThrowTypeError(ctx, "fs.writeText(path, data)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   auto data = converter<std::string>::from_js(ctx, argv[1]);
   if (!data) return throw_error(ctx, data.error());
@@ -863,10 +882,10 @@ JSValue js_fs_write_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
       host,
       [host, path = std::move(*path), data = std::move(*data)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_write_text(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
-            std::move(path),
-            std::move(data));
+        auto r = co_await vacps::fs::async_offload(
+            host->pool(), [host, path = std::move(path), data = std::move(data)]() {
+              return host->env().path_sandbox().write_text(path, host->env().data_dir(), data);
+            });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -880,7 +899,7 @@ JSValue js_fs_append_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 2) return JS_ThrowTypeError(ctx, "fs.appendText(path, data)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   auto data = converter<std::string>::from_js(ctx, argv[1]);
   if (!data) return throw_error(ctx, data.error());
@@ -889,10 +908,10 @@ JSValue js_fs_append_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
       host,
       [host, path = std::move(*path), data = std::move(*data)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_append_text(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
-            std::move(path),
-            std::move(data));
+        auto r = co_await vacps::fs::async_offload(
+            host->pool(), [host, path = std::move(path), data = std::move(data)]() {
+              return host->env().path_sandbox().append_text(path, host->env().data_dir(), data);
+            });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -906,15 +925,16 @@ JSValue js_fs_read_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.readBytes(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto data = co_await vacps::fs::async_read_bytes(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        auto data = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().read_bytes(path, host->env().data_dir());
+        });
         if (!data) {
           bridge.reject(data.error());
         } else {
@@ -932,27 +952,27 @@ JSValue js_fs_read_range(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 3) return JS_ThrowTypeError(ctx, "fs.readRange(path, offset, maxBytes)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
-  auto off = converter<std::int32_t>::from_js(ctx, argv[1]);
+  auto off = converter<std::int64_t>::from_js(ctx, argv[1]);
   if (!off) return throw_error(ctx, off.error());
   if (*off < 0) return JS_ThrowTypeError(ctx, "fs.readRange: offset must be >= 0");
-  auto maxb = converter<std::int32_t>::from_js(ctx, argv[2]);
+  auto maxb = converter<std::int64_t>::from_js(ctx, argv[2]);
   if (!maxb) return throw_error(ctx, maxb.error());
   if (*maxb < 0) return JS_ThrowTypeError(ctx, "fs.readRange: maxBytes must be >= 0");
   // Cap single range to 16 MiB to avoid accidental huge allocations.
   const auto max_bytes = static_cast<std::size_t>(
-      std::min(*maxb, static_cast<std::int32_t>(16 * 1024 * 1024)));
+      std::min(*maxb, static_cast<std::int64_t>(16 * 1024 * 1024)));
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path), offset = static_cast<std::uint64_t>(*off), max_bytes](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto data = co_await vacps::fs::async_read_range(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
-            std::move(path),
-            offset,
-            max_bytes);
+        auto data = co_await vacps::fs::async_offload(
+            host->pool(),
+            [host, path = std::move(path), offset, max_bytes]() {
+              return host->env().path_sandbox().read_range(path, host->env().data_dir(), offset, max_bytes);
+            });
         if (!data) {
           bridge.reject(data.error());
         } else {
@@ -967,23 +987,23 @@ JSValue js_fs_hash_file(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.hashFile(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto dig = co_await vacps::fs::async_hash_file(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        auto dig = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().hash_file(path, host->env().data_dir());
+        });
         if (!dig) {
           bridge.reject(dig.error());
         } else {
           auto obj = Value::new_object(c);
-          // sizeBytes as number (may exceed int32 for huge files — use double).
           obj.set_property_str(
               "sizeBytes",
-              Value{c, JS_NewFloat64(c, static_cast<double>(dig->size_bytes))});
+              converter<std::int64_t>::to_js(c, static_cast<std::int64_t>(dig->size_bytes)));
           obj.set_property_str(
               "sha256Hex", converter<std::string>::to_js(c, dig->sha256_hex));
           bridge.resolve(std::move(obj));
@@ -996,7 +1016,7 @@ JSValue js_fs_write_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 2) return JS_ThrowTypeError(ctx, "fs.writeBytes(path, data)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   auto data = bytes_from_js(ctx, argv[1]);
   if (!data) return throw_error(ctx, data.error());
@@ -1005,10 +1025,10 @@ JSValue js_fs_write_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
       host,
       [host, path = std::move(*path), data = std::move(*data)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_write_bytes(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
-            std::move(path),
-            std::move(data));
+        auto r = co_await vacps::fs::async_offload(
+            host->pool(), [host, path = std::move(path), data = std::move(data)]() {
+              return host->env().path_sandbox().write_bytes(path, host->env().data_dir(), data);
+            });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -1022,15 +1042,16 @@ JSValue js_fs_mkdir(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.mkdir(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_mkdir(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        auto r = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().mkdir(path, host->env().data_dir());
+        });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -1044,15 +1065,16 @@ JSValue js_fs_exists(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.exists(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        const bool ok = co_await vacps::fs::async_exists(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        const bool ok = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().exists(path, host->env().data_dir());
+        });
         bridge.resolve(converter<bool>::to_js(c, ok));
         co_return;
       });
@@ -1062,15 +1084,16 @@ JSValue js_fs_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.remove(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_remove(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        auto r = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().remove(path, host->env().data_dir());
+        });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -1084,19 +1107,19 @@ JSValue js_fs_rename(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 2) return JS_ThrowTypeError(ctx, "fs.rename(from, to)");
-  auto from = resolve_user_path(ctx, argv[0]);
+  auto from = parse_user_path(ctx, argv[0]);
   if (!from) return throw_error(ctx, from.error());
-  auto to = resolve_user_path(ctx, argv[1]);
+  auto to = parse_user_path(ctx, argv[1]);
   if (!to) return throw_error(ctx, to.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, from = std::move(*from), to = std::move(*to)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_rename(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
-            std::move(from),
-            std::move(to));
+        auto r = co_await vacps::fs::async_offload(
+            host->pool(), [host, from = std::move(from), to = std::move(to)]() {
+              return host->env().path_sandbox().rename(from, to, host->env().data_dir());
+            });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -1110,15 +1133,16 @@ JSValue js_fs_list(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.list(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto entries = co_await vacps::fs::async_list(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        auto entries = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().list(path, host->env().data_dir());
+        });
         if (!entries) {
           bridge.reject(entries.error());
           co_return;
@@ -1143,15 +1167,16 @@ JSValue js_fs_stat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "fs: host not wired");
   if (argc < 1) return JS_ThrowTypeError(ctx, "fs.stat(path)");
-  auto path = resolve_user_path(ctx, argv[0]);
+  auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   return spawn_js_promise(
       ctx,
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto st = co_await vacps::fs::async_stat(
-            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        auto st = co_await vacps::fs::async_offload(host->pool(), [host, path = std::move(path)]() {
+          return host->env().path_sandbox().stat(path, host->env().data_dir());
+        });
         if (!st) {
           bridge.reject(st.error());
         } else {
@@ -1284,12 +1309,12 @@ JSValue js_process_run(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
               "stderr", converter<std::string>::to_js(c, result->stderr_str));
           obj.set_property_str(
               "stdoutProduced",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->stdout_produced)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->stdout_produced)));
           obj.set_property_str(
               "stderrProduced",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->stderr_produced)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->stderr_produced)));
           obj.set_property_str(
               "stdoutTruncated", converter<bool>::to_js(c, result->stdout_truncated));
           obj.set_property_str(
@@ -1344,13 +1369,13 @@ JSValue js_process_start(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
     }
     Value hso = Value::get_property_str(ctx, argv[1], "hardMaxStdout");
     if (!hso.is_nullish()) {
-      auto n = converter<std::int32_t>::from_js(ctx, hso.get());
-      if (n && *n >= 0) opts.hard_max_stdout = static_cast<std::size_t>(*n);
+      auto n = converter<std::int64_t>::from_js(ctx, hso.get());
+    if (n && *n >= 0) opts.hard_max_stdout = static_cast<std::size_t>(*n);
     }
     Value hse = Value::get_property_str(ctx, argv[1], "hardMaxStderr");
     if (!hse.is_nullish()) {
-      auto n = converter<std::int32_t>::from_js(ctx, hse.get());
-      if (n && *n >= 0) opts.hard_max_stderr = static_cast<std::size_t>(*n);
+      auto n = converter<std::int64_t>::from_js(ctx, hse.get());
+    if (n && *n >= 0) opts.hard_max_stderr = static_cast<std::size_t>(*n);
     }
   }
 
@@ -1359,7 +1384,7 @@ JSValue js_process_start(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
       host,
       [host_sp = host->shared_from_this(), av = std::move(av), opts = std::move(opts)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto result = co_await host_sp->processes().start(std::move(av), std::move(opts));
+        auto result = co_await host_sp->env().processes().start(std::move(av), std::move(opts));
         if (!result) {
           bridge.reject(result.error());
         } else {
@@ -1392,17 +1417,17 @@ JSValue js_process_read(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
     }
     Value mb = Value::get_property_str(ctx, argv[1], "maxBytes");
     if (!mb.is_nullish()) {
-      auto n = converter<std::int32_t>::from_js(ctx, mb.get());
+      auto n = converter<std::int64_t>::from_js(ctx, mb.get());
       if (n && *n > 0) opts.max_bytes = static_cast<std::size_t>(*n);
     }
     Value so = Value::get_property_str(ctx, argv[1], "stdoutOffset");
     if (!so.is_nullish()) {
-      auto n = converter<std::int32_t>::from_js(ctx, so.get());
+      auto n = converter<std::int64_t>::from_js(ctx, so.get());
       if (n && *n >= 0) opts.stdout_offset = static_cast<std::size_t>(*n);
     }
     Value eo = Value::get_property_str(ctx, argv[1], "stderrOffset");
     if (!eo.is_nullish()) {
-      auto n = converter<std::int32_t>::from_js(ctx, eo.get());
+      auto n = converter<std::int64_t>::from_js(ctx, eo.get());
       if (n && *n >= 0) opts.stderr_offset = static_cast<std::size_t>(*n);
     }
   }
@@ -1412,7 +1437,7 @@ JSValue js_process_read(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
       host,
       [host_sp = host->shared_from_this(), id = std::move(*id), opts](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto result = co_await host_sp->processes().read(std::move(id), opts);
+        auto result = co_await host_sp->env().processes().read(std::move(id), opts);
         if (!result) {
           bridge.reject(result.error());
         } else {
@@ -1429,32 +1454,32 @@ JSValue js_process_read(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
               "stderr", converter<std::string>::to_js(c, result->stderr_slice));
           obj.set_property_str(
               "stdoutTotal",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->stdout_total)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->stdout_total)));
           obj.set_property_str(
               "stderrTotal",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->stderr_total)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->stderr_total)));
           obj.set_property_str(
               "stdoutProduced",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->stdout_produced)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->stdout_produced)));
           obj.set_property_str(
               "stderrProduced",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->stderr_produced)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->stderr_produced)));
           obj.set_property_str(
               "stdoutTruncated", converter<bool>::to_js(c, result->stdout_truncated));
           obj.set_property_str(
               "stderrTruncated", converter<bool>::to_js(c, result->stderr_truncated));
           obj.set_property_str(
               "nextStdoutOffset",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->next_stdout_offset)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->next_stdout_offset)));
           obj.set_property_str(
               "nextStderrOffset",
-              converter<std::int32_t>::to_js(
-                  c, static_cast<std::int32_t>(result->next_stderr_offset)));
+              converter<std::int64_t>::to_js(
+                  c, static_cast<std::int64_t>(result->next_stderr_offset)));
           bridge.resolve(std::move(obj));
         }
         co_return;
@@ -1500,14 +1525,14 @@ JSValue js_process_write(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
        data = std::move(*data),
        opts](JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto result =
-            co_await host_sp->processes().write(std::move(id), std::move(data), opts);
+            co_await host_sp->env().processes().write(std::move(id), std::move(data), opts);
         if (!result) {
           bridge.reject(result.error());
         } else {
           auto obj = Value::new_object(c);
           obj.set_property_str(
               "writtenBytes",
-              converter<std::int32_t>::to_js(c, static_cast<std::int32_t>(*result)));
+              converter<std::int64_t>::to_js(c, static_cast<std::int64_t>(*result)));
           bridge.resolve(std::move(obj));
         }
         co_return;
@@ -1545,11 +1570,11 @@ JSValue js_process_terminate(JSContext* ctx, JSValueConst, int argc, JSValueCons
        id = std::move(*id),
        signal = std::move(signal),
        grace_ms](JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto result = host_sp->processes().terminate(id, signal, grace_ms);
+        auto result = host_sp->env().processes().terminate(id, signal, grace_ms);
         if (!result) {
           bridge.reject(result.error());
         } else {
-          auto snap = host_sp->processes().snapshot(id);
+          auto snap = host_sp->env().processes().snapshot(id);
           auto obj = Value::new_object(c);
           obj.set_property_str("requested", converter<bool>::to_js(c, *result));
           if (snap) {
@@ -1579,7 +1604,7 @@ JSValue js_process_close(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
       host,
       [host_sp = host->shared_from_this(), id = std::move(*id)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto result = host_sp->processes().close(id);
+        auto result = host_sp->env().processes().close(id);
         if (!result) {
           bridge.reject(result.error());
         } else {

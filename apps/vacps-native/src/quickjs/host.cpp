@@ -4,7 +4,6 @@
 #include "quickjs/modules.hpp"
 #include "app/log.hpp"
 #include "app/version.hpp"
-#include "fs/io_uring_probe.hpp"
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/post.hpp>
@@ -32,28 +31,19 @@ Host::Host(
     Runtime runtime,
     Context context,
     asio::io_context& ioc,
-    HostOptions opts,
-    vacps::fs::PathSandbox path_sandbox)
+    EngineOptions engine,
+    ModuleEnvOptions modules)
     : runtime_(std::move(runtime)),
       context_(std::move(context)),
       ioc_(&ioc),
       pool_(std::make_unique<asio::thread_pool>(2)),
-      db_pool_(std::make_unique<asio::thread_pool>(1)),
-      processes_(std::make_unique<vacps::process::Registry>(ioc.get_executor())),
-      use_stream_file_(vacps::fs::probe_io_uring()),
-      data_dir_(std::move(opts.data_dir)),
-      ca_bundle_(std::move(opts.ca_bundle)),
-      path_sandbox_(std::move(path_sandbox)),
-      js_time_budget_(opts.js_time_budget) {}
+      env_(std::make_unique<ModuleEnv>(ioc, *pool_, std::move(modules))),
+      js_time_budget_(engine.js_time_budget) {}
 
 Host::~Host() {
   cancel_host_async();
-  if (processes_) {
-    processes_->shutdown();
-  }
-  if (db_pool_) {
-    db_pool_->stop();
-    db_pool_->join();
+  if (env_) {
+    env_->shutdown();
   }
   if (pool_) {
     pool_->stop();
@@ -332,8 +322,9 @@ asio::awaitable<VoidResult> Host::shutdown_script() {
 
 Result<std::shared_ptr<Host>> Host::create(
     asio::io_context& ioc,
-    HostOptions opts) {
-  auto runtime = Runtime::create(opts.heap_limit_bytes, opts.stack_limit_bytes);
+    EngineOptions engine,
+    ModuleEnvOptions modules) {
+  auto runtime = Runtime::create(engine.heap_limit_bytes, engine.stack_limit_bytes);
   if (!runtime) {
     return std::unexpected(std::move(runtime.error()));
   }
@@ -343,16 +334,14 @@ Result<std::shared_ptr<Host>> Host::create(
     return std::unexpected(std::move(context.error()));
   }
 
-  auto sandbox = vacps::fs::PathSandbox::create(opts.data_dir, opts.fs_extra_roots);
-
   auto host = std::shared_ptr<Host>(new Host(
       std::move(*runtime),
       std::move(*context),
       ioc,
-      std::move(opts),
-      std::move(sandbox)));
+      std::move(engine),
+      std::move(modules)));
 
-  // Modules resolve Host via JS_GetContextOpaque.
+  // Modules resolve Host (engine) + env_from (capabilities) via opaque.
   JS_SetContextOpaque(host->context().get(), host.get());
 
   if (auto mods = install_native_modules(host->runtime().get(), host->context().get()); !mods) {
@@ -360,10 +349,8 @@ Result<std::shared_ptr<Host>> Host::create(
   }
 
   log::info(
-      "quickjs host ready (fs content={} js_time_budget_ms={} fs_roots={})",
-      host->use_stream_file() ? "stream_file/io_uring" : "thread_pool",
-      host->js_time_budget().count(),
-      host->path_sandbox().roots().size());
+      "quickjs host ready (js_time_budget_ms={})",
+      host->js_time_budget().count());
   return host;
 }
 

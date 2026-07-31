@@ -68,7 +68,7 @@ class Database {
 
   /**
    * Run `work` inside BEGIN IMMEDIATE … COMMIT on this connection.
-   * Intended for a single db_pool job so no other SQL can interleave.
+   * Intended for a single offload job so no other SQL can interleave.
    * On work error / exception: ROLLBACK and propagate.
    */
   template <class F>
@@ -120,7 +120,7 @@ class Database {
 
   /**
    * Atomically run all steps (BEGIN … each step … COMMIT) without yielding.
-   * Use from a single db_pool job only.
+   * Use from a single offload job only.
    */
   [[nodiscard]] Result<std::vector<TxStepResult>> run_transaction(
       const std::vector<TxStep>& steps);
