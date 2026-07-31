@@ -28,7 +28,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260722.1",
     "@internationalized/date": "^3.12.2",
-    "@lucide/svelte": "^1.26.0",
+    "@lucide/svelte": "^1.27.0",
     "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@tailwindcss/vite": "^4.3.3",
     "bits-ui": "^2.18.1",
