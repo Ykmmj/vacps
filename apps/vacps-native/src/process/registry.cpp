@@ -96,25 +96,137 @@ struct Registry::Entry {
   std::vector<std::shared_ptr<asio::steady_timer>> write_waiters;
   std::shared_ptr<asio::steady_timer> timeout_timer;
   std::shared_ptr<asio::steady_timer> grace_timer;
+  std::shared_ptr<asio::steady_timer> retention_timer;
+  /** Monotonic finish order for reclaim (0 = not finished). */
+  std::uint64_t finish_seq{0};
 };
 
-Registry::Registry(asio::any_io_executor ex) : ex_(std::move(ex)) {}
+Registry::Registry(asio::any_io_executor ex, RegistryLimits limits)
+    : ex_(std::move(ex)), limits_(limits) {
+  if (limits_.max_entries == 0) limits_.max_entries = 128;
+  if (limits_.max_total_buffer_bytes == 0) {
+    limits_.max_total_buffer_bytes = 64 * 1024 * 1024;
+  }
+}
 
 Registry::~Registry() { shutdown(); }
 
 void Registry::shutdown() noexcept {
   for (auto& [_, e] : entries_) {
-    if (!e || e->finished) continue;
-    kill_group(*e, SIGKILL);
+    if (!e) continue;
+    if (!e->finished) {
+      kill_group(*e, SIGKILL);
+      e->process_exited = true;
+      e->out_eof = true;
+      e->err_eof = true;
+      e->finished = true;
+      e->cancelled = true;
+      e->stdin_open = false;
+    }
+    if (e->retention_timer) {
+      e->retention_timer->cancel();
+      e->retention_timer.reset();
+    }
+    if (e->timeout_timer) {
+      e->timeout_timer->cancel();
+      e->timeout_timer.reset();
+    }
+    if (e->grace_timer) {
+      e->grace_timer->cancel();
+      e->grace_timer.reset();
+    }
+    notify_waiters(*e);
+  }
+  entries_.clear();
+}
+
+std::size_t Registry::total_buffered_bytes() const noexcept {
+  std::size_t n = 0;
+  for (const auto& [_, e] : entries_) {
+    if (!e) continue;
+    n += e->stdout_acc.size();
+    n += e->stderr_acc.size();
+  }
+  return n;
+}
+
+bool Registry::erase_entry(const std::string& id) noexcept {
+  auto it = entries_.find(id);
+  if (it == entries_.end()) return false;
+  auto e = it->second;
+  if (e) {
+    if (!e->finished && !e->process_exited) {
+      kill_group(*e, SIGKILL);
+    }
     e->process_exited = true;
     e->out_eof = true;
     e->err_eof = true;
     e->finished = true;
-    e->cancelled = true;
     e->stdin_open = false;
+    e->stdout_acc.clear();
+    e->stdout_acc.shrink_to_fit();
+    e->stderr_acc.clear();
+    e->stderr_acc.shrink_to_fit();
+    if (e->retention_timer) {
+      e->retention_timer->cancel();
+      e->retention_timer.reset();
+    }
+    if (e->timeout_timer) {
+      e->timeout_timer->cancel();
+      e->timeout_timer.reset();
+    }
+    if (e->grace_timer) {
+      e->grace_timer->cancel();
+      e->grace_timer.reset();
+    }
     notify_waiters(*e);
   }
-  entries_.clear();
+  entries_.erase(it);
+  return true;
+}
+
+bool Registry::reclaim_one_finished_oldest() noexcept {
+  std::string best_id;
+  std::uint64_t best_seq = 0;
+  bool found = false;
+  for (const auto& [id, e] : entries_) {
+    if (!e || !e->finished) continue;
+    if (!found || e->finish_seq < best_seq) {
+      found = true;
+      best_seq = e->finish_seq;
+      best_id = id;
+    }
+  }
+  if (!found) return false;
+  return erase_entry(best_id);
+}
+
+void Registry::reclaim_finished_for_limits() noexcept {
+  // Only drop finished entries when strictly over the caps.
+  // At capacity (size == max_entries) we keep them until start() needs a free slot.
+  while (entries_.size() > limits_.max_entries) {
+    if (!reclaim_one_finished_oldest()) break;
+  }
+  while (total_buffered_bytes() > limits_.max_total_buffer_bytes) {
+    if (!reclaim_one_finished_oldest()) break;
+  }
+}
+
+void Registry::schedule_retention(std::shared_ptr<Entry> e) {
+  if (!e || limits_.retention_ms <= 0 || e->retention_timer) return;
+  e->retention_timer = std::make_shared<asio::steady_timer>(ex_);
+  e->retention_timer->expires_after(std::chrono::milliseconds(limits_.retention_ms));
+  const std::string id = e->id;
+  e->retention_timer->async_wait([this, id, e](const boost::system::error_code& ec) {
+    if (ec || !e || !e->finished) return;
+    // Only erase if still the same finished entry.
+    erase_entry(id);
+  });
+}
+
+Result<bool> Registry::close(const std::string& id) {
+  if (!find(id)) return false;
+  return erase_entry(id);
 }
 
 std::shared_ptr<Registry::Entry> Registry::find(const std::string& id) const {
@@ -171,6 +283,7 @@ void Registry::try_finish(Entry& e) noexcept {
   if (!e.process_exited || !e.out_eof || !e.err_eof) return;
   e.finished = true;
   e.stdin_open = false;
+  e.finish_seq = ++seq_;  // reuse seq_ for finish order (monotonic enough)
   if (e.timeout_timer) {
     e.timeout_timer->cancel();
     e.timeout_timer.reset();
@@ -180,6 +293,10 @@ void Registry::try_finish(Entry& e) noexcept {
     e.grace_timer.reset();
   }
   notify_waiters(e);
+  // Auto-reclaim after retention window unless client calls close().
+  auto sp = find(e.id);
+  if (sp) schedule_retention(sp);
+  reclaim_finished_for_limits();
 }
 
 void Registry::schedule_timeout(std::shared_ptr<Entry> e, std::int32_t timeout_ms) {
@@ -212,6 +329,16 @@ asio::awaitable<Result<StartInfo>> Registry::start(
     StartOptions opts) {
   if (argv.empty() || argv[0].empty()) {
     co_return std::unexpected(Error{"process.start: argv is empty"});
+  }
+
+  // Need a free slot: reclaim oldest finished first, then reject if still full of live ones.
+  while (entries_.size() >= limits_.max_entries) {
+    if (!reclaim_one_finished_oldest()) break;
+  }
+  reclaim_finished_for_limits();  // also enforce buffer budget
+  if (entries_.size() >= limits_.max_entries) {
+    co_return std::unexpected(Error{std::format(
+        "process.start: too many processes (max_entries={})", limits_.max_entries)});
   }
 
   try {
@@ -282,6 +409,7 @@ asio::awaitable<Result<StartInfo>> Registry::start(
             } else {
               entry->stdout_truncated = true;
             }
+            reclaim_finished_for_limits();
             notify_waiters(*entry);
           }
         },
@@ -310,6 +438,7 @@ asio::awaitable<Result<StartInfo>> Registry::start(
             } else {
               entry->stderr_truncated = true;
             }
+            reclaim_finished_for_limits();
             notify_waiters(*entry);
           }
         },

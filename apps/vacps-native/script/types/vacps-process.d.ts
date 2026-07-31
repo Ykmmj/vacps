@@ -92,4 +92,10 @@ declare module 'vacps:process' {
     id: string,
     options?: TerminateOptions,
   ): Promise<{ requested: boolean; status?: string; exitCode?: number }>;
+
+  /**
+   * Free registry buffers for a process. If still running, kills it first.
+   * Idempotent: unknown id → closed: false.
+   */
+  export function close(id: string): Promise<{ closed: boolean }>;
 }

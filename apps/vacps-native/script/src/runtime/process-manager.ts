@@ -321,6 +321,13 @@ export class ProcessManager {
     return { written_bytes: r.writtenBytes };
   }
 
+  /** Free native registry entry (buffers). Safe to call after waitUntilDone. */
+  async close(processId: string): Promise<{ closed: boolean }> {
+    this.tracked.delete(processId);
+    const r = await process.close(processId);
+    return { closed: r.closed };
+  }
+
   async terminate(
     processId: string,
     signal: 'sigterm' | 'sigint' | 'sigkill' = 'sigterm',
