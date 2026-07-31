@@ -3,7 +3,10 @@
 #include "app/config.hpp"
 #include "app/log.hpp"
 
+#include <ada.h>
+
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/cancel_after.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -22,6 +25,7 @@
 #include <filesystem>
 #include <format>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 namespace vacps::http {
@@ -54,6 +58,15 @@ http::verb parse_verb(std::string_view method) {
   return http::verb::unknown;
 }
 
+/** Host header: hostname, or hostname:port when non-default. */
+std::string host_header_value(const ParsedUrl& url) {
+  const bool default_port =
+      (url.scheme == "https" && url.port == "443") ||
+      (url.scheme == "http" && url.port == "80");
+  if (default_port) return url.host;
+  return url.host + ":" + url.port;
+}
+
 ssl::context make_tls_client_context(const std::string& ca_path) {
   ssl::context ctx{ssl::context::tls_client};
   ctx.set_options(
@@ -82,7 +95,7 @@ asio::awaitable<Result<ClientResponse>> do_http_exchange(
   }
 
   http::request<http::string_body> http_req{verb, url.target, 11};
-  http_req.set(http::field::host, url.host);
+  http_req.set(http::field::host, host_header_value(url));
   http_req.set(http::field::user_agent, "vacps-native");
   http_req.set(http::field::connection, "close");
   for (const auto& [k, v] : req.headers) {
@@ -100,22 +113,23 @@ asio::awaitable<Result<ClientResponse>> do_http_exchange(
     co_return std::unexpected(Error{std::format("http.request write: {}", wec.message())});
   }
 
+  // body_limit applies during async_read — not after a full unbounded read.
   beast::flat_buffer buffer;
-  http::response<http::string_body> res;
+  http::response_parser<http::string_body> parser;
+  parser.body_limit(req.max_response_bytes);
   auto [rec, rn] =
-      co_await http::async_read(stream, buffer, res, asio::as_tuple(asio::use_awaitable));
+      co_await http::async_read(stream, buffer, parser, asio::as_tuple(asio::use_awaitable));
   (void)rn;
+  if (rec == http::error::body_limit) {
+    co_return std::unexpected(Error{std::format(
+        "http.request: response body exceeds maxResponseBytes {}",
+        req.max_response_bytes)});
+  }
   if (rec) {
     co_return std::unexpected(Error{std::format("http.request read: {}", rec.message())});
   }
 
-  if (res.body().size() > req.max_response_bytes) {
-    co_return std::unexpected(Error{std::format(
-        "http.request: response body {} exceeds maxResponseBytes {}",
-        res.body().size(),
-        req.max_response_bytes)});
-  }
-
+  http::response<http::string_body> res = parser.release();
   ClientResponse out;
   out.status = static_cast<int>(res.result_int());
   out.body = std::move(res.body());
@@ -131,88 +145,53 @@ Result<ParsedUrl> parse_url(std::string_view url) {
   if (url.empty()) {
     return std::unexpected(Error{"http.request: empty url"});
   }
-  const auto scheme_end = url.find("://");
-  if (scheme_end == std::string_view::npos || scheme_end == 0) {
-    return std::unexpected(Error{"http.request: url must include scheme://"});
+
+  // WHATWG parse via Ada (same engine as JS global URL).
+  auto parsed = ada::parse<ada::url_aggregator>(url);
+  if (!parsed) {
+    return std::unexpected(Error{"http.request: invalid url"});
   }
-  ParsedUrl out;
-  out.scheme = std::string{url.substr(0, scheme_end)};
-  for (char& c : out.scheme) {
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+  // protocol is "https:" / "http:" (with trailing colon).
+  auto protocol = parsed->get_protocol();
+  std::string scheme;
+  scheme.reserve(protocol.size());
+  for (char c : protocol) {
+    if (c == ':') break;
+    scheme.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
   }
-  if (out.scheme != "http" && out.scheme != "https") {
+  if (scheme != "http" && scheme != "https") {
     return std::unexpected(Error{"http.request: only http and https schemes are supported"});
   }
 
-  auto rest = url.substr(scheme_end + 3);
-  if (rest.empty()) {
-    return std::unexpected(Error{"http.request: missing host"});
-  }
-  // No userinfo.
-  if (rest.find('@') != std::string_view::npos) {
+  // Reject credentials (agent outbound requests must not embed userinfo).
+  if (parsed->has_credentials()) {
     return std::unexpected(Error{"http.request: userinfo in url is not supported"});
   }
 
-  const auto path_pos = rest.find('/');
-  const auto query_pos = rest.find('?');
-  std::size_t hostport_end = rest.size();
-  if (path_pos != std::string_view::npos) {
-    hostport_end = path_pos;
-  } else if (query_pos != std::string_view::npos) {
-    hostport_end = query_pos;
-  }
-
-  auto hostport = rest.substr(0, hostport_end);
-  if (hostport.empty()) {
+  ParsedUrl out;
+  out.scheme = std::move(scheme);
+  out.host = std::string{parsed->get_hostname()};
+  if (out.host.empty()) {
     return std::unexpected(Error{"http.request: missing host"});
   }
 
-  // [ipv6]:port or host:port or host
-  if (hostport.front() == '[') {
-    const auto br = hostport.find(']');
-    if (br == std::string_view::npos) {
-      return std::unexpected(Error{"http.request: invalid IPv6 host"});
-    }
-    out.host = std::string{hostport.substr(1, br - 1)};
-    if (br + 1 < hostport.size()) {
-      if (hostport[br + 1] != ':') {
-        return std::unexpected(Error{"http.request: invalid host:port"});
-      }
-      out.port = std::string{hostport.substr(br + 2)};
-    }
-  } else {
-    const auto colon = hostport.rfind(':');
-    if (colon != std::string_view::npos) {
-      out.host = std::string{hostport.substr(0, colon)};
-      out.port = std::string{hostport.substr(colon + 1)};
-    } else {
-      out.host = std::string{hostport};
-    }
-  }
-  if (out.host.empty()) {
-    return std::unexpected(Error{"http.request: empty host"});
-  }
-  if (out.port.empty()) {
+  auto port_sv = parsed->get_port();
+  if (port_sv.empty()) {
     out.port = (out.scheme == "https") ? "443" : "80";
   } else {
-    auto pr = vacps::parse_port(out.port);
+    auto pr = vacps::parse_port(port_sv);
     if (!pr) {
       return std::unexpected(Error{"http.request: invalid port"});
     }
     out.port = std::to_string(*pr);
   }
 
-  if (path_pos != std::string_view::npos) {
-    out.target = std::string{rest.substr(path_pos)};
-  } else if (query_pos != std::string_view::npos) {
-    out.target = "/" + std::string{rest.substr(query_pos)};
-  } else {
-    out.target = "/";
-  }
-  // Strip fragment if present.
-  if (const auto hash = out.target.find('#'); hash != std::string::npos) {
-    out.target.resize(hash);
-  }
+  // path + query only (fragment must not be sent).
+  auto path = parsed->get_pathname();
+  auto search = parsed->get_search();  // includes leading '?' when present
+  out.target = path.empty() ? std::string{"/"} : std::string{path};
+  out.target.append(search);
   if (out.target.empty()) {
     out.target = "/";
   }
@@ -277,9 +256,15 @@ asio::awaitable<Result<ClientResponse>> async_request(ClientRequest req) {
     const auto timeout = std::chrono::milliseconds(
         req.timeout_ms > 0 ? req.timeout_ms : 30'000);
 
+    // DNS resolve is covered by the same wall budget (previously uncancellable).
     tcp::resolver resolver{executor};
     auto [rec, results] = co_await resolver.async_resolve(
-        url.host, url.port, asio::as_tuple(asio::use_awaitable));
+        url.host,
+        url.port,
+        asio::as_tuple(asio::cancel_after(timeout, asio::use_awaitable)));
+    if (rec == asio::error::operation_aborted) {
+      co_return std::unexpected(Error{"http.request resolve: timed out"});
+    }
     if (rec) {
       co_return std::unexpected(Error{std::format("http.request resolve: {}", rec.message())});
     }
