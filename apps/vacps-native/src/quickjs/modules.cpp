@@ -1089,7 +1089,8 @@ JSValue js_process_read(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
 }
 
 /**
- * process.write(id, data[, { close }]) → Promise<{ writtenBytes }>
+ * process.write(id, data[, { close, timeoutMs, maxBytes }]) → Promise<{ writtenBytes }>
+ * Async stdin write (async_write); never blocks the JS io_context on a full pipe.
  */
 JSValue js_process_write(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = host_from(ctx);
@@ -1099,12 +1100,22 @@ JSValue js_process_write(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
   if (!id) return throw_error(ctx, id.error());
   auto data = converter<std::string>::from_js(ctx, argv[1]);
   if (!data) return throw_error(ctx, data.error());
-  bool close = false;
+  vacps::process::WriteOptions opts;
   if (argc >= 3 && !is_nullish(argv[2])) {
     Value c = Value::get_property_str(ctx, argv[2], "close");
     if (!c.is_nullish()) {
       auto b = converter<bool>::from_js(ctx, c.get());
-      if (b) close = *b;
+      if (b) opts.close_stdin = *b;
+    }
+    Value t = Value::get_property_str(ctx, argv[2], "timeoutMs");
+    if (!t.is_nullish()) {
+      auto ms = converter<std::int32_t>::from_js(ctx, t.get());
+      if (ms && *ms >= 0) opts.timeout_ms = *ms;
+    }
+    Value m = Value::get_property_str(ctx, argv[2], "maxBytes");
+    if (!m.is_nullish()) {
+      auto n = converter<std::int32_t>::from_js(ctx, m.get());
+      if (n && *n > 0) opts.max_bytes = static_cast<std::size_t>(*n);
     }
   }
 
@@ -1114,8 +1125,9 @@ JSValue js_process_write(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
       [host_sp = host->shared_from_this(),
        id = std::move(*id),
        data = std::move(*data),
-       close](JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto result = host_sp->processes().write(id, data, close);
+       opts](JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto result =
+            co_await host_sp->processes().write(std::move(id), std::move(data), opts);
         if (!result) {
           bridge.reject(result.error());
         } else {
