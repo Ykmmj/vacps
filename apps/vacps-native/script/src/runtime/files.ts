@@ -1,5 +1,19 @@
 import * as crypto from 'vacps:crypto';
-import * as fs from 'vacps:fs';
+import {
+  File,
+  O_RDONLY,
+  O_WRONLY,
+  O_CREAT,
+  O_TRUNC,
+  exists,
+  mkdir,
+  readDirectory,
+  remove,
+  rename,
+  stat,
+  type DirEntry,
+  type FileStat,
+} from 'vacps:fs';
 import * as process from 'vacps:process';
 
 import {
@@ -64,13 +78,61 @@ function asUint8(buf: ArrayBuffer | Uint8Array): Uint8Array {
   return buf instanceof Uint8Array ? buf : new Uint8Array(buf);
 }
 
+// ── Product-local File helpers (open → read/write → close) ─
+
+async function readTextFile(path: string): Promise<string> {
+  const f = await File.open(path, O_RDONLY);
+  try {
+    return await f.readText();
+  } finally {
+    await f.close();
+  }
+}
+
+async function writeTextFile(path: string, content: string): Promise<void> {
+  const f = await File.open(path, O_WRONLY | O_CREAT | O_TRUNC);
+  try {
+    await f.writeText(content);
+  } finally {
+    await f.close();
+  }
+}
+
+async function readBytesFile(path: string): Promise<Uint8Array> {
+  const f = await File.open(path, O_RDONLY);
+  try {
+    return await f.read();
+  } finally {
+    await f.close();
+  }
+}
+
+async function readRangeFile(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
+  const f = await File.open(path, O_RDONLY);
+  try {
+    return await f.readAt(offset, maxBytes);
+  } finally {
+    await f.close();
+  }
+}
+
+async function hashFileBytes(path: string): Promise<{ sizeBytes: number; sha256Hex: string }> {
+  const f = await File.open(path, O_RDONLY);
+  try {
+    const bytes = await f.read();
+    return { sizeBytes: bytes.byteLength, sha256Hex: crypto.sha256Hex(bytes) };
+  } finally {
+    await f.close();
+  }
+}
+
 // ── Core CRUD ─────────────────────────────────────────────────────
 
 export async function filesStat(pathInput: string) {
   const path = assertSafeAbsolutePath(pathInput);
-  let st: Awaited<ReturnType<typeof fs.stat>>;
+  let st: FileStat;
   try {
-    st = await fs.stat(path);
+    st = await stat(path);
   } catch {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
@@ -78,7 +140,7 @@ export async function filesStat(pathInput: string) {
   let digest: string | null = null;
   if (st.type === 'file' && st.size <= 8 * 1024 * 1024) {
     try {
-      digest = crypto.sha256Hex(await fs.readBytes(path));
+      digest = crypto.sha256Hex(await readBytesFile(path));
     } catch {
       digest = null;
     }
@@ -118,18 +180,18 @@ export async function filesRead(input: {
     );
   }
 
-  if (!(await fs.exists(path))) {
+  if (!(await exists(path))) {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
 
-  // Streaming digest of full file; content loaded only for the requested window.
-  const digestInfo = await fs.hashFile(path);
+  // Digest of full file; content loaded only for the requested window.
+  const digestInfo = await hashFileBytes(path);
   const sizeBytes = digestInfo.sizeBytes;
   const digest = digestInfo.sha256Hex;
 
   if (encoding === 'base64') {
     const end = Math.min(maxBytes, sizeBytes);
-    const slice = asUint8(await fs.readRange(path, 0, end));
+    const slice = asUint8(await readRangeFile(path, 0, end));
     return {
       path,
       content: crypto.base64Encode(slice),
@@ -151,7 +213,7 @@ export async function filesRead(input: {
   if (input.startLine !== undefined || input.endLine !== undefined) {
     // Line selection still needs a text window; cap to avoid whole multi-GB files.
     const lineCap = Math.min(sizeBytes, 4 * 1024 * 1024);
-    const raw = asUint8(await fs.readRange(path, 0, lineCap));
+    const raw = asUint8(await readRangeFile(path, 0, lineCap));
     const fullText = utf8Decode(raw);
     const lines = fullText.split('\n');
     const from = Math.max(1, input.startLine ?? 1);
@@ -162,7 +224,7 @@ export async function filesRead(input: {
     content = truncateStringToUtf8Bytes(segment, maxBytes);
     truncated = utf8ByteLengthOfString(segment) > maxBytes || sizeBytes > lineCap;
   } else {
-    const raw = asUint8(await fs.readRange(path, 0, maxBytes));
+    const raw = asUint8(await readRangeFile(path, 0, maxBytes));
     const end = utf8PrefixEnd(raw, Math.min(maxBytes, raw.byteLength));
     content = utf8Decode(raw.subarray(0, end));
     truncated = sizeBytes > end;
@@ -192,15 +254,15 @@ export async function filesWrite(input: {
   expectedSha256?: string;
 }) {
   const path = assertSafeAbsolutePath(input.path);
-  const exists = await fs.exists(path);
-  if (input.mode === 'create' && exists) {
+  const pathExists = await exists(path);
+  if (input.mode === 'create' && pathExists) {
     throw runtimeError('Path already exists.', 'path_exists', 409);
   }
-  if (input.mode === 'overwrite' && !exists) {
+  if (input.mode === 'overwrite' && !pathExists) {
     throw runtimeError('Path not found.', 'path_not_found', 404);
   }
-  if (exists && input.expectedSha256) {
-    const current = crypto.sha256Hex(await fs.readText(path));
+  if (pathExists && input.expectedSha256) {
+    const current = crypto.sha256Hex(await readTextFile(path));
     if (normalizeHash(input.expectedSha256) !== current) {
       throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
         current_sha256: current,
@@ -210,13 +272,13 @@ export async function filesWrite(input: {
   if (input.createParentDirectories !== false) {
     const parent = dirname(path);
     if (parent && parent !== '/') {
-      await fs.mkdir(parent);
+      await mkdir(parent);
     }
   }
-  await fs.writeText(path, input.content);
+  await writeTextFile(path, input.content);
   return {
     path,
-    operation: exists ? 'overwritten' : 'created',
+    operation: pathExists ? 'overwritten' : 'created',
     size_bytes: utf8ByteLengthOfString(input.content),
     sha256: crypto.sha256Hex(input.content),
   };
@@ -229,13 +291,13 @@ export async function filesList(input: {
   cursor?: string;
 }) {
   const path = assertSafeAbsolutePath(input.path);
-  if (!(await fs.exists(path))) {
+  if (!(await exists(path))) {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
   const limit = clamp(input.limit ?? 200, 1, 2000);
   const includeHidden = input.includeHidden === true;
   const offset = decodeOffsetCursor(input.cursor);
-  const entries = await fs.list(path);
+  const entries = await readDirectory(path);
   const filtered = entries.filter((e) => includeHidden || !e.name.startsWith('.'));
   const slice = filtered.slice(offset, offset + limit);
   const nextOffset = offset + slice.length;
@@ -256,7 +318,7 @@ export async function filesList(input: {
 
 export async function filesMkdir(input: { path: string; recursive?: boolean }) {
   const path = assertSafeAbsolutePath(input.path);
-  await fs.mkdir(path);
+  await mkdir(path);
   return { path, operation: 'created', type: 'directory' };
 }
 
@@ -268,9 +330,9 @@ export async function filesDelete(input: {
   dryRun?: boolean;
 }) {
   const path = assertSafeAbsolutePath(input.path);
-  let st: Awaited<ReturnType<typeof fs.stat>>;
+  let st: FileStat;
   try {
-    st = await fs.stat(path);
+    st = await stat(path);
   } catch {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
@@ -279,7 +341,7 @@ export async function filesDelete(input: {
     throw runtimeError(`Expected ${input.expectedType} but found ${type}.`, 'type_mismatch', 409);
   }
   if (type === 'file' && input.expectedSha256) {
-    const current = crypto.sha256Hex(await fs.readBytes(path));
+    const current = crypto.sha256Hex(await readBytesFile(path));
     if (normalizeHash(input.expectedSha256) !== current) {
       throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
         current_sha256: current,
@@ -317,7 +379,7 @@ export async function filesDelete(input: {
   }
 
   if (type === 'directory' && !input.recursive) {
-    const entries = await fs.list(path);
+    const entries = await readDirectory(path);
     if (entries.length > 0) {
       throw runtimeError(
         'Directory is not empty; pass recursive=true to delete.',
@@ -327,7 +389,7 @@ export async function filesDelete(input: {
     }
   }
 
-  await fs.remove(path);
+  await remove(path);
   return { path, operation: 'deleted', dry_run: false, type };
 }
 
@@ -339,17 +401,17 @@ export async function filesMove(input: {
 }) {
   const from = assertSafeAbsolutePath(input.from);
   const to = assertSafeAbsolutePath(input.to);
-  if (!(await fs.exists(from))) {
+  if (!(await exists(from))) {
     throw runtimeError(`Path not found: ${from}`, 'path_not_found', 404);
   }
-  let fromSt: Awaited<ReturnType<typeof fs.stat>>;
+  let fromSt: FileStat;
   try {
-    fromSt = await fs.stat(from);
+    fromSt = await stat(from);
   } catch {
     throw runtimeError(`Path not found: ${from}`, 'path_not_found', 404);
   }
   if (fromSt.type === 'file' && input.expectedSha256) {
-    const current = crypto.sha256Hex(await fs.readBytes(from));
+    const current = crypto.sha256Hex(await readBytesFile(from));
     if (normalizeHash(input.expectedSha256) !== current) {
       throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
         current_sha256: current,
@@ -357,17 +419,17 @@ export async function filesMove(input: {
     }
   }
   const overwrite = input.overwrite === true;
-  if (!overwrite && (await fs.exists(to))) {
+  if (!overwrite && (await exists(to))) {
     throw runtimeError('Destination already exists.', 'path_exists', 409);
   }
   const parent = dirname(to);
   if (parent && parent !== '/') {
-    await fs.mkdir(parent);
+    await mkdir(parent);
   }
-  if (overwrite && (await fs.exists(to))) {
-    await fs.remove(to);
+  if (overwrite && (await exists(to))) {
+    await remove(to);
   }
-  await fs.rename(from, to);
+  await rename(from, to);
   return { from, to, operation: 'moved' };
 }
 
@@ -396,11 +458,11 @@ export async function filesGlob(input: {
     // rg respects .gitignore by default; --no-ignore disables it.
     if (!respectGitignore) args.push('--no-ignore');
     const listed = await process
-      .run(['/usr/bin/rg', ...args], {
+      .run('/usr/bin/rg', args, {
         cwd: root,
         timeoutMs: 30_000,
       })
-      .catch(async () => process.run(['rg', ...args], { cwd: root, timeoutMs: 30_000 }));
+      .catch(async () => process.run('rg', args, { cwd: root, timeoutMs: 30_000 }));
     if (listed.exitCode === 0 || listed.stdout) {
       const allLines = listed.stdout
         .split('\n')
@@ -483,8 +545,8 @@ export async function filesGrep(input: {
     if (input.filePattern) args.push('--glob', input.filePattern);
     args.push('--', input.pattern, target);
     const result = await process
-      .run(['/usr/bin/rg', ...args], { timeoutMs: 30_000 })
-      .catch(async () => process.run(['rg', ...args], { timeoutMs: 30_000 }));
+      .run('/usr/bin/rg', args, { timeoutMs: 30_000 })
+      .catch(async () => process.run('rg', args, { timeoutMs: 30_000 }));
     if (result.stdout) {
       // Collect all matches then page by cursor offset.
       const all = parseRgJson(result.stdout, 10_000, maxBytes * 4);
@@ -519,7 +581,7 @@ export async function filesGrep(input: {
     }
     let text: string;
     try {
-      text = await fs.readText(filePath);
+      text = await readTextFile(filePath);
     } catch {
       return;
     }
@@ -552,7 +614,7 @@ export async function filesGrep(input: {
   };
 
   try {
-    await fs.list(target);
+    await readDirectory(target);
     await walk(target, true, async (full, isDir) => {
       if (!isDir) await visitFile(full);
     });
@@ -582,7 +644,7 @@ export async function filesEdit(input: {
   expectedSha256?: string;
 }) {
   const path = assertSafeAbsolutePath(input.path);
-  const text = await fs.readText(path);
+  const text = await readTextFile(path);
   const beforeHash = crypto.sha256Hex(text);
   if (input.expectedSha256 && normalizeHash(input.expectedSha256) !== beforeHash) {
     throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
@@ -604,7 +666,7 @@ export async function filesEdit(input: {
   const next = input.replaceAll
     ? text.split(input.oldText).join(input.newText)
     : text.replace(input.oldText, input.newText);
-  await fs.writeText(path, next);
+  await writeTextFile(path, next);
   return {
     path,
     replacement_count: input.replaceAll ? count : 1,
@@ -637,34 +699,34 @@ export async function applyPatch(input: {
   try {
     for (const op of planned) {
       if (op.kind === 'add') {
-        if (await fs.exists(op.absolute)) {
+        if (await exists(op.absolute)) {
           throw runtimeError(`Cannot add existing file ${op.path}`, 'file_exists', 409);
         }
         if (!input.dryRun) {
-          await fs.mkdir(dirname(op.absolute));
-          await fs.writeText(op.absolute, op.content ?? '');
+          await mkdir(dirname(op.absolute));
+          await writeTextFile(op.absolute, op.content ?? '');
           backups.set(op.absolute, null);
         }
         results.push({ path: op.path, operation: 'add', dry_run: Boolean(input.dryRun) });
       } else if (op.kind === 'delete') {
-        if (!(await fs.exists(op.absolute))) {
+        if (!(await exists(op.absolute))) {
           throw runtimeError(`Cannot delete missing file ${op.path}`, 'path_not_found', 404);
         }
         if (!input.dryRun) {
-          const before = await fs.readText(op.absolute);
+          const before = await readTextFile(op.absolute);
           backups.set(op.absolute, before);
-          await fs.remove(op.absolute);
+          await remove(op.absolute);
         }
         results.push({ path: op.path, operation: 'delete', dry_run: Boolean(input.dryRun) });
       } else if (op.kind === 'update') {
-        if (!(await fs.exists(op.absolute))) {
+        if (!(await exists(op.absolute))) {
           throw runtimeError(`Cannot update missing file ${op.path}`, 'path_not_found', 404);
         }
-        const before = await fs.readText(op.absolute);
+        const before = await readTextFile(op.absolute);
         const after = applyHunks(before, op.hunks ?? []);
         if (!input.dryRun) {
           backups.set(op.absolute, before);
-          await fs.writeText(op.absolute, after);
+          await writeTextFile(op.absolute, after);
         }
         results.push({
           path: op.path,
@@ -679,8 +741,8 @@ export async function applyPatch(input: {
     if (input.atomic !== false && !input.dryRun) {
       for (const [path, content] of backups) {
         try {
-          if (content === null) await fs.remove(path);
-          else await fs.writeText(path, content);
+          if (content === null) await remove(path);
+          else await writeTextFile(path, content);
         } catch {
           /* best-effort rollback */
         }
@@ -701,7 +763,7 @@ export async function detectCapabilities() {
   let rgAvailable = false;
   let rgVersion: string | null = null;
   try {
-    const r = await process.run(['rg', '--version'], { timeoutMs: 3_000 });
+    const r = await process.run('rg', ['--version'], { timeoutMs: 3_000 });
     rgAvailable = r.exitCode === 0 || r.stdout.length > 0;
     if (rgAvailable) {
       rgVersion = (r.stdout.split('\n')[0] ?? '').trim() || null;
@@ -746,9 +808,9 @@ async function walk(
   depth = 0,
 ): Promise<void> {
   if (depth > 32) return;
-  let entries: Awaited<ReturnType<typeof fs.list>>;
+  let entries: DirEntry[];
   try {
-    entries = await fs.list(root);
+    entries = await readDirectory(root);
   } catch {
     return;
   }
@@ -829,7 +891,7 @@ function decodeOffsetCursor(cursor: string | undefined): number {
 /** Minimal .gitignore: bare patterns + leading / + trailing / + unanchored *.ext */
 async function loadGitignore(root: string): Promise<string[]> {
   try {
-    const text = await fs.readText(joinPath(root, '.gitignore'));
+    const text = await readTextFile(joinPath(root, '.gitignore'));
     return text
       .split('\n')
       .map((l) => l.trim())

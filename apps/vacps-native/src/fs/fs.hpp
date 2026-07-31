@@ -31,14 +31,15 @@ struct FileStat {
 };
 
 /**
- * Pure path resolution (no product policy).
+ * Pure path resolution (no product policy / no allowlist).
  *
  * - Empty path / embedded NUL → error (cannot open).
  * - Absolute: returned lexically normalized.
  * - Relative: joined under workspace_root, then lexically normalized.
  *
- * Product policy for vacps:fs JS module is PathSandbox (openat2 + allowlist)
- * in resolve_user_path. MCP tool paths also use JS `runtime/path-guard.ts`.
+ * Path allowlist (dataDir, /tmp, reject /proc, …) is JS only:
+ * `script/src/runtime/path-guard.ts` at MCP/tool boundaries.
+ * C++ vacps:fs is pure I/O.
  */
 [[nodiscard]] Result<std::filesystem::path> resolve_path(
     const std::filesystem::path& workspace_root,
@@ -50,29 +51,7 @@ struct FileStat {
   return resolve_path(root, user_path);
 }
 
-[[nodiscard]] Result<std::string> read_text(const std::filesystem::path& path);
-[[nodiscard]] Result<std::vector<std::uint8_t>> read_bytes(const std::filesystem::path& path);
-
-/**
- * Read at most `max_bytes` starting at `offset` (does not load the whole file).
- * Short read at EOF is success with smaller vector.
- */
-[[nodiscard]] Result<std::vector<std::uint8_t>> read_range(
-    const std::filesystem::path& path,
-    std::uint64_t offset,
-    std::size_t max_bytes);
-
-/** Streaming SHA-256 over the full file without buffering all content. */
-struct FileDigest {
-  std::uint64_t size_bytes{0};
-  std::string sha256_hex;
-};
-[[nodiscard]] Result<FileDigest> hash_file(const std::filesystem::path& path);
-[[nodiscard]] VoidResult write_text(const std::filesystem::path& path, std::string_view data);
-[[nodiscard]] VoidResult write_bytes(
-    const std::filesystem::path& path,
-    const std::vector<std::uint8_t>& data);
-[[nodiscard]] VoidResult append_text(const std::filesystem::path& path, std::string_view data);
+// Namespace / path ops (content I/O is File).
 [[nodiscard]] VoidResult mkdir_p(const std::filesystem::path& path);
 [[nodiscard]] bool exists(const std::filesystem::path& path);
 [[nodiscard]] VoidResult remove_path(const std::filesystem::path& path);

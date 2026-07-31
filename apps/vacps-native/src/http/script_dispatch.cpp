@@ -1,20 +1,20 @@
 #include "http/script_dispatch.hpp"
 
-#include "quickjs/atom.hpp"
-#include "quickjs/convert.hpp"
-#include "quickjs/value.hpp"
+#include "quickjs/raii/atom.hpp"
+#include "quickjs/raii/convert.hpp"
+#include "quickjs/raii/value.hpp"
 
 #include <quickjs.h>
 
 namespace vacps::http {
 
-asio::awaitable<Result<ScriptHttpResponse>> dispatch_to_script(
-    vacps::js::Host& host,
-    ScriptHttpRequest req) {
-  if (!host.script_ready()) {
+asio::awaitable<Result<HttpResponse>> dispatch_to_script(
+    vacps::js::ScriptRuntime& runtime,
+    HttpRequest req) {
+  if (!runtime.script_ready()) {
     co_return std::unexpected(Error{"business script not ready"});
   }
-  auto* ctx = host.context().get();
+  auto* ctx = runtime.context().get();
   if (ctx == nullptr) {
     co_return std::unexpected(Error{"no js context"});
   }
@@ -24,7 +24,7 @@ asio::awaitable<Result<ScriptHttpResponse>> dispatch_to_script(
 
   auto obj = Value::new_object(ctx);
   if (obj.is_exception()) {
-    co_return std::unexpected(host.context().take_exception_error());
+    co_return std::unexpected(runtime.context().take_exception_error());
   }
   obj.set_property_str("method", Value::new_string(ctx, req.method));
   obj.set_property_str("path", Value::new_string(ctx, req.path));
@@ -39,7 +39,7 @@ asio::awaitable<Result<ScriptHttpResponse>> dispatch_to_script(
   obj.set_property_str("headers", std::move(headers));
 
   JSValueConst argv[1] = {obj.get()};
-  auto ret = co_await host.invoke_export("handleRequest", 1, argv);
+  auto ret = co_await runtime.invoke_export("handleRequest", 1, argv);
   // obj still owned until end of scope after invoke (argv borrows)
   if (!ret) {
     co_return std::unexpected(std::move(ret.error()));
@@ -49,7 +49,7 @@ asio::awaitable<Result<ScriptHttpResponse>> dispatch_to_script(
     co_return std::unexpected(Error{"handleRequest must return an object"});
   }
 
-  ScriptHttpResponse out;
+  HttpResponse out;
   {
     Value st = Value::get_property_str(ctx, ret->get(), "status");
     if (st.is_nullish()) {

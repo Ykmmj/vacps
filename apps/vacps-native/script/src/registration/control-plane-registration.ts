@@ -122,24 +122,3 @@ export async function reportTelemetry(
   }
   return undefined;
 }
-
-/** @deprecated Prefer NativeTelemetryCollector.collect() — kept for tests. */
-export function collectNativeStatus(config: AgentConfig): BackendStatus {
-  const version = host.version().slice(0, 48) || '0.1.0';
-  return {
-    health: {
-      ok: true,
-      backendId: config.BACKEND_ID,
-      version,
-      uptimeSeconds: 0,
-      worker: { running: true, concurrency: 1 },
-      redis: { connected: false },
-      pi: { available: false },
-    },
-    system: {
-      platform: 'linux',
-      kernel: 'unknown',
-      architecture: 'x86_64',
-    },
-  };
-}

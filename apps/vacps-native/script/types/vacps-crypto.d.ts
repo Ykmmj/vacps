@@ -1,16 +1,24 @@
+/**
+ * vacps:crypto — stateless OpenSSL helpers.
+ *
+ * BinaryInput: string | ArrayBuffer | Uint8Array for message/key inputs.
+ * Byte-returning APIs yield ArrayBuffer (binding uses JS_NewArrayBufferCopy).
+ */
 declare module 'vacps:crypto' {
+  export type BinaryInput = string | ArrayBuffer | Uint8Array;
+
   export function randomBytes(n: number): ArrayBuffer;
-  export function sha256(data: string | ArrayBuffer | Uint8Array): ArrayBuffer;
-  export function sha256Hex(data: string | ArrayBuffer | Uint8Array): string;
+  export function sha256(data: BinaryInput): ArrayBuffer;
+  export function sha256Hex(data: BinaryInput): string;
   export function toHex(bytes: ArrayBuffer | Uint8Array): string;
   export function fromHex(hex: string): ArrayBuffer;
 
   /** Standard Base64 (OpenSSL EVP_EncodeBlock), with `=` padding. */
-  export function base64Encode(data: string | ArrayBuffer | Uint8Array): string;
+  export function base64Encode(data: BinaryInput): string;
   export function base64Decode(s: string): ArrayBuffer;
 
   /** Base64url (RFC 4648 §5): `-_`, no padding on encode. */
-  export function base64UrlEncode(data: string | ArrayBuffer | Uint8Array): string;
+  export function base64UrlEncode(data: BinaryInput): string;
   export function base64UrlDecode(s: string): ArrayBuffer;
 
   /**
@@ -23,11 +31,11 @@ declare module 'vacps:crypto' {
   export function ed25519PublicFromPrivate(privateKey: ArrayBuffer | Uint8Array): ArrayBuffer;
   export function ed25519Sign(
     privateKey: ArrayBuffer | Uint8Array,
-    message: string | ArrayBuffer | Uint8Array,
+    message: BinaryInput,
   ): ArrayBuffer;
   export function ed25519Verify(
     publicKey: ArrayBuffer | Uint8Array,
-    message: string | ArrayBuffer | Uint8Array,
+    message: BinaryInput,
     signature: ArrayBuffer | Uint8Array,
   ): boolean;
 }

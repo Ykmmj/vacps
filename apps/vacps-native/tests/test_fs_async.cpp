@@ -1,5 +1,6 @@
 #include "fs/async.hpp"
-#include "fs/io_uring_probe.hpp"
+#include "fs/file.hpp"
+#include "fs/open_options.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -17,6 +18,9 @@
 
 namespace asio = boost::asio;
 namespace fs = std::filesystem;
+using vacps::Result;
+using vacps::VoidResult;
+using vacps::fs::Flags;
 
 namespace {
 
@@ -36,6 +40,38 @@ auto sync_await(Awaitable aw) {
   return std::move(*out);
 }
 
+asio::awaitable<VoidResult> async_write_text_via_file(
+    vacps::fs::AsyncOptions opts,
+    fs::path path,
+    std::string data,
+    bool append = false) {
+  vacps::fs::OpenOptions o;
+  o.flags = append
+                ? (Flags::write_only | Flags::create | Flags::append)
+                : (Flags::write_only | Flags::create | Flags::truncate);
+  auto opened = co_await vacps::fs::File::async_open(
+      opts, path.string(), o, path.parent_path());
+  if (!opened) co_return std::unexpected(std::move(opened.error()));
+  auto n = co_await (*opened)->async_write_text(std::move(data));
+  if (!n) co_return std::unexpected(std::move(n.error()));
+  co_return co_await (*opened)->async_close();
+}
+
+asio::awaitable<Result<std::string>> async_read_text_via_file(
+    vacps::fs::AsyncOptions opts,
+    fs::path path) {
+  vacps::fs::OpenOptions o;
+  o.flags = Flags::read_only;
+  auto opened = co_await vacps::fs::File::async_open(
+      opts, path.string(), o, path.parent_path());
+  if (!opened) co_return std::unexpected(std::move(opened.error()));
+  auto text = co_await (*opened)->async_read_text();
+  if (!text) co_return std::unexpected(std::move(text.error()));
+  auto closed = co_await (*opened)->async_close();
+  if (!closed) co_return std::unexpected(std::move(closed.error()));
+  co_return *text;
+}
+
 }  // namespace
 
 class FsAsyncTest : public ::testing::Test {
@@ -52,43 +88,24 @@ class FsAsyncTest : public ::testing::Test {
     fs::remove_all(root_, ec);
   }
 
-  vacps::fs::AsyncOptions opts(bool stream = false) {
-    return vacps::fs::AsyncOptions{pool_, stream};
-  }
+  vacps::fs::AsyncOptions opts() { return vacps::fs::AsyncOptions{pool_}; }
 
   fs::path root_;
   asio::thread_pool pool_{2};
 };
 
-TEST_F(FsAsyncTest, ProbeDoesNotCrash) {
-  // Result depends on seccomp/kernel; both true and false are valid.
-  (void)vacps::fs::probe_io_uring();
-}
-
 TEST_F(FsAsyncTest, WriteReadTextRoundTripPool) {
   const auto path = root_ / "a.txt";
   auto w = sync_await(
-      vacps::fs::async_write_text(opts(false), path, std::string{"hello-async"}));
+      async_write_text_via_file(opts(), path, std::string{"hello-async"}));
   ASSERT_TRUE(w) << w.error().message;
 
-  auto r = sync_await(vacps::fs::async_read_text(opts(false), path));
+  auto r = sync_await(async_read_text_via_file(opts(), path));
   ASSERT_TRUE(r) << r.error().message;
   EXPECT_EQ(*r, "hello-async");
 
-  auto ex = sync_await(vacps::fs::async_exists(opts(false), path));
+  auto ex = sync_await(vacps::fs::async_exists(opts(), path));
   EXPECT_TRUE(ex);
-}
-
-TEST_F(FsAsyncTest, WriteReadViaProbeBackend) {
-  // If probe ok, exercise stream_file path; else same as pool (must not hang).
-  const bool stream = vacps::fs::probe_io_uring();
-  const auto path = root_ / "probe.txt";
-  auto w = sync_await(
-      vacps::fs::async_write_text(opts(stream), path, std::string{"via-probe"}));
-  ASSERT_TRUE(w) << w.error().message;
-  auto r = sync_await(vacps::fs::async_read_text(opts(stream), path));
-  ASSERT_TRUE(r) << r.error().message;
-  EXPECT_EQ(*r, "via-probe");
 }
 
 TEST_F(FsAsyncTest, AppendListRemove) {
@@ -97,10 +114,12 @@ TEST_F(FsAsyncTest, AppendListRemove) {
   ASSERT_TRUE(m) << m.error().message;
 
   const auto path = dir / "b.txt";
-  ASSERT_TRUE(sync_await(vacps::fs::async_write_text(opts(), path, std::string{"x"})));
-  ASSERT_TRUE(sync_await(vacps::fs::async_append_text(opts(), path, std::string{"y"})));
+  ASSERT_TRUE(sync_await(
+      async_write_text_via_file(opts(), path, std::string{"x"})));
+  ASSERT_TRUE(sync_await(
+      async_write_text_via_file(opts(), path, std::string{"y"}, true)));
 
-  auto text = sync_await(vacps::fs::async_read_text(opts(), path));
+  auto text = sync_await(async_read_text_via_file(opts(), path));
   ASSERT_TRUE(text);
   EXPECT_EQ(*text, "xy");
 
@@ -117,10 +136,11 @@ TEST_F(FsAsyncTest, AppendListRemove) {
 TEST_F(FsAsyncTest, Rename) {
   const auto from = root_ / "old.txt";
   const auto to = root_ / "new.txt";
-  ASSERT_TRUE(sync_await(vacps::fs::async_write_text(opts(), from, std::string{"z"})));
+  ASSERT_TRUE(sync_await(
+      async_write_text_via_file(opts(), from, std::string{"z"})));
   ASSERT_TRUE(sync_await(vacps::fs::async_rename(opts(), from, to)));
   EXPECT_FALSE(sync_await(vacps::fs::async_exists(opts(), from)));
-  auto r = sync_await(vacps::fs::async_read_text(opts(), to));
+  auto r = sync_await(async_read_text_via_file(opts(), to));
   ASSERT_TRUE(r);
   EXPECT_EQ(*r, "z");
 }

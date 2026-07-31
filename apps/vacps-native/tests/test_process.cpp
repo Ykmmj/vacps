@@ -19,15 +19,28 @@ namespace asio = boost::asio;
 
 namespace {
 
+/** One-shot: Process construct → start → wait → close (n1 run() path). */
 vacps::Result<vacps::process::RunResult> sync_run(
     std::vector<std::string> argv,
-    vacps::process::RunOptions opts = {}) {
+    vacps::process::StartOptions opts = {}) {
+  opts.close_stdin = true;
   std::optional<vacps::Result<vacps::process::RunResult>> out;
   asio::io_context ioc{1};
+  vacps::process::RegistryLimits lim;
+  lim.retention_ms = 0;
+  vacps::process::Registry reg(ioc.get_executor(), lim);
   asio::co_spawn(
       ioc,
       [&]() -> asio::awaitable<void> {
-        out = co_await vacps::process::async_run(std::move(argv), std::move(opts));
+        vacps::process::Process proc(reg, std::move(argv), opts);
+        auto started = co_await proc.start();
+        if (!started) {
+          out = std::unexpected(std::move(started.error()));
+          co_return;
+        }
+        auto waited = co_await proc.wait();
+        (void)proc.close();
+        out = std::move(waited);
         co_return;
       },
       asio::detached);
@@ -68,7 +81,7 @@ TEST(ProcessTest, EmptyCommandFails) {
 }
 
 TEST(ProcessTest, TimeoutKillsSleep) {
-  vacps::process::RunOptions opts;
+  vacps::process::StartOptions opts;
   opts.timeout_ms = 200;
   const auto t0 = std::chrono::steady_clock::now();
   auto r = sync_run({"/bin/sleep", "10"}, opts);
@@ -79,7 +92,7 @@ TEST(ProcessTest, TimeoutKillsSleep) {
 }
 
 TEST(ProcessTest, TimeoutNotHitOnFastCommand) {
-  vacps::process::RunOptions opts;
+  vacps::process::StartOptions opts;
   opts.timeout_ms = 5000;
   auto r = sync_run({"/bin/true"}, opts);
   ASSERT_TRUE(r) << r.error().message;
@@ -95,8 +108,8 @@ TEST(ProcessTest, CaptureStderr) {
 }
 
 TEST(ProcessTest, RunStdoutHardCapTruncates) {
-  vacps::process::RunOptions opts;
-  opts.max_stdout_bytes = 16;
+  vacps::process::StartOptions opts;
+  opts.hard_max_stdout = 16;
   // ~100 bytes of 'x'
   auto r = sync_run({"/bin/sh", "-c", "printf '%0100d' 0 | tr '0' 'x'"}, opts);
   ASSERT_TRUE(r) << r.error().message;
@@ -107,7 +120,7 @@ TEST(ProcessTest, RunStdoutHardCapTruncates) {
 }
 
 TEST(ProcessTest, ExitCodeNineIsNotTimeout) {
-  // Programs may legitimately exit with status 9; only cancel_after sets timed_out.
+  // Programs may legitimately exit with status 9; only timeout timer sets timed_out.
   auto r = sync_run({"/bin/sh", "-c", "exit 9"});
   ASSERT_TRUE(r) << r.error().message;
   EXPECT_EQ(r->exit_code, 9);
@@ -116,10 +129,9 @@ TEST(ProcessTest, ExitCodeNineIsNotTimeout) {
 
 // Design §19.2: timeout must kill process group (shell grandchildren), not just /bin/sh.
 TEST(ProcessTest, TimeoutKillsProcessGroup) {
-  vacps::process::RunOptions opts;
+  vacps::process::StartOptions opts;
   opts.timeout_ms = 300;
-  // Marker file written by grandchild; if group kill works, sleep dies and never leaves
-  // a long-running orphan (we only assert timed_out + quick return).
+  // If group kill works, sleep children die and wait returns quickly with timed_out.
   const auto t0 = std::chrono::steady_clock::now();
   auto r = sync_run(
       {"/bin/sh",

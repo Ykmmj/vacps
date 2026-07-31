@@ -1,10 +1,10 @@
 #pragma once
 
-#include "storage/db.hpp"
+#include "storage/database.hpp"
 #include "app/error.hpp"
-#include "quickjs/convert.hpp"
-#include "quickjs/cstring.hpp"
-#include "quickjs/value.hpp"
+#include "quickjs/raii/convert.hpp"
+#include "quickjs/raii/cstring.hpp"
+#include "quickjs/raii/value.hpp"
 
 #include <quickjs.h>
 
@@ -16,6 +16,14 @@
 #include <vector>
 
 namespace vacps::js {
+
+using storage::SqlValue;
+using storage::QueryResult;
+using storage::sql_null;
+using storage::sql_int;
+using storage::sql_real;
+using storage::sql_text;
+using storage::sql_blob;
 
 inline JSValue throw_msg(JSContext* ctx, const char* msg) {
   return JS_ThrowInternalError(ctx, "%s", msg);

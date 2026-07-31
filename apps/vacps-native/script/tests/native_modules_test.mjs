@@ -1,13 +1,13 @@
 /**
- * Integration tests for C++ vacps:* modules (runs inside QuickJS Host, not Node).
- * Loaded by tests/test_js_native_api.cpp via Host::eval_module + await_value.
+ * Integration tests for C++ vacps:* modules (runs inside QuickJS ScriptRuntime, not Node).
+ * Loaded by tests/test_js_native_api.cpp via ScriptRuntime::eval_module + await_value.
  *
  * On success: top-level await completes and default export is true.
  * On failure: throws Error (Promise rejects → C++ test fails).
  */
 import * as log from 'vacps:log';
 import * as host from 'vacps:host';
-import * as store from 'vacps:store';
+import { Store } from 'vacps:store';
 import * as fs from 'vacps:fs';
 import * as crypto from 'vacps:crypto';
 import * as process from 'vacps:process';
@@ -90,8 +90,9 @@ await test('log levels + flush', () => {
 
 await test('store open/exec/run/query/close', async () => {
   const path = host.dataDir() + '/js_api_store.db';
-  const db = await store.open(path);
-  assertEq(db.path(), path, 'path()');
+  const db = await Store.open(path);
+  assertEq(db.path, path, 'path');
+  assert(db.closed === false, 'closed=false when open');
   await db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, n REAL);');
   const r = await db.run('INSERT INTO t(name, n) VALUES(?, ?);', ['alice', 1.5]);
   assert(r.changes === 1, 'changes=1');
@@ -101,42 +102,100 @@ await test('store open/exec/run/query/close', async () => {
   assertEq(rows[0].name, 'alice', 'name');
   assert(rows[0].n === 1.5 || rows[0].n === 1, 'n numeric');
   await db.close();
+  assert(db.closed === true, 'closed=true after close');
 });
 
-await test('store transaction rollback', async () => {
-  const db = await store.open(host.dataDir() + '/js_api_tx.db');
+await test('store transaction rollback on expectedChanges miss', async () => {
+  const db = await Store.open(host.dataDir() + '/js_api_tx.db');
   await db.exec('CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT);');
   await db.run('INSERT INTO u(v) VALUES(?);', ['keep']);
-  await db.begin();
-  await db.run('INSERT INTO u(v) VALUES(?);', ['drop']);
-  await db.rollback();
+  // Second step expectedChanges miss → whole txn rolls back (no begin/commit/rollback API).
+  let rejected = false;
+  try {
+    await db.transaction([
+      { sql: 'INSERT INTO u(v) VALUES(?);', params: ['drop'] },
+      {
+        sql: 'INSERT INTO u(v) VALUES(?);',
+        params: ['drop2'],
+        expectedChanges: { exactly: 99 },
+      },
+    ]);
+  } catch {
+    rejected = true;
+  }
+  assert(rejected, 'transaction must reject on expectedChanges miss');
   const rows = await db.query('SELECT v FROM u;');
   assertEq(rows.length, 1, 'only keep');
   assertEq(rows[0].v, 'keep', 'value');
   await db.close();
 });
 
-// ── vacps:fs ──────────────────────────────────────────────────────
+// ── vacps:fs (File.open + namespace ops only) ──────────────────────
 
-await test('fs write/read/append/exists/list/rename/remove', async () => {
+async function readTextFile(path) {
+  const f = await fs.File.open(path, fs.O_RDONLY);
+  try {
+    return await f.readText();
+  } finally {
+    await f.close();
+  }
+}
+
+async function writeTextFile(path, content) {
+  const f = await fs.File.open(path, fs.O_WRONLY | fs.O_CREAT | fs.O_TRUNC);
+  try {
+    await f.writeText(content);
+  } finally {
+    await f.close();
+  }
+}
+
+async function appendTextFile(path, content) {
+  const f = await fs.File.open(path, fs.O_WRONLY | fs.O_CREAT | fs.O_APPEND);
+  try {
+    await f.writeText(content);
+  } finally {
+    await f.close();
+  }
+}
+
+async function readBytesFile(path) {
+  const f = await fs.File.open(path, fs.O_RDONLY);
+  try {
+    return await f.read();
+  } finally {
+    await f.close();
+  }
+}
+
+async function writeBytesFile(path, data) {
+  const f = await fs.File.open(path, fs.O_WRONLY | fs.O_CREAT | fs.O_TRUNC);
+  try {
+    await f.write(data);
+  } finally {
+    await f.close();
+  }
+}
+
+await test('fs File write/read/append/exists/readDirectory/rename/remove', async () => {
   await fs.mkdir('js_api/fs');
-  await fs.writeText('js_api/fs/a.txt', 'hello');
-  assertEq(await fs.readText('js_api/fs/a.txt'), 'hello', 'readText');
-  await fs.appendText('js_api/fs/a.txt', '-world');
-  assertEq(await fs.readText('js_api/fs/a.txt'), 'hello-world', 'append');
+  await writeTextFile('js_api/fs/a.txt', 'hello');
+  assertEq(await readTextFile('js_api/fs/a.txt'), 'hello', 'readText');
+  await appendTextFile('js_api/fs/a.txt', '-world');
+  assertEq(await readTextFile('js_api/fs/a.txt'), 'hello-world', 'append');
   assert(await fs.exists('js_api/fs/a.txt'), 'exists');
 
-  const bytes = await fs.readBytes('js_api/fs/a.txt');
+  const bytes = await readBytesFile('js_api/fs/a.txt');
   assert(abLen(bytes) === 'hello-world'.length, 'readBytes length');
 
-  await fs.writeBytes('js_api/fs/b.bin', new Uint8Array([1, 2, 3, 4]));
-  const b2 = await fs.readBytes('js_api/fs/b.bin');
+  await writeBytesFile('js_api/fs/b.bin', new Uint8Array([1, 2, 3, 4]));
+  const b2 = await readBytesFile('js_api/fs/b.bin');
   assert(abLen(b2) === 4, 'writeBytes/readBytes');
 
-  const entries = await fs.list('js_api/fs');
-  assert(Array.isArray(entries) && entries.length >= 2, 'list');
+  const entries = await fs.readDirectory('js_api/fs');
+  assert(Array.isArray(entries) && entries.length >= 2, 'readDirectory');
   const names = entries.map((e) => e.name).sort();
-  assert(names.includes('a.txt') && names.includes('b.bin'), 'list names');
+  assert(names.includes('a.txt') && names.includes('b.bin'), 'readDirectory names');
 
   await fs.rename('js_api/fs/a.txt', 'js_api/fs/c.txt');
   assert(!(await fs.exists('js_api/fs/a.txt')), 'renamed away');
@@ -146,23 +205,12 @@ await test('fs write/read/append/exists/list/rename/remove', async () => {
   assert(!(await fs.exists('js_api/fs/c.txt')), 'removed');
 });
 
-// PathSandbox rejects kernel fs and paths outside dataDir+/tmp allowlist.
-await test('fs sandbox rejects /proc and /etc', async () => {
-  let procDenied = false;
-  try {
-    await fs.readText('/proc/self/status');
-  } catch {
-    procDenied = true;
-  }
-  assert(procDenied, 'read /proc must fail under PathSandbox');
-
-  let etcDenied = false;
-  try {
-    await fs.readText('/etc/passwd');
-  } catch {
-    etcDenied = true;
-  }
-  assert(etcDenied, 'read /etc/passwd must fail under PathSandbox');
+// Path allowlist is JS path-guard.ts at tool boundaries — not C++ vacps:fs.
+// Pure I/O: relative paths under dataDir; absolute paths open as given.
+await test('fs pure I/O relative under dataDir', async () => {
+  await writeTextFile('js_api/fs/pure.txt', 'pure');
+  assertEq(await readTextFile('js_api/fs/pure.txt'), 'pure', 'relative pure I/O');
+  await fs.remove('js_api/fs/pure.txt');
 });
 
 // ── vacps:crypto ──────────────────────────────────────────────────
@@ -218,38 +266,47 @@ await test('crypto.ed25519SeedFromPrivateKey raw', () => {
 // ── vacps:process ─────────────────────────────────────────────────
 
 await test('process.run /bin/true', async () => {
-  const r = await process.run(['/bin/true']);
+  const r = await process.run('/bin/true');
   assertEq(r.exitCode, 0, 'exit 0');
   assert(r.timedOut === false, 'not timed out');
 });
 
 await test('process.run /bin/false', async () => {
-  const r = await process.run(['/bin/false']);
+  const r = await process.run('/bin/false');
   assert(r.exitCode !== 0, 'non-zero');
 });
 
 await test('process.run capture stdout', async () => {
-  const r = await process.run(['/bin/echo', 'vacps-js-hi']);
+  const r = await process.run('/bin/echo', ['vacps-js-hi']);
   assertEq(r.exitCode, 0, 'echo exit');
   assert(String(r.stdout).includes('vacps-js-hi'), 'stdout');
 });
 
 await test('process.run timeout', async () => {
-  const r = await process.run(['/bin/sleep', '5'], { timeoutMs: 200 });
+  const r = await process.run('/bin/sleep', ['5'], { timeoutMs: 200 });
   assert(r.timedOut === true, 'timedOut');
+});
+
+await test('Process class start/wait/close', async () => {
+  const p = new process.Process('/bin/echo', ['vacps-proc-class']);
+  await p.start();
+  const r = await p.wait();
+  assertEq(r.exitCode, 0, 'Process.wait exit');
+  assert(String(r.stdout).includes('vacps-proc-class'), 'Process stdout');
+  await p.close();
 });
 
 // ── vacps:http ────────────────────────────────────────────────────
 
-await test('http.createServer listen/close', () => {
+await test('http.Server listen/close', async () => {
   // Use a high ephemeral-ish port from nowMs to avoid clashes in parallel tests.
   const port = 20000 + (host.nowMs() % 20000);
-  const server = http.createServer({ host: '127.0.0.1', port });
-  assert(server.isListening() === false, 'not listening yet');
-  server.listen();
-  assert(server.isListening() === true, 'listening');
-  server.close();
-  assert(server.isListening() === false, 'closed');
+  const server = new http.Server({ host: '127.0.0.1', port });
+  assert(server.listening === false, 'not listening yet');
+  await server.listen();
+  assert(server.listening === true, 'listening');
+  await server.close();
+  assert(server.listening === false, 'closed');
 });
 
 await test('http.request rejects bad url', async () => {

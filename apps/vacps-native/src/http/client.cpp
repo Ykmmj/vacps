@@ -21,7 +21,6 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <optional>
@@ -212,15 +211,14 @@ Result<std::string> resolve_ca_bundle(std::string_view explicit_path) {
     return std::nullopt;
   };
 
-  if (auto p = try_path(explicit_path)) {
-    return *p;
-  }
-  if (const char* env = std::getenv("VACPS_CA_BUNDLE"); env != nullptr && env[0] != '\0') {
-    if (auto p = try_path(env)) {
+  // explicit_path is injected from ScriptServices.ca_bundle (bootstrap only).
+  // Do not call getenv here — post-bootstrap product code uses injected config.
+  if (!explicit_path.empty()) {
+    if (auto p = try_path(explicit_path)) {
       return *p;
     }
-    return std::unexpected(
-        Error{std::format("http.request: VACPS_CA_BUNDLE not a file: {}", env)});
+    return std::unexpected(Error{
+        std::format("http.request: CA bundle not a file: {}", explicit_path)});
   }
   static constexpr const char* kDefaults[] = {
       "/etc/vacps/ca-bundle.pem",

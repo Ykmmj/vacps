@@ -1,25 +1,31 @@
+/**
+ * vacps:http — inbound Server + outbound request (create-at-JS-call).
+ *
+ * Final API: class Server(options), listening, listen()/close() → Promise;
+ * namespace request().
+ */
 declare module 'vacps:http' {
   export interface ServerOptions {
     readonly host?: string;
-    readonly port?: number;
+    /** Required. Bind port in range 1–65535. */
+    readonly port: number;
   }
 
   /**
    * Inbound HTTP transport (Asio/Beast). JS owns the instance.
    * Product routes stay in handleRequest — Server has zero business routes.
+   *
+   * Constructor only stores config; bind happens in listen().
    */
-  export interface Server {
-    listen(): void;
-    close(): void;
-    isListening(): boolean;
-  }
+  export class Server {
+    constructor(options: ServerOptions);
 
-  /**
-   * Factory: create an inbound server.
-   * Defaults: host=127.0.0.1, port=8788 when options omitted.
-   * Agent bind policy lives in JS loadConfig (LISTEN_HOST/PORT); pass them explicitly.
-   */
-  export function createServer(options?: ServerOptions): Server;
+    /** True while accepting connections. */
+    readonly listening: boolean;
+
+    listen(): Promise<void>;
+    close(): Promise<void>;
+  }
 
   // ── Outbound client (HTTP/HTTPS) ────────────────────────────────
 
@@ -34,6 +40,9 @@ declare module 'vacps:http' {
     /** Default 8 MiB. */
     readonly maxResponseBytes?: number;
   }
+
+  /** Design alias. */
+  export type HttpRequestOptions = HttpRequest;
 
   export interface HttpResponse {
     readonly status: number;

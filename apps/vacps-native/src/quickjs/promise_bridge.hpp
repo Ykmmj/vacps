@@ -16,10 +16,10 @@
  */
 
 #include "app/error.hpp"
-#include "quickjs/convert.hpp"
-#include "quickjs/host.hpp"
+#include "quickjs/raii/convert.hpp"
+#include "quickjs/script_runtime.hpp"
 #include "quickjs/js_bridge.hpp"
-#include "quickjs/value.hpp"
+#include "quickjs/raii/value.hpp"
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -116,12 +116,12 @@ class PromiseBridge {
  *
  * work should call bridge.resolve / reject with Result-style control flow.
  * Uncaught C++ exceptions become reject (if not yet settled).
- * Scope exit always calls Host::notify_progress().
+ * Scope exit always calls ScriptRuntime::notify_progress().
  */
 template <class Work>
-JSValue spawn_js_promise(JSContext* ctx, Host* host, Work work) {
+JSValue spawn_js_promise(JSContext* ctx, ScriptRuntime* host, Work work) {
   if (host == nullptr) {
-    return JS_ThrowInternalError(ctx, "spawn_js_promise: host not wired");
+    return JS_ThrowInternalError(ctx, "spawn_js_promise: runtime not wired");
   }
 
   JSValue resolving[2];
@@ -146,7 +146,7 @@ JSValue spawn_js_promise(JSContext* ctx, Host* host, Work work) {
         // Unconditional wake of await_settled — even if settle JS_Call fails.
         // async_op_end pairs with async_op_begin in spawn_js_promise.
         struct NotifyGuard {
-          std::shared_ptr<Host> host;
+          std::shared_ptr<ScriptRuntime> host;
           ~NotifyGuard() {
             if (host) {
               host->async_op_end();

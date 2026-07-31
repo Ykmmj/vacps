@@ -19,7 +19,7 @@ bool probe_io_uring() noexcept {
   int rc = ::io_uring_queue_init(8, &ring, 0);
   if (rc < 0) {
     log::info(
-        "io_uring probe: setup failed ({}) — vacps:fs content uses thread_pool",
+        "io_uring probe: setup failed ({}) — vacps:fs File uses thread_pool",
         std::strerror(-rc));
     return false;
   }
@@ -38,7 +38,7 @@ bool probe_io_uring() noexcept {
 
   rc = ::io_uring_submit(&ring);
   if (rc < 0) {
-    // setup ok but enter denied (incomplete seccomp) — do NOT use Asio stream_file
+    // setup ok but enter denied (incomplete seccomp) — do NOT use Asio file
     log::warn(
         "io_uring probe: submit/enter failed ({}) — thread_pool fallback "
         "(would leave Asio ops pending)",
@@ -63,7 +63,8 @@ bool probe_io_uring() noexcept {
     return false;
   }
 
-  log::info("io_uring probe: ok — vacps:fs content may use Asio stream_file");
+  log::info(
+      "io_uring probe: ok — vacps:fs File may use Asio random_access_file");
   return true;
 #endif
 }

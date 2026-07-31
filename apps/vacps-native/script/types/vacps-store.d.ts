@@ -1,46 +1,81 @@
+/**
+ * vacps:store — SQLite capability (create-at-JS-call).
+ *
+ * Class Store with static open only. No free open(); no begin/commit/rollback.
+ */
 declare module 'vacps:store' {
   export type SqlParam = null | number | string | ArrayBuffer | Uint8Array;
+  export type SqlValue = SqlParam;
+
+  export type StoreOpenMode = 'read-only' | 'read-write' | 'read-write-create';
+
+  export interface StoreOpenOptions {
+    mode?: StoreOpenMode;
+  }
+
+  export interface QueryOptions {
+    maxRows?: number;
+    maxBytes?: number;
+  }
 
   export interface RunResult {
     readonly changes: number;
     readonly lastInsertRowid: number;
   }
 
-  /** One step inside store.transaction() — runs as a single db_pool unit. */
+  export type ExpectedChanges =
+    | { exactly: number }
+    | { atLeast: number }
+    | { atMost: number };
+
+  /**
+   * One step inside Store.transaction() — runs as a single db-pool unit.
+   * type: 'run' (default, bound DML/DDL) or 'query'.
+   */
   export interface TransactionStep {
     readonly sql: string;
     readonly params?: readonly SqlParam[];
-    /** When true, run as multi-statement exec (no binds). Default: run (bound DML). */
-    readonly exec?: boolean;
+    readonly type?: 'run' | 'query';
+    /** Fail-and-rollback if changes do not match (checked after each step). */
+    readonly expectedChanges?: ExpectedChanges;
   }
+
+  export type Row = Record<string, unknown>;
+
+  /** Per-step result of transaction(); run → RunResult, query → Row[]. */
+  export type TransactionResult = RunResult | Row[];
 
   /**
-   * Store instance created by JS via open() — not a process singleton from C++.
-   * All SQLite I/O runs on a serial host db thread; every mutator returns a Promise.
+   * Store instance created by JS via Store.open — not a process singleton.
+   * All SQLite I/O is serialized per Store; every mutator returns a Promise.
    *
-   * Prefer transaction([...]) for multi-step atomic units. Do not interleave
-   * begin()/run()/commit() across awaits — other requests can inject SQL between them.
+   * Prefer transaction([...]) for multi-step atomic units.
    */
-  export interface Store {
+  export class Store {
+    private constructor();
+
+    static open(path: string, options?: StoreOpenOptions): Promise<Store>;
+
+    /** Absolute DB path. */
+    readonly path: string;
+
+    /** True after close(). */
+    readonly closed: boolean;
+
     exec(sql: string): Promise<void>;
     run(sql: string, params?: readonly SqlParam[]): Promise<RunResult>;
-    query(sql: string, params?: readonly SqlParam[]): Promise<Array<Record<string, unknown>>>;
+    query(
+      sql: string,
+      params?: readonly SqlParam[],
+      options?: QueryOptions,
+    ): Promise<Row[]>;
+
     /**
-     * Atomic multi-step unit on the db thread: BEGIN IMMEDIATE + steps + COMMIT.
-     * No other store op can interleave mid-transaction.
+     * Atomic multi-step unit: BEGIN IMMEDIATE + steps + COMMIT.
+     * expectedChanges is checked after each step; mismatch → rollback.
      */
-    transaction(steps: readonly TransactionStep[]): Promise<RunResult[]>;
-    /** @deprecated Prefer transaction([...]) for multi-step work. */
-    begin(): Promise<void>;
-    /** @deprecated Prefer transaction([...]) for multi-step work. */
-    commit(): Promise<void>;
-    /** @deprecated Prefer transaction([...]) for multi-step work. */
-    rollback(): Promise<void>;
-    /** Sync path string (no I/O). */
-    path(): string;
+    transaction(steps: readonly TransactionStep[]): Promise<TransactionResult[]>;
+
     close(): Promise<void>;
   }
-
-  /** Factory: open a new SQLite connection on the serial db pool. */
-  export function open(path: string): Promise<Store>;
 }

@@ -114,9 +114,9 @@
 3. 跨线程投递必须 `asio::post` / strand；共享状态要说清楚。
 4. 长时间 CPU / 阻塞（大 SQLite、压缩）后续用约定好的 offload，不得阻塞 accept 循环（见设计文档）。
 5. **QuickJS**：同一 `JSRuntime` **禁止**多线程并发；所有 `vacps::js::*` 调用固定在 Asio 主线程。`Value` 仅 move；复制必须 `duplicate()`。Pending job 用 `Runtime::drain_jobs()`，禁止递归 drain。
-6. **JS Promise ↔ Asio**：`Host::await_settled` 在 Promise pending 且无 microtask 时 **`co_await wait_progress()`**（取消 progress timer 唤醒），**禁止** spin 忙等。异步原语（`process.run`、HTTP client 等）完成路径必须 `Host::notify_progress()`。
+6. **JS Promise ↔ Asio**：`ScriptRuntime::await_settled` 在 Promise pending 且无 microtask 时 **`co_await wait_progress()`**（取消 progress timer 唤醒），**禁止** spin 忙等。异步原语（`process.run`、HTTP client 等）完成路径必须 `ScriptRuntime::notify_progress()`。
 7. **子进程**：只用 **Boost.Process v2**；禁止手写 `fork`/`fcntl`/`poll` 跑业务子进程。
-8. **Host / modules**：Context opaque = `Host*`（无 `HostState`）。`vacps:host` 仅进程信息；HTTP/`store`/`process`/`fs` 各自模块。
+8. **ScriptRuntime / modules**：Context opaque = `ScriptRuntime*`；bindings 经 `services()` 取 `ScriptServices`。`vacps:host` 仅进程信息；HTTP/`store`/`process`/`fs`/`crypto` 各自模块。
 9. **Native modules**：不暴露裸 `sqlite3*`；领域 SQL 写在 JS。
 
 ---

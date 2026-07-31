@@ -1,30 +1,32 @@
 import type { TaskDispatch } from '@vacps/contracts';
 import { isTerminalTaskStatus } from '@vacps/contracts';
 import * as log from 'vacps:log';
-import * as process from 'vacps:process';
+import { Process } from 'vacps:process';
 
 import type { TaskStore } from '../storage/task-store';
 import { resolveExecutable } from '../util/resolve-executable';
 
 /**
- * Run command/shell tasks via vacps:process start/read/terminate
- * (apps/vacps ShellExecutor counterpart). Supports mid-run cancel.
+ * Run command/shell tasks via vacps:process Process class
+ * (apps/vacps ShellExecutor counterpart). Supports mid-run cancel via
+ * Process.terminate while Process.wait is in flight.
  */
 export class ShellExecutor {
-  /** task_id → process id (for cancel while running). */
-  private readonly active = new Map<string, string>();
+  /** task_id → Process instance (for cancel while running). */
+  private readonly active = new Map<string, Process>();
 
   constructor(private readonly store: TaskStore) {}
 
+  /** True when a process is still tracked for the task (no native registry id). */
   processIdForTask(taskId: string): string | undefined {
-    return this.active.get(taskId);
+    return this.active.has(taskId) ? taskId : undefined;
   }
 
   async cancelRunning(taskId: string): Promise<boolean> {
-    const procId = this.active.get(taskId);
-    if (!procId) return false;
+    const proc = this.active.get(taskId);
+    if (!proc) return false;
     try {
-      await process.terminate(procId, { signal: 'SIGKILL', graceMs: 0 });
+      await proc.terminate('SIGKILL');
       return true;
     } catch {
       return false;
@@ -70,142 +72,101 @@ export class ShellExecutor {
     await this.store.appendLog(id, 'system', `exec: ${argv.map(shellQuote).join(' ')}`);
     log.info(`task ${id} start kind=${task.kind}`);
 
+    const command = argv[0]!;
+    const args = argv.slice(1);
+    const proc = new Process(command, args, {
+      cwd,
+      timeoutMs,
+      stdin: 'ignore',
+      maxStdoutBytes: captureStdout ? hardMax : 0,
+      maxStderrBytes: captureStderr ? hardMax : 0,
+    });
+
     try {
-      const started = await process.start(argv, {
-        cwd,
-        timeoutMs,
-        closeStdin: true,
-        hardMaxStdout: captureStdout ? hardMax : 0,
-        hardMaxStderr: captureStderr ? hardMax : 0,
-      });
-      this.active.set(id, started.id);
+      await proc.start();
+      this.active.set(id, proc);
 
-      let stdoutOff = 0;
-      let stderrOff = 0;
-      let stdout = '';
-      let stderr = '';
-      let stdoutTruncated = false;
-      let stderrTruncated = false;
-      let final = await process.read(started.id, {
-        waitMs: 0,
-        maxBytes: 256_000,
-        stdoutOffset: 0,
-        stderrOffset: 0,
-      });
-
-      const appendCap = (
-        acc: string,
-        chunk: string,
-        max: number,
-      ): { text: string; cut: boolean } => {
-        if (!captureOrStore(max)) return { text: acc, cut: false };
-        if (acc.length >= max) return { text: acc, cut: true };
-        const room = max - acc.length;
-        if (chunk.length <= room) return { text: acc + chunk, cut: false };
-        return { text: acc + chunk.slice(0, room), cut: true };
-      };
-      const captureOrStore = (max: number) => max > 0;
-
-      for (;;) {
-        if (await this.store.isCancelRequested(id)) {
-          await process.terminate(started.id, { signal: 'SIGKILL', graceMs: 0 });
-          final = await process.read(started.id, {
-            waitMs: 2_000,
-            maxBytes: 256_000,
-            stdoutOffset: stdoutOff,
-            stderrOffset: stderrOff,
-          });
-          if (captureStdout && final.stdout) {
-            const r = appendCap(stdout, final.stdout, hardMax);
-            stdout = r.text;
-            stdoutTruncated = stdoutTruncated || r.cut;
-          }
-          if (captureStderr && final.stderr) {
-            const r = appendCap(stderr, final.stderr, hardMax);
-            stderr = r.text;
-            stderrTruncated = stderrTruncated || r.cut;
-          }
-          if (captureStdout && stdout) await this.store.appendLog(id, 'stdout', stdout);
-          if (captureStderr && stderr) await this.store.appendLog(id, 'stderr', stderr);
-          await this.store.updateTask(id, {
-            status: 'cancelled',
-            error: { code: 'cancelled', message: 'Cancelled during execution.' },
-            result: processResult(
-              final.exitCode,
-              final.timedOut,
-              stdout,
-              stderr,
-              captureStdout,
-              captureStderr,
-              stdoutTruncated,
-              stderrTruncated,
-            ),
-          });
-          return;
+      if (await this.store.isCancelRequested(id)) {
+        try {
+          await proc.terminate('SIGKILL');
+        } catch {
+          /* ignore */
         }
-
-        final = await process.read(started.id, {
-          waitMs: 200,
-          maxBytes: 256_000,
-          stdoutOffset: stdoutOff,
-          stderrOffset: stderrOff,
+        let result;
+        try {
+          result = await proc.wait();
+        } catch {
+          result = null;
+        }
+        const stdout = captureStdout
+          ? truncate(result?.stdout ?? '', hardMax)
+          : { text: '', cut: false };
+        const stderr = captureStderr
+          ? truncate(result?.stderr ?? '', hardMax)
+          : { text: '', cut: false };
+        if (captureStdout && stdout.text) await this.store.appendLog(id, 'stdout', stdout.text);
+        if (captureStderr && stderr.text) await this.store.appendLog(id, 'stderr', stderr.text);
+        await this.store.updateTask(id, {
+          status: 'cancelled',
+          error: { code: 'cancelled', message: 'Cancelled during execution.' },
+          result: processResult(
+            result?.exitCode ?? null,
+            result?.timedOut ?? false,
+            stdout.text,
+            stderr.text,
+            captureStdout,
+            captureStderr,
+            stdout.cut,
+            stderr.cut,
+          ),
         });
-        if (final.stdout) {
-          stdoutOff = final.nextStdoutOffset;
-          if (captureStdout) {
-            const r = appendCap(stdout, final.stdout, hardMax);
-            stdout = r.text;
-            stdoutTruncated = stdoutTruncated || r.cut;
-          }
-        }
-        if (final.stderr) {
-          stderrOff = final.nextStderrOffset;
-          if (captureStderr) {
-            const r = appendCap(stderr, final.stderr, hardMax);
-            stderr = r.text;
-            stderrTruncated = stderrTruncated || r.cut;
-          }
-        }
-
-        // Wait for full completion: process exit + both stream EOFs (eof flag).
-        // Do not stop solely on status — tail bytes may still be draining.
-        if (final.eof) break;
+        return;
       }
 
-      if (captureStdout && stdout) await this.store.appendLog(id, 'stdout', stdout);
-      if (captureStderr && stderr) await this.store.appendLog(id, 'stderr', stderr);
+      const final = await proc.wait();
 
-      if (final.timedOut || final.status === 'timed_out') {
+      // Cancel may have raced with wait (cancelRunning → terminate).
+      if (await this.store.isCancelRequested(id)) {
+        const stdout = captureStdout ? truncate(final.stdout, hardMax) : { text: '', cut: false };
+        const stderr = captureStderr ? truncate(final.stderr, hardMax) : { text: '', cut: false };
+        if (captureStdout && stdout.text) await this.store.appendLog(id, 'stdout', stdout.text);
+        if (captureStderr && stderr.text) await this.store.appendLog(id, 'stderr', stderr.text);
+        await this.store.updateTask(id, {
+          status: 'cancelled',
+          error: { code: 'cancelled', message: 'Cancelled during execution.' },
+          result: processResult(
+            final.exitCode,
+            final.timedOut,
+            stdout.text,
+            stderr.text,
+            captureStdout,
+            captureStderr,
+            stdout.cut,
+            stderr.cut,
+          ),
+        });
+        return;
+      }
+
+      const stdout = captureStdout ? truncate(final.stdout, hardMax) : { text: '', cut: false };
+      const stderr = captureStderr ? truncate(final.stderr, hardMax) : { text: '', cut: false };
+
+      if (captureStdout && stdout.text) await this.store.appendLog(id, 'stdout', stdout.text);
+      if (captureStderr && stderr.text) await this.store.appendLog(id, 'stderr', stderr.text);
+
+      if (final.timedOut) {
         await this.store.updateTask(id, {
           status: 'timed_out',
           error: { code: 'timed_out', message: `Timeout after ${task.timeout_seconds}s` },
           result: processResult(
             final.exitCode,
             true,
-            stdout,
-            stderr,
+            stdout.text,
+            stderr.text,
             captureStdout,
             captureStderr,
-            stdoutTruncated,
-            stderrTruncated,
-          ),
-        });
-        return;
-      }
-
-      if (final.status === 'cancelled') {
-        await this.store.updateTask(id, {
-          status: 'cancelled',
-          error: { code: 'cancelled', message: 'Process terminated.' },
-          result: processResult(
-            final.exitCode,
-            false,
-            stdout,
-            stderr,
-            captureStdout,
-            captureStderr,
-            stdoutTruncated,
-            stderrTruncated,
+            stdout.cut,
+            stderr.cut,
           ),
         });
         return;
@@ -217,12 +178,12 @@ export class ShellExecutor {
           result: processResult(
             0,
             false,
-            stdout,
-            stderr,
+            stdout.text,
+            stderr.text,
             captureStdout,
             captureStderr,
-            stdoutTruncated,
-            stderrTruncated,
+            stdout.cut,
+            stderr.cut,
           ),
         });
       } else {
@@ -235,12 +196,12 @@ export class ShellExecutor {
           result: processResult(
             final.exitCode,
             false,
-            stdout,
-            stderr,
+            stdout.text,
+            stderr.text,
             captureStdout,
             captureStderr,
-            stdoutTruncated,
-            stderrTruncated,
+            stdout.cut,
+            stderr.cut,
           ),
         });
       }
@@ -255,18 +216,20 @@ export class ShellExecutor {
         });
       }
     } finally {
-      const procId = this.active.get(id);
       this.active.delete(id);
-      // Free Registry buffers promptly (TTL is a backstop for interactive processes).
-      if (procId) {
-        try {
-          await process.close(procId);
-        } catch {
-          /* ignore */
-        }
+      try {
+        await proc.close();
+      } catch {
+        /* ignore */
       }
     }
   }
+}
+
+function truncate(s: string, max: number): { text: string; cut: boolean } {
+  if (max <= 0) return { text: '', cut: false };
+  if (s.length <= max) return { text: s, cut: false };
+  return { text: s.slice(0, max), cut: true };
 }
 
 function processResult(

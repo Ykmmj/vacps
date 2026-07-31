@@ -86,7 +86,7 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 | SQLite 3.53.4 amalgamation                       | connection + PRAGMA only（业务表/SQL 归 JS `vacps:store`）                                                                                     |
 | spdlog 1.17.0                                    | stderr logger; `VACPS_LOG_LEVEL` / `--log-level`                                                                                               |
 | nlohmann/json 3.12.0                             | HTTP JSON bodies                                                                                                                               |
-| QuickJS RAII + Asio Promise 桥                   | `await_settled` + `notify_progress`（无 HostState）                                                                                            |
+| QuickJS RAII + Asio Promise 桥                   | `ScriptRuntime`：`await_settled` + `notify_progress`                                                                                           |
 | Native modules                                   | `log` / `store` / `host` / `fs` / `process` / `crypto`（见 `docs/NATIVE_MODULES.md`）                                                          |
 | 业务 script（ESM）                               | 全部路由含 `/health` `/ready`；`--script`                                                                                                      |
 | Listen `127.0.0.1:8788`                          | done                                                                                                                                           |
@@ -95,7 +95,7 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 | Control-plane registration/telemetry             | JS via `@vacps/contracts` + signed `http.request`；timer `tickControlPlane`                                                                    |
 | Tasks inbox + pump                               | POST/GET/cancel/retry/logs；`command`/`shell` via `process.run`；contracts `taskDispatchSchema`                                                |
 | Process group                                    | `setpgid` + timeout/terminate `kill(-pgid)`（shell 子树）                                                                                      |
-| `vacps:process`                                  | `run` + `start`/`read`/`write`/`terminate`（Host `ProcessRegistry`）                                                                           |
+| `vacps:process`                                  | `run` + `start`/`read`/`write`/`terminate`（`process::Registry` on ScriptServices）                                                            |
 | `/exec/command` `/exec/shell`                    | JS `ProcessManager`（fire-and-wait）                                                                                                           |
 | `/process/start_*` `/read` `/write` `/terminate` | 长驻进程 API                                                                                                                                   |
 | Task mid-cancel                                  | `POST /tasks/:id/cancel` → `process.terminate` 杀进程组                                                                                        |

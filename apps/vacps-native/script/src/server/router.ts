@@ -1,7 +1,7 @@
 import type { HostRequest, HostResponse } from '../contracts/http';
 
 /**
- * Minimal Fastify-shaped router for vacps:http Host.
+ * Minimal Fastify-shaped router for script handleRequest.
  * C++ transport has zero product routes; script registers them with app.get/post/…
  */
 

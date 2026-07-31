@@ -8,7 +8,7 @@ export interface AgentConfig {
   BACKEND_ID: string;
   BACKEND_NAME: string;
   BACKEND_TAGS: string[];
-  /** Inbound bind (passed to http.createServer). Not owned by C++ Config. */
+  /** Inbound bind (passed to new http.Server). Not owned by C++ Config. */
   LISTEN_HOST: string;
   LISTEN_PORT: number;
   PUBLIC_BASE_URL: string | undefined;

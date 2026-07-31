@@ -1,10 +1,6 @@
 #include "fs/fs.hpp"
 
-#include "crypto/crypto.hpp"
-
-#include <array>
 #include <chrono>
-#include <fstream>
 #include <format>
 #include <string>
 #include <system_error>
@@ -51,114 +47,6 @@ Result<std::filesystem::path> resolve_path(
     }
   }
   return (root / input).lexically_normal();
-}
-
-Result<std::string> read_text(const std::filesystem::path& path) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    return std::unexpected(Error{std::format("read failed: {}", path.string())});
-  }
-  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
-Result<std::vector<std::uint8_t>> read_bytes(const std::filesystem::path& path) {
-  auto text = read_text(path);
-  if (!text) {
-    return std::unexpected(std::move(text.error()));
-  }
-  return std::vector<std::uint8_t>(text->begin(), text->end());
-}
-
-Result<std::vector<std::uint8_t>> read_range(
-    const std::filesystem::path& path,
-    std::uint64_t offset,
-    std::size_t max_bytes) {
-  if (max_bytes == 0) {
-    return std::vector<std::uint8_t>{};
-  }
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    return std::unexpected(Error{std::format("read failed: {}", path.string())});
-  }
-  if (offset > 0) {
-    in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    if (!in) {
-      // Offset past EOF → empty slice.
-      return std::vector<std::uint8_t>{};
-    }
-  }
-  std::vector<std::uint8_t> buf(max_bytes);
-  in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(max_bytes));
-  const auto n = static_cast<std::size_t>(in.gcount());
-  buf.resize(n);
-  return buf;
-}
-
-Result<FileDigest> hash_file(const std::filesystem::path& path) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    return std::unexpected(Error{std::format("hash failed: {}", path.string())});
-  }
-  vacps::crypto::Sha256 hasher;
-  std::array<char, 64 * 1024> chunk{};
-  std::uint64_t total = 0;
-  while (in) {
-    in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-    const auto n = static_cast<std::size_t>(in.gcount());
-    if (n == 0) break;
-    total += n;
-    hasher.update(reinterpret_cast<const std::uint8_t*>(chunk.data()), n);
-  }
-  FileDigest out;
-  out.size_bytes = total;
-  out.sha256_hex = vacps::crypto::to_hex(hasher.finalize());
-  return out;
-}
-
-VoidResult write_text(const std::filesystem::path& path, std::string_view data) {
-  std::error_code ec;
-  if (path.has_parent_path()) {
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-      return io_error("mkdir", path.parent_path(), ec);
-    }
-  }
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) {
-    return std::unexpected(Error{std::format("write failed: {}", path.string())});
-  }
-  out.write(data.data(), static_cast<std::streamsize>(data.size()));
-  if (!out) {
-    return std::unexpected(Error{std::format("write failed: {}", path.string())});
-  }
-  return {};
-}
-
-VoidResult write_bytes(
-    const std::filesystem::path& path,
-    const std::vector<std::uint8_t>& data) {
-  return write_text(
-      path,
-      std::string_view(reinterpret_cast<const char*>(data.data()), data.size()));
-}
-
-VoidResult append_text(const std::filesystem::path& path, std::string_view data) {
-  std::error_code ec;
-  if (path.has_parent_path()) {
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-      return io_error("mkdir", path.parent_path(), ec);
-    }
-  }
-  std::ofstream out(path, std::ios::binary | std::ios::app);
-  if (!out) {
-    return std::unexpected(Error{std::format("append failed: {}", path.string())});
-  }
-  out.write(data.data(), static_cast<std::streamsize>(data.size()));
-  if (!out) {
-    return std::unexpected(Error{std::format("append failed: {}", path.string())});
-  }
-  return {};
 }
 
 VoidResult mkdir_p(const std::filesystem::path& path) {

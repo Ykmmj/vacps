@@ -1,7 +1,8 @@
 #include "app/log.hpp"
+#include "bootstrap/environment.hpp"
 #include "http/script_dispatch.hpp"
-#include "quickjs/host.hpp"
-#include "storage/db.hpp"
+#include "quickjs/script_runtime.hpp"
+#include "storage/database.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -36,15 +37,18 @@ class JsTasksTest : public ::testing::Test {
     dir_ = fs::temp_directory_path() / "vacps_js_tasks" / std::to_string(::getpid()) /
            std::to_string(reinterpret_cast<std::uintptr_t>(this));
     fs::create_directories(dir_);
-    module_opts_.data_dir = dir_.string();
+    services_opts_.data_dir = dir_.string();
     // Match default backend id in agent-config when BACKEND_ID unset.
     setenv("BACKEND_ID", "local", 1);
     // Integration tests dispatch unsigned HTTP; production requires a CP key.
     setenv("VACPS_ALLOW_INSECURE_NO_AUTH", "1", 1);
+    // host.getenv reads ScriptServices::environment only (not live getenv).
+    services_opts_.environment =
+        vacps::bootstrap::EnvironmentSnapshot::from_current_process();
   }
 
   vacps::js::EngineOptions engine_opts_{};
-  vacps::js::ModuleEnvOptions module_opts_{};
+  vacps::js::ScriptServicesOptions services_opts_{};
   fs::path dir_;
 };
 
@@ -52,9 +56,10 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
   ASSERT_TRUE(fs::exists(business_script())) << business_script();
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
-  ASSERT_TRUE(host_r) << host_r.error().message;
-  auto host = std::move(*host_r);
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
 
   bool ok = false;
   std::string err;
@@ -63,9 +68,9 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
 
   asio::co_spawn(
       ioc,
-      [host, &ok, &err, &get_status, &get_body, script = business_script().string()]()
+      [rt, &ok, &err, &get_status, &get_body, script = business_script().string()]()
           -> asio::awaitable<void> {
-        auto init = co_await host->load_and_initialize(script);
+        auto init = co_await rt->load_and_initialize(script);
         if (!init) {
           err = init.error().message;
           co_return;
@@ -91,12 +96,12 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
           }
         })";
 
-        vacps::http::ScriptHttpRequest post;
+        vacps::http::HttpRequest post;
         post.method = "POST";
         post.path = "/tasks";
         post.body = body;
         post.headers.emplace_back("content-type", "application/json");
-        auto pr = co_await vacps::http::dispatch_to_script(*host, std::move(post));
+        auto pr = co_await vacps::http::dispatch_to_script(*rt, std::move(post));
         if (!pr) {
           err = pr.error().message;
           co_return;
@@ -107,16 +112,16 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
         }
 
         // Pump
-        auto tick = co_await host->invoke_export("tickControlPlane", 0, nullptr);
+        auto tick = co_await rt->invoke_export("tickControlPlane", 0, nullptr);
         if (!tick) {
           err = "tick: " + tick.error().message;
           co_return;
         }
 
-        vacps::http::ScriptHttpRequest get;
+        vacps::http::HttpRequest get;
         get.method = "GET";
         get.path = "/tasks/" + task_id;
-        auto gr = co_await vacps::http::dispatch_to_script(*host, std::move(get));
+        auto gr = co_await vacps::http::dispatch_to_script(*rt, std::move(get));
         if (!gr) {
           err = gr.error().message;
           co_return;
@@ -137,7 +142,7 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
           }
         }
 
-        auto sh = co_await host->shutdown_script();
+        auto sh = co_await rt->shutdown_script();
         if (!sh) {
           err = sh.error().message;
           co_return;
@@ -156,7 +161,7 @@ TEST_F(JsTasksTest, RetryAndCrashRecovery) {
 
   // ── Crash recovery: plant a running row, then boot script ──
   {
-    auto db = vacps::Database::open((dir_ / "agent.db").string());
+    auto db = vacps::storage::Database::open((dir_ / "agent.db").string());
     ASSERT_TRUE(db) << db.error().message;
     // Minimal schema matching migration v2
     ASSERT_TRUE(db->exec(
@@ -178,39 +183,40 @@ TEST_F(JsTasksTest, RetryAndCrashRecovery) {
     ASSERT_TRUE(db->execute(
         "INSERT INTO tasks(id, backend_id, kind, status, profile, input_json, cancel_requested, created_at, started_at, updated_at) "
         "VALUES(?,?,?,?,?,?,0,?,?,?);",
-        {vacps::sql_text("22222222-2222-4222-8222-222222222222"),
-         vacps::sql_text("local"),
-         vacps::sql_text("command"),
-         vacps::sql_text("running"),
-         vacps::sql_text("full"),
-         vacps::sql_text(input),
-         vacps::sql_text("2020-01-01T00:00:00.000Z"),
-         vacps::sql_text("2020-01-01T00:00:01.000Z"),
-         vacps::sql_text("2020-01-01T00:00:01.000Z")}));
+        {vacps::storage::sql_text("22222222-2222-4222-8222-222222222222"),
+         vacps::storage::sql_text("local"),
+         vacps::storage::sql_text("command"),
+         vacps::storage::sql_text("running"),
+         vacps::storage::sql_text("full"),
+         vacps::storage::sql_text(input),
+         vacps::storage::sql_text("2020-01-01T00:00:00.000Z"),
+         vacps::storage::sql_text("2020-01-01T00:00:01.000Z"),
+         vacps::storage::sql_text("2020-01-01T00:00:01.000Z")}));
   }
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
-  ASSERT_TRUE(host_r) << host_r.error().message;
-  auto host = std::move(*host_r);
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
 
   bool ok = false;
   std::string err;
 
   asio::co_spawn(
       ioc,
-      [host, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
-        auto init = co_await host->load_and_initialize(script);
+      [rt, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
+        auto init = co_await rt->load_and_initialize(script);
         if (!init) {
           err = init.error().message;
           co_return;
         }
 
         // Recovered task should be failed / agent_restarted
-        vacps::http::ScriptHttpRequest get;
+        vacps::http::HttpRequest get;
         get.method = "GET";
         get.path = "/tasks/22222222-2222-4222-8222-222222222222";
-        auto gr = co_await vacps::http::dispatch_to_script(*host, std::move(get));
+        auto gr = co_await vacps::http::dispatch_to_script(*rt, std::move(get));
         if (!gr || gr->status != 200) {
           err = gr ? gr->body : gr.error().message;
           co_return;
@@ -222,10 +228,10 @@ TEST_F(JsTasksTest, RetryAndCrashRecovery) {
         }
 
         // Retry → new queued task
-        vacps::http::ScriptHttpRequest retry;
+        vacps::http::HttpRequest retry;
         retry.method = "POST";
         retry.path = "/tasks/22222222-2222-4222-8222-222222222222/retry";
-        auto rr = co_await vacps::http::dispatch_to_script(*host, std::move(retry));
+        auto rr = co_await vacps::http::dispatch_to_script(*rt, std::move(retry));
         if (!rr || rr->status != 202) {
           err = rr ? ("retry " + std::to_string(rr->status) + " " + rr->body) : rr.error().message;
           co_return;
@@ -235,13 +241,13 @@ TEST_F(JsTasksTest, RetryAndCrashRecovery) {
           co_return;
         }
 
-        auto tick = co_await host->invoke_export("tickControlPlane", 0, nullptr);
+        auto tick = co_await rt->invoke_export("tickControlPlane", 0, nullptr);
         if (!tick) {
           err = tick.error().message;
           co_return;
         }
 
-        auto sh = co_await host->shutdown_script();
+        auto sh = co_await rt->shutdown_script();
         if (!sh) {
           err = sh.error().message;
           co_return;
@@ -259,9 +265,10 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
-  ASSERT_TRUE(host_r) << host_r.error().message;
-  auto host = std::move(*host_r);
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
 
   bool ok = false;
   std::string err;
@@ -269,16 +276,16 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
 
   asio::co_spawn(
       ioc,
-      [host, &ok, &err, script = business_script().string(), file_path]()
+      [rt, &ok, &err, script = business_script().string(), file_path]()
           -> asio::awaitable<void> {
-        auto init = co_await host->load_and_initialize(script);
+        auto init = co_await rt->load_and_initialize(script);
         if (!init) {
           err = init.error().message;
           co_return;
         }
 
         // POST /exec/command
-        vacps::http::ScriptHttpRequest exec;
+        vacps::http::HttpRequest exec;
         exec.method = "POST";
         exec.path = "/exec/command";
         exec.headers.emplace_back("content-type", "application/json");
@@ -288,7 +295,7 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
           "timeout_ms": 5000,
           "working_directory": "/tmp"
         })";
-        auto er = co_await vacps::http::dispatch_to_script(*host, std::move(exec));
+        auto er = co_await vacps::http::dispatch_to_script(*rt, std::move(exec));
         if (!er || er->status != 200) {
           err = er ? ("exec " + std::to_string(er->status) + " " + er->body)
                    : er.error().message;
@@ -300,7 +307,7 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
         }
 
         // POST /fs/write
-        vacps::http::ScriptHttpRequest write;
+        vacps::http::HttpRequest write;
         write.method = "POST";
         write.path = "/fs/write";
         write.headers.emplace_back("content-type", "application/json");
@@ -310,7 +317,7 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
           "content": "native-fs-hello",
           "mode": "create_or_overwrite"
         })";
-        auto wr = co_await vacps::http::dispatch_to_script(*host, std::move(write));
+        auto wr = co_await vacps::http::dispatch_to_script(*rt, std::move(write));
         if (!wr || wr->status != 200) {
           err = wr ? ("write " + std::to_string(wr->status) + " " + wr->body)
                    : wr.error().message;
@@ -318,11 +325,11 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
         }
 
         // GET /fs/read
-        vacps::http::ScriptHttpRequest read;
+        vacps::http::HttpRequest read;
         read.method = "GET";
         read.path = "/fs/read";
         read.query = "path=" + file_path;
-        auto rr = co_await vacps::http::dispatch_to_script(*host, std::move(read));
+        auto rr = co_await vacps::http::dispatch_to_script(*rt, std::move(read));
         if (!rr || rr->status != 200) {
           err = rr ? ("read " + std::to_string(rr->status) + " " + rr->body)
                    : rr.error().message;
@@ -333,7 +340,7 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
           co_return;
         }
 
-        auto sh = co_await host->shutdown_script();
+        auto sh = co_await rt->shutdown_script();
         if (!sh) {
           err = sh.error().message;
           co_return;
@@ -351,26 +358,27 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
-  ASSERT_TRUE(host_r) << host_r.error().message;
-  auto host = std::move(*host_r);
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
 
   bool ok = false;
   std::string err;
 
   asio::co_spawn(
       ioc,
-      [host, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
-        auto init = co_await host->load_and_initialize(script);
+      [rt, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
+        auto init = co_await rt->load_and_initialize(script);
         if (!init) {
           err = init.error().message;
           co_return;
         }
 
-        vacps::http::ScriptHttpRequest health;
+        vacps::http::HttpRequest health;
         health.method = "GET";
         health.path = "/health";
-        auto hr = co_await vacps::http::dispatch_to_script(*host, std::move(health));
+        auto hr = co_await vacps::http::dispatch_to_script(*rt, std::move(health));
         if (!hr || hr->status != 200) {
           err = hr ? hr->body : hr.error().message;
           co_return;
@@ -381,10 +389,10 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
           co_return;
         }
 
-        vacps::http::ScriptHttpRequest metrics;
+        vacps::http::HttpRequest metrics;
         metrics.method = "GET";
         metrics.path = "/metrics";
-        auto mr = co_await vacps::http::dispatch_to_script(*host, std::move(metrics));
+        auto mr = co_await vacps::http::dispatch_to_script(*rt, std::move(metrics));
         if (!mr || mr->status != 200) {
           err = mr ? mr->body : mr.error().message;
           co_return;
@@ -395,7 +403,7 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
           co_return;
         }
 
-        vacps::http::ScriptHttpRequest put;
+        vacps::http::HttpRequest put;
         put.method = "PUT";
         put.path = "/schedulers/sched-test-1";
         put.headers.emplace_back("content-type", "application/json");
@@ -421,14 +429,14 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
             }
           }
         })";
-        auto pr = co_await vacps::http::dispatch_to_script(*host, std::move(put));
+        auto pr = co_await vacps::http::dispatch_to_script(*rt, std::move(put));
         if (!pr || (pr->status != 204 && pr->status != 200)) {
           err = pr ? ("put sched " + std::to_string(pr->status) + " " + pr->body)
                    : pr.error().message;
           co_return;
         }
 
-        vacps::http::ScriptHttpRequest run;
+        vacps::http::HttpRequest run;
         run.method = "POST";
         run.path = "/schedulers/sched-test-1/run";
         run.headers.emplace_back("content-type", "application/json");
@@ -450,7 +458,7 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
             }
           }
         })";
-        auto rr = co_await vacps::http::dispatch_to_script(*host, std::move(run));
+        auto rr = co_await vacps::http::dispatch_to_script(*rt, std::move(run));
         if (!rr || rr->status != 200) {
           err = rr ? ("run " + rr->body) : rr.error().message;
           co_return;
@@ -460,13 +468,13 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
           co_return;
         }
 
-        auto tick = co_await host->invoke_export("tickControlPlane", 0, nullptr);
+        auto tick = co_await rt->invoke_export("tickControlPlane", 0, nullptr);
         if (!tick) {
           err = tick.error().message;
           co_return;
         }
 
-        auto sh = co_await host->shutdown_script();
+        auto sh = co_await rt->shutdown_script();
         if (!sh) {
           err = sh.error().message;
           co_return;
@@ -484,9 +492,10 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
-  ASSERT_TRUE(host_r) << host_r.error().message;
-  auto host = std::move(*host_r);
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
 
   bool ok = false;
   std::string err;
@@ -495,16 +504,16 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
 
   asio::co_spawn(
       ioc,
-      [host, &ok, &err, script = business_script().string(), work, file_path]()
+      [rt, &ok, &err, script = business_script().string(), work, file_path]()
           -> asio::awaitable<void> {
-        auto init = co_await host->load_and_initialize(script);
+        auto init = co_await rt->load_and_initialize(script);
         if (!init) {
           err = init.error().message;
           co_return;
         }
 
         // write sample
-        vacps::http::ScriptHttpRequest write;
+        vacps::http::HttpRequest write;
         write.method = "POST";
         write.path = "/fs/write";
         write.headers.emplace_back("content-type", "application/json");
@@ -514,14 +523,14 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
           "content": "hello world\nfoo bar\n",
           "mode": "create_or_overwrite"
         })";
-        auto wr = co_await vacps::http::dispatch_to_script(*host, std::move(write));
+        auto wr = co_await vacps::http::dispatch_to_script(*rt, std::move(write));
         if (!wr || wr->status != 200) {
           err = wr ? wr->body : wr.error().message;
           co_return;
         }
 
         // edit
-        vacps::http::ScriptHttpRequest edit;
+        vacps::http::HttpRequest edit;
         edit.method = "POST";
         edit.path = "/fs/edit";
         edit.headers.emplace_back("content-type", "application/json");
@@ -531,7 +540,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
           "old_text": "hello world",
           "new_text": "hello native"
         })";
-        auto er = co_await vacps::http::dispatch_to_script(*host, std::move(edit));
+        auto er = co_await vacps::http::dispatch_to_script(*rt, std::move(edit));
         if (!er || er->status != 200) {
           err = er ? ("edit " + er->body) : er.error().message;
           co_return;
@@ -542,7 +551,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
         }
 
         // glob
-        vacps::http::ScriptHttpRequest glob;
+        vacps::http::HttpRequest glob;
         glob.method = "POST";
         glob.path = "/fs/glob";
         glob.headers.emplace_back("content-type", "application/json");
@@ -551,7 +560,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
           "path": ")") +
                     work + R"("
         })";
-        auto gr = co_await vacps::http::dispatch_to_script(*host, std::move(glob));
+        auto gr = co_await vacps::http::dispatch_to_script(*rt, std::move(glob));
         if (!gr || gr->status != 200) {
           err = gr ? ("glob " + gr->body) : gr.error().message;
           co_return;
@@ -562,10 +571,10 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
         }
 
         // capabilities
-        vacps::http::ScriptHttpRequest cap;
+        vacps::http::HttpRequest cap;
         cap.method = "GET";
         cap.path = "/capabilities";
-        auto cr = co_await vacps::http::dispatch_to_script(*host, std::move(cap));
+        auto cr = co_await vacps::http::dispatch_to_script(*rt, std::move(cap));
         if (!cr || cr->status != 200) {
           err = cr ? ("cap " + cr->body) : cr.error().message;
           co_return;
@@ -581,7 +590,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
 
         // apply_patch add
         const auto added = (fs::path(work) / "patched.txt").string();
-        vacps::http::ScriptHttpRequest patch;
+        vacps::http::HttpRequest patch;
         patch.method = "POST";
         patch.path = "/fs/apply_patch";
         patch.headers.emplace_back("content-type", "application/json");
@@ -591,7 +600,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
                      work + R"(",
           "patch": "*** Add File: patched.txt\n+patched-ok\n"
         })";
-        auto pr = co_await vacps::http::dispatch_to_script(*host, std::move(patch));
+        auto pr = co_await vacps::http::dispatch_to_script(*rt, std::move(patch));
         if (!pr || pr->status != 200) {
           err = pr ? ("patch " + pr->body) : pr.error().message;
           co_return;
@@ -602,7 +611,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
         }
         (void)added;
 
-        auto sh = co_await host->shutdown_script();
+        auto sh = co_await rt->shutdown_script();
         if (!sh) {
           err = sh.error().message;
           co_return;
@@ -620,23 +629,24 @@ TEST_F(JsTasksTest, ProcessStartReadTerminate) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
-  ASSERT_TRUE(host_r) << host_r.error().message;
-  auto host = std::move(*host_r);
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
 
   bool ok = false;
   std::string err;
 
   asio::co_spawn(
       ioc,
-      [host, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
-        auto init = co_await host->load_and_initialize(script);
+      [rt, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
+        auto init = co_await rt->load_and_initialize(script);
         if (!init) {
           err = init.error().message;
           co_return;
         }
 
-        vacps::http::ScriptHttpRequest start;
+        vacps::http::HttpRequest start;
         start.method = "POST";
         start.path = "/process/start_command";
         start.headers.emplace_back("content-type", "application/json");
@@ -646,7 +656,7 @@ TEST_F(JsTasksTest, ProcessStartReadTerminate) {
           "timeout_ms": 30000,
           "working_directory": "/tmp"
         })";
-        auto sr = co_await vacps::http::dispatch_to_script(*host, std::move(start));
+        auto sr = co_await vacps::http::dispatch_to_script(*rt, std::move(start));
         if (!sr || sr->status != 200) {
           err = sr ? ("start " + std::to_string(sr->status) + " " + sr->body)
                    : sr.error().message;
@@ -666,13 +676,13 @@ TEST_F(JsTasksTest, ProcessStartReadTerminate) {
         }
         const std::string proc_id = sr->body.substr(v1 + 1, v2 - v1 - 1);
 
-        vacps::http::ScriptHttpRequest read;
+        vacps::http::HttpRequest read;
         read.method = "POST";
         read.path = "/process/read";
         read.headers.emplace_back("content-type", "application/json");
         read.body = std::string(R"({"process_id":")") + proc_id +
                     R"(","wait_ms":2000,"max_bytes":65536})";
-        auto rr = co_await vacps::http::dispatch_to_script(*host, std::move(read));
+        auto rr = co_await vacps::http::dispatch_to_script(*rt, std::move(read));
         if (!rr || rr->status != 200) {
           err = rr ? ("read " + std::to_string(rr->status) + " " + rr->body)
                    : rr.error().message;
@@ -683,20 +693,20 @@ TEST_F(JsTasksTest, ProcessStartReadTerminate) {
           co_return;
         }
 
-        vacps::http::ScriptHttpRequest term;
+        vacps::http::HttpRequest term;
         term.method = "POST";
         term.path = "/process/terminate";
         term.headers.emplace_back("content-type", "application/json");
         term.body = std::string(R"({"process_id":")") + proc_id +
                     R"(","signal":"sigkill","grace_period_ms":0})";
-        auto tr = co_await vacps::http::dispatch_to_script(*host, std::move(term));
+        auto tr = co_await vacps::http::dispatch_to_script(*rt, std::move(term));
         if (!tr || tr->status != 200) {
           err = tr ? ("term " + std::to_string(tr->status) + " " + tr->body)
                    : tr.error().message;
           co_return;
         }
 
-        auto sh = co_await host->shutdown_script();
+        auto sh = co_await rt->shutdown_script();
         if (!sh) {
           err = sh.error().message;
           co_return;

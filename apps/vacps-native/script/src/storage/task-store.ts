@@ -87,7 +87,8 @@ export class TaskStore {
       });
     }
     const results = await this.db.transaction(steps);
-    return (results[0]?.changes ?? 0) === 1;
+    const first = results[0];
+    return first != null && !Array.isArray(first) && first.changes === 1;
   }
 
   /**
@@ -342,7 +343,8 @@ export class TaskStore {
         params: [nonce, now + ttlSeconds, nonce],
       },
     ]);
-    return (results[1]?.changes ?? 0) === 1;
+    const insert = results[1];
+    return insert != null && !Array.isArray(insert) && insert.changes === 1;
   }
 
   async hasRunning(): Promise<boolean> {

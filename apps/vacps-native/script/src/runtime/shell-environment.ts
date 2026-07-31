@@ -62,7 +62,8 @@ export async function probeShellEnvironment(): Promise<ShellEnvironment> {
   let gid = 0;
   try {
     const r = await process.run(
-      ['/bin/bash', '-lc', 'test -n "$HOME" && test -x "$HOME" && id -un && id -u && id -g'],
+      '/bin/bash',
+      ['-lc', 'test -n "$HOME" && test -x "$HOME" && id -un && id -u && id -g'],
       { timeoutMs: 3_000 },
     );
     if (r.stderr.includes('Permission denied')) {

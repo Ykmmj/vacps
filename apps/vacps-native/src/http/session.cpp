@@ -6,10 +6,10 @@ namespace vacps::http {
 
 Session::Session(
     tcp::socket socket,
-    std::shared_ptr<vacps::js::Host> script,
+    std::shared_ptr<IRequestHandler> handler,
     std::weak_ptr<Server> server)
     : stream_(std::move(socket)),
-      script_(std::move(script)),
+      handler_(std::move(handler)),
       server_(std::move(server)) {}
 
 void Session::notify_finished() noexcept {
@@ -98,7 +98,7 @@ asio::awaitable<void> Session::do_session() {
 
 asio::awaitable<http::response<http::string_body>> Session::dispatch(
     http::request<http::string_body> req) {
-  if (!script_ || !script_->script_ready()) {
+  if (!handler_) {
     co_return make_response(
         req,
         http::status::service_unavailable,
@@ -111,7 +111,7 @@ asio::awaitable<http::response<http::string_body>> Session::dispatch(
   const auto query =
       (qpos == std::string_view::npos) ? std::string_view{} : target.substr(qpos + 1);
 
-  ScriptHttpRequest dto;
+  HttpRequest dto;
   dto.method = std::string(req.method_string());
   dto.path = std::string(path);
   dto.query = std::string(query);
@@ -124,8 +124,15 @@ asio::awaitable<http::response<http::string_body>> Session::dispatch(
     dto.headers.emplace_back(std::string(h.name_string()), std::string(h.value()));
   }
 
-  auto jr = co_await dispatch_to_script(*script_, std::move(dto));
+  auto jr = co_await handler_->handle(std::move(dto));
   if (!jr) {
+    // Preserve 503 for "script not ready" vs 500 for other handler failures.
+    if (jr.error().message == "business script not ready") {
+      co_return make_response(
+          req,
+          http::status::service_unavailable,
+          bootstrap_unavailable_json("business script not ready"));
+    }
     vacps::log::error("handleRequest failed: {}", jr.error().message);
     co_return make_response(
         req,

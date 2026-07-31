@@ -2,7 +2,7 @@ import { taskDispatchSchema } from '@vacps/contracts';
 import * as host from 'vacps:host';
 import * as http from 'vacps:http';
 import * as log from 'vacps:log';
-import * as store from 'vacps:store';
+import { Store } from 'vacps:store';
 
 import {
   loadConfig,
@@ -35,9 +35,6 @@ import type { App } from './server/router';
 import { TaskStore } from './storage/task-store';
 import { NativeTelemetryCollector } from './telemetry/native-telemetry';
 
-type Store = Awaited<ReturnType<typeof store.open>>;
-type HttpServer = ReturnType<typeof http.createServer>;
-
 /**
  * Composition root for native agent script (apps/vacps main wiring, class form).
  * Host C++ calls initialize / handleRequest / tickControlPlane / shutdown.
@@ -50,7 +47,7 @@ export class Application {
   private processes: ProcessManager | undefined;
   private telemetry: NativeTelemetryCollector | undefined;
   private httpApp: App | undefined;
-  private server: HttpServer | undefined;
+  private server: http.Server | undefined;
   private ready = false;
   private cpState: ControlPlaneState = {
     registrationStatus: 'unknown',
@@ -67,7 +64,7 @@ export class Application {
       extraRoots: this.config.FS_ALLOWED_ROOTS,
     });
     const path = `${host.dataDir()}/agent.db`;
-    this.db = await store.open(path);
+    this.db = await Store.open(path);
     this.store = await TaskStore.create(this.db);
     const executor = new ShellExecutor(this.store);
     const schedulers = await SchedulerStore.create(this.db);
@@ -95,15 +92,15 @@ export class Application {
     });
 
     // Bind address is agent policy (loadConfig / env) — C++ Server only gets options.
-    this.server = http.createServer({
+    this.server = new http.Server({
       host: this.config.LISTEN_HOST,
       port: this.config.LISTEN_PORT,
     });
-    this.server.listen();
+    await this.server.listen();
     this.ready = true;
 
     log.info(
-      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path()} listening=${this.server.isListening()} controlPlane=${this.config.CONTROL_PLANE_URL ?? 'off'}`,
+      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path} listening=${this.server.listening} controlPlane=${this.config.CONTROL_PLANE_URL ?? 'off'}`,
     );
 
     if (registrationConfigured(this.config)) {
@@ -194,7 +191,7 @@ export class Application {
   async shutdown(): Promise<void> {
     log.info('application shutdown');
     if (this.server) {
-      this.server.close();
+      await this.server.close();
       this.server = undefined;
     }
     if (this.db) {

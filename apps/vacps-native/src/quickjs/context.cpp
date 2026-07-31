@@ -1,7 +1,7 @@
 #include "quickjs/context.hpp"
 
 #include "quickjs/js_bridge.hpp"
-#include "quickjs/value.hpp"
+#include "quickjs/raii/value.hpp"
 
 #include <string>
 

@@ -1,13 +1,7 @@
-/** WHATWG Encoding API (installed by vacps-native host via simdutf). */
-interface TextEncoderEncodeIntoResult {
-  readonly read: number;
-  readonly written: number;
-}
-
+/** WHATWG Encoding API (installed by vacps-native via simdutf). */
 declare class TextEncoder {
   readonly encoding: string;
   encode(input?: string): Uint8Array;
-  encodeInto?(source: string, destination: Uint8Array): TextEncoderEncodeIntoResult;
 }
 
 declare class TextDecoder {

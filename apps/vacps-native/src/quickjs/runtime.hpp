@@ -135,7 +135,7 @@ class Runtime {
 };
 
 /**
- * RAII arm/clear for a single Host JS entry. Clears even if eval throws.
+ * RAII arm/clear for a single ScriptRuntime JS entry. Clears even if eval throws.
  * budget <= 0 leaves the watchdog disarmed (no-op scope).
  * Do not nest: outer clear would disarm an inner arm (use separate blocks).
  */

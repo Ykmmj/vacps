@@ -1,9 +1,8 @@
 #pragma once
 
+#include "http/request_handler.hpp"
 #include "http/routes.hpp"
-#include "http/script_dispatch.hpp"
 #include "app/log.hpp"
-#include "quickjs/host.hpp"
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
@@ -39,12 +38,12 @@ inline bool is_benign_disconnect(const beast::error_code& ec) {
          ec == beast::error::timeout || ec == http::error::body_limit;
 }
 
-/** TCP session: pure transport; dispatches to script via http::dispatch_to_script. */
+/** TCP session: pure transport; dispatches via IRequestHandler. */
 class Session : public std::enable_shared_from_this<Session> {
  public:
   Session(
       tcp::socket socket,
-      std::shared_ptr<vacps::js::Host> script,
+      std::shared_ptr<IRequestHandler> handler,
       std::weak_ptr<Server> server = {});
 
   void run();
@@ -59,7 +58,7 @@ class Session : public std::enable_shared_from_this<Session> {
       http::request<http::string_body> req);
 
   beast::tcp_stream stream_;
-  std::shared_ptr<vacps::js::Host> script_;
+  std::shared_ptr<IRequestHandler> handler_;
   std::weak_ptr<Server> server_;
   bool finished_{false};
 };

@@ -1,7 +1,7 @@
 #include "app/log.hpp"
-#include "quickjs/convert.hpp"
-#include "quickjs/host.hpp"
-#include "quickjs/value.hpp"
+#include "quickjs/raii/convert.hpp"
+#include "quickjs/script_runtime.hpp"
+#include "quickjs/raii/value.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -47,7 +47,7 @@ class JsNativeApiTest : public ::testing::Test {
            std::to_string(::getpid()) /
            std::to_string(reinterpret_cast<std::uintptr_t>(this));
     fs::create_directories(dir_);
-    module_opts_.data_dir = dir_.string();
+    services_opts_.data_dir = dir_.string();
   }
 
   void TearDown() override {
@@ -56,12 +56,12 @@ class JsNativeApiTest : public ::testing::Test {
   }
 
   vacps::js::EngineOptions engine_opts_{};
-  vacps::js::ModuleEnvOptions module_opts_{};
+  vacps::js::ScriptServicesOptions services_opts_{};
   fs::path dir_;
 };
 
 /**
- * Load script/tests/native_modules_test.mjs in QuickJS Host and await top-level
+ * Load script/tests/native_modules_test.mjs in QuickJS ScriptRuntime and await top-level
  * async tests that exercise every vacps:* surface.
  */
 TEST_F(JsNativeApiTest, AllNativeModules) {
@@ -72,9 +72,10 @@ TEST_F(JsNativeApiTest, AllNativeModules) {
   ASSERT_FALSE(src.empty()) << "empty test script";
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(ioc, engine_opts_, module_opts_);
-  ASSERT_TRUE(host_r) << host_r.error().message;
-  auto host = std::move(*host_r);
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
 
   bool ok = false;
   std::string err;
@@ -83,10 +84,10 @@ TEST_F(JsNativeApiTest, AllNativeModules) {
 
   asio::co_spawn(
       ioc,
-      [host, &ok, &err, &passed, &total, src, path = script_path.string()]()
+      [rt, &ok, &err, &passed, &total, src, path = script_path.string()]()
           -> asio::awaitable<void> {
-        auto* ctx = host->context().get();
-        // Same as Host::load_and_initialize: COMPILE_ONLY → EvalFunction → namespace.
+        auto* ctx = rt->context().get();
+        // Same as ScriptRuntime::load_and_initialize: COMPILE_ONLY → EvalFunction → namespace.
         vacps::js::Value compiled{
             ctx,
             JS_Eval(
@@ -96,16 +97,16 @@ TEST_F(JsNativeApiTest, AllNativeModules) {
                 path.c_str(),
                 JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY)};
         if (compiled.is_exception()) {
-          err = host->context().take_exception_error().message;
+          err = rt->context().take_exception_error().message;
           co_return;
         }
         auto* mod = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled.get()));
         vacps::js::Value pending{ctx, JS_EvalFunction(ctx, compiled.release())};
         if (pending.is_exception()) {
-          err = host->context().take_exception_error().message;
+          err = rt->context().take_exception_error().message;
           co_return;
         }
-        auto settled = co_await host->await_value(std::move(pending));
+        auto settled = co_await rt->await_value(std::move(pending));
         if (!settled) {
           err = settled.error().message;
           co_return;

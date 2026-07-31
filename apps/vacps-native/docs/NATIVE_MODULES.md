@@ -6,7 +6,7 @@ C++ 只提供**能力/工厂**（类型级 API），**不**预创建业务实例
 
 ## Global: `URL`（Ada 4.x）
 
-Host 启动时安装 `globalThis.URL`（[Ada](https://github.com/ada-url/ada) v4 WHATWG 解析）。  
+ScriptRuntime 启动时安装 `globalThis.URL`（[Ada](https://github.com/ada-url/ada) v4 WHATWG 解析）。  
 供 Zod `z.url()` 等依赖浏览器/Node URL API 的代码使用。
 
 | API                                                                                                | 说明                            |
@@ -25,21 +25,23 @@ Host 启动时安装 `globalThis.URL`（[Ada](https://github.com/ada-url/ada) v4
 
 ## `vacps:store`
 
-**工厂模式**：C++ 不预开库；JS 调用 `open(path)` 创建实例并持有。
+**create-at-JS-call**：C++ 不预开库；JS 调用 `Store.open(path, options?)` 创建实例并持有。  
+无 free `open()`；无 `begin`/`commit`/`rollback`（多步原子用 `transaction`）。
 
 ```ts
-import * as store from 'vacps:store';
-const db = store.open(`${host.dataDir()}/agent.db`);
-db.exec('...');
-db.close();
+import { Store } from 'vacps:store';
+import * as host from 'vacps:host';
+const db = await Store.open(`${host.dataDir()}/agent.db`);
+await db.exec('...');
+await db.close();
 ```
 
-| API                              | 说明             |
-| -------------------------------- | ---------------- |
-| `open(path): Store`              | 创建连接（能力） |
-| `Store.exec/run/query`           | SQL              |
-| `Store.begin/commit/rollback`    | 事务             |
-| `Store.path()` / `Store.close()` | 元数据 / 释放    |
+| API | 说明 |
+| --- | --- |
+| `Store.open(path, options?)` | 异步创建连接（`mode?`） |
+| `Store.exec` / `run` / `query` | SQL（Promise） |
+| `Store.transaction(steps)` | 多步原子（BEGIN IMMEDIATE + steps + COMMIT） |
+| `Store.path` / `Store.closed` / `Store.close()` | 元数据 / 释放 |
 
 ## `vacps:host`（进程信息，极薄）
 
@@ -54,8 +56,8 @@ db.close();
 | `platform()`                    | `linux-x86_64-musl`             |
 | `getenv(name)`                  | 进程环境变量；未设置返回 `null` |
 
-C++ `Host` 类本身：QuickJS runtime、脚本加载、`invoke_export`、Promise↔Asio 唤醒。  
-Context opaque = `Host*`（已删除 `HostState`）。
+C++ `ScriptRuntime`：QuickJS engine、脚本加载、`invoke_export`、Promise↔Asio 唤醒。  
+Context opaque = `ScriptRuntime*`；共享服务经 `ScriptServices`（`services()`），不是 service locator。
 
 ## Event loop & Promise bridge（架构定稿）
 
@@ -83,21 +85,23 @@ Context opaque = `Host*`（已删除 `HostState`）。
 
 ## `vacps:http`（入站 Server + 出站 request）
 
-### 入站 Server（工厂，JS 持有）
+### 入站 Server（`new Server`，JS 持有）
 
 ```ts
 import * as http from 'vacps:http';
-const server = http.createServer();
-server.listen();
-server.close();
+const server = new http.Server({ host: '127.0.0.1', port: 8788 });
+await server.listen();
+// server.listening === true
+await server.close();
 ```
 
-| API                                             | 说明                               |
-| ----------------------------------------------- | ---------------------------------- |
-| `createServer(options?)`                        | 工厂；`options?: { host?, port? }` |
-| `Server.listen()` / `close()` / `isListening()` | 传输层生命周期                     |
+| API                                    | 说明                                          |
+| -------------------------------------- | --------------------------------------------- |
+| `new Server(options)`                  | `options: { host?, port }` — `port` required  |
+| `Server.listening`                     | `readonly boolean` while acceptor is open     |
+| `Server.listen()` / `close()`          | Promise lifecycle; bind only in `listen()`    |
 
-Session → `http::dispatch_to_script` → `Host::invoke_export("handleRequest")`。
+Session → `IRequestHandler` / `ScriptRequestHandler` → `ScriptRuntime::invoke_export("handleRequest")`。
 
 ### 出站 `request`（HTTP/HTTPS Promise）
 
@@ -139,7 +143,7 @@ const res = await http.request({
 | GET  | `/tasks/:id/logs`   | `?offset=&stream=`                                         |
 | POST | `/tasks/:id/cancel` | 队列中取消 / 运行中打标                                    |
 
-- 表：`tasks` / `task_logs` / `request_nonces` / `task_idempotency`（migration）
+- 表：`tasks` / `task_logs` / `request_nonces` / `task_idempotency`（`schema.ts` 有序建表）
 - 执行：`command` / `shell` → `process.run`；`agent` → 409 capability_unavailable
 - 并发：pump 单任务（`claimNextQueued`）
 - **崩溃恢复**：启动时 `running`/`starting` → `failed` + `agent_restarted`（不自动重跑）
@@ -148,29 +152,39 @@ const res = await http.request({
 
 ## `vacps:fs`
 
-**纯 I/O**：C++ 不做产品路径策略。相对路径仅拼到 `dataDir` 下；绝对路径原样使用。  
+**纯 I/O**：C++ 不做产品路径策略（无 PathSandbox）。相对路径仅拼到 `dataDir` 下；绝对路径原样使用。  
 MCP / 文件工具的黑名单与 workspace 约束在 JS `runtime/path-guard.ts`（与 Node agent 一致）。  
-宿主内部（如 telemetry 读 `/proc`）直接 `fs.readText`，不经 path-guard。
+宿主内部（如 telemetry 读 `/proc`）可直接走 C++ path helpers，不经 path-guard。
 
-全部 API 返回 **`Promise`**（不阻塞 Host `io_context` 线程）：
+### 主 API：`File`（handle）
 
-| API                                                                  | 实现                                                                        |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `readText` / `writeText` / `appendText` / `readBytes` / `writeBytes` | `probe_io_uring()` 成功 → Asio `stream_file`；否则 `thread_pool` + 同步读写 |
-| `stat(path)`                                                         | type / size / mtimeMs / readable / writable（thread_pool）                  |
-| `mkdir` / `exists` / `remove` / `rename` / `list`                    | 始终 `asio::thread_pool` 卸载                                               |
+| 项 | 说明 |
+| -- | --- |
+| 打开 | `File.open(path, flags, mode?)` 或 `File.open(path, { flags, mode? })` |
+| flags | Node/POSIX 风格整数位掩码（`O_RDONLY` / `O_WRONLY` / `O_RDWR` / `O_CREAT` / …）；**无**字符串 OpenMode |
+| 后端 | `probe_io_uring()` 成功 → Asio `random_access_file`；否则 `thread_pool` + 私有 FD |
+| I/O | `read` / `readAt` / `write` / `writeAt` / `readText` / `writeText` / `truncate` / `stat` / `flush` / `close`（全部 `Promise`） |
 
-Host 持有 2 线程 `thread_pool`（`Host::pool()`）。启动时 `probe_io_uring()`（setup + NOP submit + wait），**不是**只测 compile-time 宏。
+### 命名空间 ops（path helpers）
+
+| API | 实现 |
+| --- | --- |
+| `mkdir` / `exists` / `remove` / `rename` / `readDirectory` / `stat` | 始终 `asio::thread_pool` 卸载同步 path helpers |
+
+内容 I/O 仅通过 `File`（无 free path-level content helpers）。
+
+ScriptServices 持有 2 线程 `thread_pool`（`ScriptRuntime::services().pool`）。启动时 `probe_io_uring()`（setup + NOP submit + wait），**不是**只测 compile-time 宏。`ScriptRuntime::use_asio_file()` 把探测结果传给 `File::async_open`。
 
 **io_uring / Docker 注意**（Asio 无自动降级）：
 
-| 环境                                                 | 典型表现                                                                                                                                |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Docker 默认 seccomp（拦 setup/register/enter）       | `io_uring_queue_init` → EPERM；Asio 构造 `stream_file` 会 **抛** `system_error`。我们 probe 失败 → 永不建 `stream_file`，走 thread_pool |
-| 不完整 seccomp（允许 setup，拦 enter）               | submit 失败或 Asio 不传播错误 → 操作可能 **永久 pending**。probe 含 submit/wait，失败则不用 stream_file                                 |
-| 应用吞掉 `stream_file` 构造异常且不 `reject` Promise | 也会「永久 pending」——`fs_spawn` 已 try/catch + 必 `notify_progress`                                                                    |
+| 环境 | 典型表现 |
+| ---- | -------- |
+| Docker 默认 seccomp（拦 setup/register/enter） | `io_uring_queue_init` → EPERM；Asio 构造 `random_access_file` 会 **抛** `system_error`。probe 失败 → 永不建 Asio file，走 thread_pool |
+| 不完整 seccomp（允许 setup，拦 enter） | submit 失败或 Asio 不传播错误 → 操作可能 **永久 pending**。probe 含 submit/wait，失败则不用 Asio file |
+| 应用吞掉构造异常且不 `reject` Promise | 也会「永久 pending」——`spawn_js_promise` 已 try/catch + 必 `notify_progress` |
 
 探测失败时日志：`io_uring probe: … — thread_pool fallback`。
+
 
 ## `vacps:process`
 

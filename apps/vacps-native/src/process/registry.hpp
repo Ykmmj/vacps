@@ -76,14 +76,17 @@ struct RegistryLimits {
 };
 
 /**
- * Long-lived subprocess registry (Boost.Process v2 + Asio).
+ * Internal subprocess registry (Boost.Process v2 + Asio).
+ * Not a product API — process::Process is the handle; JS never sees entry ids.
  * Single-threaded: all methods co_awaited / called on the host io_context.
  * Process groups: setpgid + kill(-pgid) on timeout/terminate (design §19.2).
  *
  * Lifecycle reclaim:
- * - process.close(id): free buffers immediately
+ * - close(id): free buffers immediately
  * - finished + retention_ms TTL: auto-erase if not closed
  * - start may reclaim oldest finished entries when over max_entries / buffer budget
+ *
+ * Owned by ScriptServices; Process holds a non-owning Registry&.
  */
 class Registry {
  public:

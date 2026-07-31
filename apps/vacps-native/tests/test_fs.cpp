@@ -1,14 +1,56 @@
 #include "crypto/crypto.hpp"
+#include "fs/file.hpp"
 #include "fs/fs.hpp"
+#include "fs/open_options.hpp"
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
+using vacps::Result;
+using vacps::VoidResult;
+using vacps::fs::Flags;
+
+namespace {
+
+VoidResult write_text_via_file(const fs::path& path, std::string_view data) {
+  vacps::fs::OpenOptions opts;
+  opts.flags = Flags::write_only | Flags::create | Flags::truncate;
+  auto f = vacps::fs::File::open(path.string(), opts);
+  if (!f) return std::unexpected(std::move(f.error()));
+  auto n = (*f)->write_text(data);
+  if (!n) return std::unexpected(std::move(n.error()));
+  return (*f)->close();
+}
+
+Result<std::string> read_text_via_file(const fs::path& path) {
+  vacps::fs::OpenOptions opts;
+  opts.flags = Flags::read_only;
+  auto f = vacps::fs::File::open(path.string(), opts);
+  if (!f) return std::unexpected(std::move(f.error()));
+  auto text = (*f)->read_text();
+  if (!text) return std::unexpected(std::move(text.error()));
+  auto closed = (*f)->close();
+  if (!closed) return std::unexpected(std::move(closed.error()));
+  return *text;
+}
+
+VoidResult append_text_via_file(const fs::path& path, std::string_view data) {
+  vacps::fs::OpenOptions opts;
+  opts.flags = Flags::write_only | Flags::create | Flags::append;
+  auto f = vacps::fs::File::open(path.string(), opts);
+  if (!f) return std::unexpected(std::move(f.error()));
+  auto n = (*f)->write_text(data);
+  if (!n) return std::unexpected(std::move(n.error()));
+  return (*f)->close();
+}
+
+}  // namespace
 
 class FsTest : public ::testing::Test {
  protected:
@@ -59,7 +101,7 @@ TEST_F(FsTest, RelativeJoinsWorkspaceNoPolicy) {
 
 TEST_F(FsTest, FileStatMetadata) {
   const auto f = root_ / "stat-me.txt";
-  ASSERT_TRUE(vacps::fs::write_text(f, "hello-stat"));
+  ASSERT_TRUE(write_text_via_file(f, "hello-stat"));
   auto st = vacps::fs::file_stat(f);
   ASSERT_TRUE(st) << st.error().message;
   EXPECT_EQ(st->type, "file");
@@ -72,38 +114,47 @@ TEST_F(FsTest, FileStatMetadata) {
   EXPECT_EQ(dst->type, "directory");
 }
 
-TEST_F(FsTest, ReadRangeAndHashFile) {
+TEST_F(FsTest, ReadAtAndContentHash) {
   const auto f = root_ / "range.bin";
   // 100 bytes: "0123456789" repeated 10 times
   std::string payload;
   for (int i = 0; i < 10; ++i) payload += "0123456789";
-  ASSERT_TRUE(vacps::fs::write_text(f, payload));
+  ASSERT_TRUE(write_text_via_file(f, payload));
 
-  auto range = vacps::fs::read_range(f, 10, 5);
+  vacps::fs::OpenOptions ro;
+  ro.flags = Flags::read_only;
+  auto file = vacps::fs::File::open(f.string(), ro);
+  ASSERT_TRUE(file) << file.error().message;
+
+  auto range = (*file)->read_at(10, 5);
   ASSERT_TRUE(range) << range.error().message;
   ASSERT_EQ(range->size(), 5u);
   EXPECT_EQ(std::string(range->begin(), range->end()), "01234");
 
-  auto past = vacps::fs::read_range(f, 1000, 10);
+  auto past = (*file)->read_at(1000, 10);
   ASSERT_TRUE(past);
   EXPECT_TRUE(past->empty());
 
-  auto dig = vacps::fs::hash_file(f);
-  ASSERT_TRUE(dig) << dig.error().message;
-  EXPECT_EQ(dig->size_bytes, 100u);
-  // sha256 of 100-byte payload
-  auto one_shot = vacps::crypto::sha256(payload);
-  EXPECT_EQ(dig->sha256_hex, vacps::crypto::to_hex(one_shot));
+  auto full = (*file)->read_at(0, 1024);
+  ASSERT_TRUE(full) << full.error().message;
+  ASSERT_EQ(full->size(), 100u);
+  auto dig = vacps::crypto::sha256(
+      std::string_view(reinterpret_cast<const char*>(full->data()), full->size()));
+  EXPECT_EQ(vacps::crypto::to_hex(dig), vacps::crypto::to_hex(vacps::crypto::sha256(payload)));
+  ASSERT_TRUE((*file)->close());
 }
 
 TEST_F(FsTest, WriteReadTextAndList) {
   auto path = vacps::fs::resolve_path(root_, "dir/hello.txt");
   ASSERT_TRUE(path) << path.error().message;
 
-  auto wr = vacps::fs::write_text(*path, "hello-vacps");
+  // Parent dir must exist for File open (mkdir is a namespace op).
+  ASSERT_TRUE(vacps::fs::mkdir_p(path->parent_path()));
+
+  auto wr = write_text_via_file(*path, "hello-vacps");
   ASSERT_TRUE(wr) << wr.error().message;
 
-  auto rd = vacps::fs::read_text(*path);
+  auto rd = read_text_via_file(*path);
   ASSERT_TRUE(rd) << rd.error().message;
   EXPECT_EQ(*rd, "hello-vacps");
 
@@ -122,8 +173,8 @@ TEST_F(FsTest, AbsoluteWriteUnderTemp) {
   const auto abs = (root_ / "abs-write.txt").string();
   auto path = vacps::fs::resolve_path(root_, abs);
   ASSERT_TRUE(path) << path.error().message;
-  ASSERT_TRUE(vacps::fs::write_text(*path, "via-abs"));
-  auto rd = vacps::fs::read_text(*path);
+  ASSERT_TRUE(write_text_via_file(*path, "via-abs"));
+  auto rd = read_text_via_file(*path);
   ASSERT_TRUE(rd);
   EXPECT_EQ(*rd, "via-abs");
 }
@@ -131,9 +182,9 @@ TEST_F(FsTest, AbsoluteWriteUnderTemp) {
 TEST_F(FsTest, AppendAndRemove) {
   auto path = vacps::fs::resolve_path(root_, "a.txt");
   ASSERT_TRUE(path);
-  ASSERT_TRUE(vacps::fs::write_text(*path, "a"));
-  ASSERT_TRUE(vacps::fs::append_text(*path, "b"));
-  auto rd = vacps::fs::read_text(*path);
+  ASSERT_TRUE(write_text_via_file(*path, "a"));
+  ASSERT_TRUE(append_text_via_file(*path, "b"));
+  auto rd = read_text_via_file(*path);
   ASSERT_TRUE(rd);
   EXPECT_EQ(*rd, "ab");
   ASSERT_TRUE(vacps::fs::remove_path(*path));
@@ -162,7 +213,7 @@ TEST_F(FsTest, SymlinkResolveIsPureIo) {
                        std::to_string(::getpid());
   fs::create_directories(outside);
   const auto secret = outside / "secret.txt";
-  ASSERT_TRUE(vacps::fs::write_text(secret, "nope"));
+  ASSERT_TRUE(write_text_via_file(secret, "nope"));
 
   const auto link = root_ / "escape-link";
   std::error_code ec;
@@ -173,7 +224,7 @@ TEST_F(FsTest, SymlinkResolveIsPureIo) {
 
   auto r = vacps::fs::resolve_path(root_, "escape-link");
   ASSERT_TRUE(r) << r.error().message;
-  auto text = vacps::fs::read_text(*r);
+  auto text = read_text_via_file(*r);
   ASSERT_TRUE(text) << text.error().message;
   EXPECT_EQ(*text, "nope");
 
@@ -183,8 +234,9 @@ TEST_F(FsTest, SymlinkResolveIsPureIo) {
 TEST_F(FsTest, NestedRelativeOk) {
   auto p = vacps::fs::resolve_path(root_, "x/y/z.txt");
   ASSERT_TRUE(p) << p.error().message;
-  ASSERT_TRUE(vacps::fs::write_text(*p, "z"));
-  auto rd = vacps::fs::read_text(*p);
+  ASSERT_TRUE(vacps::fs::mkdir_p(p->parent_path()));
+  ASSERT_TRUE(write_text_via_file(*p, "z"));
+  auto rd = read_text_via_file(*p);
   ASSERT_TRUE(rd);
   EXPECT_EQ(*rd, "z");
 }
@@ -192,7 +244,7 @@ TEST_F(FsTest, NestedRelativeOk) {
 TEST_F(FsTest, ReadProcLoadavgWhenPresent) {
   auto path = vacps::fs::resolve_path(root_, "/proc/loadavg");
   ASSERT_TRUE(path);
-  auto text = vacps::fs::read_text(*path);
+  auto text = read_text_via_file(*path);
   if (!text) {
     GTEST_SKIP() << "no /proc/loadavg: " << text.error().message;
   }

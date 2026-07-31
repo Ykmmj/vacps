@@ -104,63 +104,70 @@ else()
   message(FATAL_ERROR "Boost.Process sources not found (need FetchContent Boost with libs/process)")
 endif()
 
-# ── Core library (shared by agent + tests) ─────────────────────────
-# Layout: src/{main,app,quickjs,process,storage,http,crypto,fs}
-add_library(vacps_native_core STATIC
+# ── Layered libraries (n1.md §十九) ────────────────────────────────
+# Domain layers do not link QuickJS. quickjs_core does not link domain modules.
+# quickjs_bindings composes domain + engine. vacps_native_core / vacps_runtime
+# are INTERFACE umbrellas so agent + tests keep a single link name.
+#
+# Static archives + cross-archive refs (e.g. ScriptRuntime → install_modules
+# in bindings) need a rescan group at the final executable.
+
+function(vacps_layer name)
+  add_library(${name} STATIC ${ARGN})
+  target_include_directories(${name} PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    ${VACPS_BOOST_INCLUDE_DIRS}
+  )
+  target_compile_definitions(${name} PUBLIC
+    VACPS_NATIVE_VERSION="${PROJECT_VERSION}"
+    BOOST_ASIO_NO_DEPRECATED
+    BOOST_BEAST_USE_STD_STRING_VIEW
+    BOOST_PROCESS_USE_STD_FS=1
+    BOOST_PROCESS_STATIC_LINK=1
+  )
+  target_compile_features(${name} PUBLIC cxx_std_23)
+  set_target_properties(${name} PROPERTIES POSITION_INDEPENDENT_CODE OFF)
+  if(VACPS_BOOST_TARGETS)
+    target_link_libraries(${name} PUBLIC ${VACPS_BOOST_TARGETS})
+  endif()
+endfunction()
+
+# ── vacps_base: app + bootstrap ────────────────────────────────────
+vacps_layer(vacps_base
   src/app/version.cpp
   src/app/log.cpp
-  src/storage/db.cpp
-  src/fs/fs.cpp
-  src/fs/sandbox.cpp
-  src/fs/async.cpp
-  src/fs/io_uring_probe.cpp
-  src/process/process.cpp
-  src/process/registry.cpp
-  src/crypto/crypto.cpp
-  src/http/script_dispatch.cpp
-  src/http/server.cpp
-  src/http/session.cpp
-  src/http/client.cpp
-  src/quickjs/runtime.cpp
-  src/quickjs/context.cpp
-  src/quickjs/host.cpp
-  src/quickjs/module_env.cpp
-  src/quickjs/modules.cpp
-  src/quickjs/url_globals.cpp
-  src/quickjs/encoding_globals.cpp
+  src/bootstrap/environment.cpp
+  src/bootstrap/config.cpp
 )
-
-target_include_directories(vacps_native_core PUBLIC
-  "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  ${VACPS_BOOST_INCLUDE_DIRS}
-)
-
-target_compile_definitions(vacps_native_core PUBLIC
-  VACPS_NATIVE_VERSION="${PROJECT_VERSION}"
-  BOOST_ASIO_NO_DEPRECATED
-  BOOST_BEAST_USE_STD_STRING_VIEW
-  BOOST_PROCESS_USE_STD_FS=1
-  BOOST_PROCESS_STATIC_LINK=1
-)
-
-if(VACPS_BOOST_TARGETS)
-  target_link_libraries(vacps_native_core PUBLIC ${VACPS_BOOST_TARGETS})
-endif()
-
-target_link_libraries(vacps_native_core PUBLIC
+target_link_libraries(vacps_base PUBLIC
   Threads::Threads
-  vacps_sqlite
-  vacps_quickjs
-  vacps_boost_process
-  ada
-  simdutf::simdutf
   spdlog::spdlog
-  nlohmann_json::nlohmann_json
+)
+
+# ── vacps_crypto ───────────────────────────────────────────────────
+vacps_layer(vacps_crypto
+  src/crypto/crypto.cpp
+)
+target_link_libraries(vacps_crypto PUBLIC
+  vacps_base
   OpenSSL::SSL
   OpenSSL::Crypto
 )
 
-# liburing: compile-time enable Asio stream_file + runtime probe (setup+NOP).
+# ── vacps_fs (uses crypto for content hash; Asio headers for async) ─
+vacps_layer(vacps_fs
+  src/fs/fs.cpp
+  src/fs/open_options.cpp
+  src/fs/file.cpp
+  src/fs/async.cpp
+  src/fs/io_uring_probe.cpp
+)
+target_link_libraries(vacps_fs PUBLIC
+  vacps_base
+  vacps_crypto
+)
+
+# liburing: compile-time enable Asio random_access_file + runtime probe (setup+NOP).
 # Docker default seccomp blocks io_uring_setup → probe fails → thread_pool only.
 # Incomplete profiles (setup OK, enter denied) also fail probe — avoids pending ops.
 # Asio has no automatic file→thread_pool fallback; we branch ourselves.
@@ -175,16 +182,151 @@ else()
   find_library(VACPS_URING_LIB uring)
 endif()
 if(VACPS_URING_LIB AND VACPS_URING_INCLUDE)
-  target_compile_definitions(vacps_native_core PUBLIC
+  # Global so open_options Flags type (Asio file_base vs fallback) is ODR-consistent.
+  add_compile_definitions(
     BOOST_ASIO_HAS_IO_URING=1
     VACPS_HAVE_LIBURING=1
   )
-  target_include_directories(vacps_native_core PUBLIC ${VACPS_URING_INCLUDE})
-  target_link_libraries(vacps_native_core PUBLIC ${VACPS_URING_LIB})
-  message(STATUS "liburing: ${VACPS_URING_LIB} (stream_file if probe_io_uring() ok)")
+  include_directories(${VACPS_URING_INCLUDE})
+  target_link_libraries(vacps_fs PUBLIC ${VACPS_URING_LIB})
+  message(STATUS "liburing: ${VACPS_URING_LIB} (random_access_file if probe_io_uring() ok)")
 else()
-  message(STATUS "liburing: not found (vacps:fs content always thread_pool)")
+  message(STATUS "liburing: not found (vacps:fs File always thread_pool)")
 endif()
+
+# ── vacps_storage ──────────────────────────────────────────────────
+vacps_layer(vacps_storage
+  src/storage/database.cpp
+  src/storage/store.cpp
+)
+target_link_libraries(vacps_storage PUBLIC
+  vacps_base
+  vacps_sqlite
+)
+
+# ── vacps_process ──────────────────────────────────────────────────
+vacps_layer(vacps_process
+  src/process/process.cpp
+  src/process/registry.cpp
+)
+target_link_libraries(vacps_process PUBLIC
+  vacps_base
+  vacps_boost_process
+)
+
+# ── vacps_url (domain; Ada) ────────────────────────────────────────
+vacps_layer(vacps_url
+  src/url/url.cpp
+  src/url/search_params.cpp
+)
+target_link_libraries(vacps_url PUBLIC
+  vacps_base
+  ada
+)
+
+# ── vacps_text (Encoder header-only + Decoder; simdutf) ────────────
+vacps_layer(vacps_text
+  src/text/decoder.cpp
+)
+target_link_libraries(vacps_text PUBLIC
+  vacps_base
+  simdutf::simdutf
+)
+
+# ── vacps_http (transport only — IRequestHandler; no QuickJS) ──────
+# script_dispatch lives in vacps_quickjs_bindings (needs ScriptRuntime).
+vacps_layer(vacps_http
+  src/http/client.cpp
+  src/http/server.cpp
+  src/http/session.cpp
+)
+target_link_libraries(vacps_http PUBLIC
+  vacps_base
+  ada
+  nlohmann_json::nlohmann_json
+  OpenSSL::SSL
+  OpenSSL::Crypto
+)
+
+# ── vacps_quickjs_core: engine RAII + ScriptRuntime ────────────────
+# Headers-only also used here: value, convert, cstring, atom, class_binding,
+# object_holder, promise_bridge, js_bridge (js_bridge still includes storage
+# headers — include path only; no vacps_storage link per n1 layering).
+vacps_layer(vacps_quickjs_core
+  src/quickjs/runtime.cpp
+  src/quickjs/context.cpp
+  src/quickjs/script_services.cpp
+  src/quickjs/script_runtime.cpp
+)
+target_link_libraries(vacps_quickjs_core PUBLIC
+  vacps_base
+  vacps_process
+  vacps_quickjs
+)
+
+# ── vacps_quickjs_bindings: modules, globals, HTTP→JS adapter ──────
+# module_catalog.cpp owns composition (init_module_* list) + loader.
+vacps_layer(vacps_quickjs_bindings
+  src/quickjs/module_catalog.cpp
+  src/quickjs/globals/install.cpp
+  src/quickjs/globals/url_binding.cpp
+  src/quickjs/globals/url_search_params_binding.cpp
+  src/quickjs/globals/text_encoder_binding.cpp
+  src/quickjs/globals/text_decoder_binding.cpp
+  src/quickjs/bindings/log_binding.cpp
+  src/quickjs/bindings/host_binding.cpp
+  src/quickjs/bindings/crypto_binding.cpp
+  src/quickjs/bindings/fs_binding.cpp
+  src/quickjs/bindings/store_binding.cpp
+  src/quickjs/bindings/http_binding.cpp
+  src/quickjs/bindings/process_binding.cpp
+  src/http/script_dispatch.cpp
+  src/quickjs/script_request_handler.cpp
+)
+target_link_libraries(vacps_quickjs_bindings PUBLIC
+  vacps_quickjs_core
+  vacps_fs
+  vacps_storage
+  vacps_process
+  vacps_crypto
+  vacps_http
+  vacps_url
+  vacps_text
+  ada
+  simdutf::simdutf
+  nlohmann_json::nlohmann_json
+)
+
+# ── Umbrella: full stack for agent + tests (n1 vacps_runtime) ──────
+# LINK_GROUP RESCAN: ScriptRuntime (core) → install_modules (bindings)
+# and similar cross-archive static refs under --gc-sections.
+set(_vacps_layer_libs
+  vacps_quickjs_bindings
+  vacps_quickjs_core
+  vacps_http
+  vacps_process
+  vacps_fs
+  vacps_storage
+  vacps_crypto
+  vacps_url
+  vacps_text
+  vacps_base
+)
+
+add_library(vacps_native_core INTERFACE)
+target_link_libraries(vacps_native_core INTERFACE
+  "$<LINK_GROUP:RESCAN,${_vacps_layer_libs}>"
+)
+
+# Composition / process entry (n1 §十七 ShutdownCoordinator; §十九 vacps_runtime).
+vacps_layer(vacps_runtime
+  src/runtime/shutdown_coordinator.cpp
+  src/runtime/tick_loop.cpp
+  src/runtime/application_runtime.cpp
+)
+target_link_libraries(vacps_runtime PUBLIC
+  vacps_native_core
+)
 
 # ── Agent binary ───────────────────────────────────────────────────
 add_executable(vacps-agent src/main.cpp)
@@ -192,7 +334,7 @@ set_target_properties(vacps-agent PROPERTIES
   OUTPUT_NAME "vacps-agent-linux-x86_64"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
-target_link_libraries(vacps-agent PRIVATE vacps_native_core)
+target_link_libraries(vacps-agent PRIVATE vacps_runtime)
 
 include(GNUInstallDirs)
 install(TARGETS vacps-agent RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -205,11 +347,11 @@ if(VACPS_BUILD_TESTS)
   add_executable(vacps-native-tests
     tests/test_crypto.cpp
     tests/test_fs.cpp
-    tests/test_fs_sandbox.cpp
+    tests/test_fs_file.cpp
     tests/test_fs_async.cpp
     tests/test_db.cpp
     tests/test_process.cpp
-    tests/test_host.cpp
+    tests/test_script_runtime.cpp
     tests/test_js_native_api.cpp
     tests/test_promise_bridge.cpp
     tests/test_url_global.cpp
@@ -239,3 +381,5 @@ message(STATUS "  C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "  VACPS_STATIC: ${VACPS_STATIC}")
 message(STATUS "  VACPS_BUILD_TESTS: ${VACPS_BUILD_TESTS}")
 message(STATUS "  Build type:   ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Layers: base crypto fs storage process url text http quickjs_core quickjs_bindings")
+message(STATUS "  Umbrella: vacps_native_core (INTERFACE); vacps_runtime (STATIC composition)")

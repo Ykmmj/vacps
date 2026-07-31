@@ -1,8 +1,10 @@
 import * as crypto from 'vacps:crypto';
 import * as host from 'vacps:host';
-import * as process from 'vacps:process';
+import { Process, type ProcessResult } from 'vacps:process';
 
 import { resolveExecutable } from '../util/resolve-executable';
+import { randomUuidV4 } from '../util/uuid';
+import { utf8Decode } from '../util/utf8';
 import { assertSafeAbsolutePath } from './path-guard';
 
 export type ProcessStatus = 'running' | 'exited' | 'signaled' | 'timed_out' | 'cancelled';
@@ -42,7 +44,7 @@ export type ExecInput = {
   stderrHardMaxBytes?: number;
   idempotencyKey?: string;
   loadUserEnvironment?: boolean;
-  /** When false, leave stdin open for process.write (default true for exec). */
+  /** When false, leave stdin open for Process.write (default true for exec). */
   closeStdin?: boolean;
   /** Request TTY semantics for status reporting (native may not allocate a real PTY). */
   tty?: boolean;
@@ -54,7 +56,9 @@ interface IdempotencyRecord {
 }
 
 interface Tracked {
+  /** Client-facing id (UUID); not a native registry id. */
   id: string;
+  proc: Process;
   backendId: string;
   startedMs: number;
   stdoutMax: number;
@@ -62,6 +66,20 @@ interface Tracked {
   hardMaxStdout?: number;
   hardMaxStderr?: number;
   tty?: boolean;
+  stdinAvailable: boolean;
+  /** Accumulated progressive output (pump owns Process.read). */
+  stdoutAcc: string;
+  stderrAcc: string;
+  /** True after terminate() was requested. */
+  terminateRequested: boolean;
+  requestedSignal: string | null;
+  result: ProcessResult | null;
+  done: boolean;
+  finishedMs: number | null;
+  /** Background stdout/stderr pump; resolves when both streams EOF and wait() settles. */
+  pump: Promise<void>;
+  /** Waiters notified when pump accumulates data or finishes. */
+  waiters: Array<() => void>;
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -84,10 +102,9 @@ function preview(
   return { preview: data.slice(0, max), total_bytes: total, truncated: true };
 }
 
-function mapStatus(status: string, timedOut: boolean): ProcessStatus {
-  if (timedOut || status === 'timed_out') return 'timed_out';
-  if (status === 'cancelled') return 'cancelled';
-  if (status === 'running') return 'running';
+function mapFinishedStatus(t: Tracked): ProcessStatus {
+  if (t.result?.timedOut) return 'timed_out';
+  if (t.terminateRequested) return 'cancelled';
   return 'exited';
 }
 
@@ -110,10 +127,23 @@ export function canonicalRequestHash(
   return crypto.sha256Hex(material);
 }
 
+function notifyWaiters(t: Tracked): void {
+  const pending = t.waiters.splice(0);
+  for (const w of pending) w();
+}
+
+function waitForProgress(t: Tracked): Promise<void> {
+  if (t.done) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    t.waiters.push(resolve);
+  });
+}
+
 /**
  * Process manager (apps/vacps ProcessManager counterpart).
- * Long-lived: start/read/write/terminate via vacps:process.
- * Fire-and-wait: exec() waits until eof.
+ * Tracks Process instances under client-facing UUIDs (not native registry ids).
+ * Long-lived: start / progressive readWait / write / terminate / close.
+ * Fire-and-wait: exec() → waitUntilDone via Process.wait().
  */
 export class ProcessManager {
   private readonly idempotency = new Map<string, IdempotencyRecord>();
@@ -225,16 +255,23 @@ export class ProcessManager {
       64 * 1024 * 1024,
     );
 
-    const startedMs = host.nowMs();
-    const started = await process.start(argv, {
+    const command = argv[0]!;
+    const args = argv.slice(1);
+    const proc = new Process(command, args, {
       cwd,
       timeoutMs,
-      closeStdin,
-      hardMaxStdout,
-      hardMaxStderr,
+      stdin: closeStdin ? 'ignore' : 'pipe',
+      maxStdoutBytes: hardMaxStdout,
+      maxStderrBytes: hardMaxStderr,
     });
-    this.tracked.set(started.id, {
-      id: started.id,
+
+    const startedMs = host.nowMs();
+    await proc.start();
+
+    const id = randomUuidV4();
+    const tracked: Tracked = {
+      id,
+      proc,
       backendId: this.backendId,
       startedMs,
       stdoutMax,
@@ -242,10 +279,22 @@ export class ProcessManager {
       hardMaxStdout,
       hardMaxStderr,
       tty: wantTty,
-    });
+      stdinAvailable: !closeStdin,
+      stdoutAcc: '',
+      stderrAcc: '',
+      terminateRequested: false,
+      requestedSignal: null,
+      result: null,
+      done: false,
+      finishedMs: null,
+      pump: Promise.resolve(),
+      waiters: [],
+    };
+    tracked.pump = this.pumpOutputs(tracked);
+    this.tracked.set(id, tracked);
 
     return {
-      process_id: started.id,
+      process_id: id,
       backend_id: this.backendId,
       status: 'running',
       exit_code: null,
@@ -262,6 +311,10 @@ export class ProcessManager {
     };
   }
 
+  /**
+   * Progressive output for long-lived processes.
+   * Cursor is manager-local (delivered offsets); Process owns native read offsets via pump.
+   */
   async readWait(
     processId: string,
     input: {
@@ -270,13 +323,25 @@ export class ProcessManager {
       waitMs?: number;
     } = {},
   ) {
-    const { stdoutOffset, stderrOffset } = parseCursor(input.cursor);
-    const r = await process.read(processId, {
-      waitMs: clamp(input.waitMs ?? 0, 0, 60_000),
-      maxBytes: clamp(input.maxBytes ?? 65_536, 1, 1_048_576),
-      stdoutOffset,
-      stderrOffset,
-    });
+    const t = this.require(processId);
+    const maxBytes = clamp(input.maxBytes ?? 65_536, 1, 1_048_576);
+    const waitMs = clamp(input.waitMs ?? 0, 0, 60_000);
+    let { stdoutOffset, stderrOffset } = parseCursor(input.cursor);
+
+    // Clamp cursor to what we have accumulated (cursor may lag pump).
+    stdoutOffset = Math.min(stdoutOffset, t.stdoutAcc.length);
+    stderrOffset = Math.min(stderrOffset, t.stderrAcc.length);
+
+    const hasNew = () =>
+      stdoutOffset < t.stdoutAcc.length || stderrOffset < t.stderrAcc.length || t.done;
+
+    if (!hasNew() && waitMs > 0) {
+      // Long-poll until pump signals progress (exact waitMs needs a host timer; block until data/done).
+      while (!hasNew()) {
+        await waitForProgress(t);
+      }
+    }
+
     const chunks: Array<{
       sequence: number;
       stream: 'stdout' | 'stderr';
@@ -284,31 +349,43 @@ export class ProcessManager {
       observed_at: string;
     }> = [];
     let seq = 1;
-    if (r.stdout) {
-      chunks.push({
-        sequence: seq++,
-        stream: 'stdout',
-        data: r.stdout,
-        observed_at: new Date(host.nowMs()).toISOString(),
-      });
+    let budget = maxBytes;
+    const observedAt = new Date(host.nowMs()).toISOString();
+
+    if (stdoutOffset < t.stdoutAcc.length && budget > 0) {
+      const data = t.stdoutAcc.slice(stdoutOffset, stdoutOffset + budget);
+      budget -= data.length;
+      stdoutOffset += data.length;
+      if (data) {
+        chunks.push({ sequence: seq++, stream: 'stdout', data, observed_at: observedAt });
+      }
     }
-    if (r.stderr) {
-      chunks.push({
-        sequence: seq++,
-        stream: 'stderr',
-        data: r.stderr,
-        observed_at: new Date(host.nowMs()).toISOString(),
-      });
+    if (stderrOffset < t.stderrAcc.length && budget > 0) {
+      const data = t.stderrAcc.slice(stderrOffset, stderrOffset + budget);
+      stderrOffset += data.length;
+      if (data) {
+        chunks.push({ sequence: seq++, stream: 'stderr', data, observed_at: observedAt });
+      }
     }
+
+    const eof =
+      t.done && stdoutOffset >= t.stdoutAcc.length && stderrOffset >= t.stderrAcc.length;
+    const status: ProcessStatus = t.done ? mapFinishedStatus(t) : 'running';
+    const exitCode = t.done && t.result && !t.result.timedOut ? t.result.exitCode : null;
+
     return {
       process_id: processId,
-      status: mapStatus(r.status, r.timedOut),
+      status,
       chunks,
-      next_cursor: encodeCursor(r.nextStdoutOffset, r.nextStderrOffset),
-      eof: r.eof,
-      exit_code: r.status === 'running' ? null : r.exitCode,
-      signal: r.timedOut ? 'SIGKILL' : null,
-      returned_bytes: r.stdout.length + r.stderr.length,
+      next_cursor: encodeCursor(stdoutOffset, stderrOffset),
+      eof,
+      exit_code: status === 'running' ? null : exitCode,
+      signal: t.result?.timedOut
+        ? 'SIGKILL'
+        : t.terminateRequested
+          ? (t.requestedSignal ?? 'SIGTERM')
+          : null,
+      returned_bytes: chunks.reduce((n, c) => n + c.data.length, 0),
     };
   }
 
@@ -317,37 +394,60 @@ export class ProcessManager {
     data: string,
     closeStdin = false,
   ): Promise<{ written_bytes: number }> {
-    const r = await process.write(processId, data, { close: closeStdin });
-    return { written_bytes: r.writtenBytes };
+    const t = this.require(processId);
+    const written = await t.proc.write(data);
+    if (closeStdin) {
+      // Process.write has no close-stdin option; mark locally for status reporting.
+      t.stdinAvailable = false;
+    }
+    return { written_bytes: written };
   }
 
-  /** Free native registry entry (buffers). Safe to call after waitUntilDone. */
+  /** Free Process (buffers). Safe to call after waitUntilDone. */
   async close(processId: string): Promise<{ closed: boolean }> {
+    const t = this.tracked.get(processId);
+    if (!t) return { closed: false };
     this.tracked.delete(processId);
-    const r = await process.close(processId);
-    return { closed: r.closed };
+    t.waiters.splice(0);
+    try {
+      await t.proc.close();
+    } catch {
+      /* idempotent / already closed */
+    }
+    return { closed: true };
   }
 
   async terminate(
     processId: string,
     signal: 'sigterm' | 'sigint' | 'sigkill' = 'sigterm',
-    gracePeriodMs = 3_000,
+    _gracePeriodMs = 3_000,
   ): Promise<
     ProcessSnapshot & {
       termination_requested: boolean;
       requested_signal: string;
     }
   > {
+    const t = this.require(processId);
     const nodeSignal =
       signal === 'sigkill' ? 'SIGKILL' : signal === 'sigint' ? 'SIGINT' : 'SIGTERM';
-    const r = await process.terminate(processId, {
-      signal: nodeSignal,
-      graceMs: clamp(gracePeriodMs, 0, 60_000),
-    });
+    t.terminateRequested = true;
+    t.requestedSignal = nodeSignal;
+    let requested = true;
+    try {
+      await t.proc.terminate(nodeSignal);
+    } catch {
+      requested = false;
+    }
+    // Let pump observe exit when possible.
+    try {
+      await t.pump;
+    } catch {
+      /* ignore */
+    }
     const snap = await this.snapshot(processId);
     return {
       ...snap,
-      termination_requested: r.requested,
+      termination_requested: requested,
       requested_signal: nodeSignal,
     };
   }
@@ -356,35 +456,38 @@ export class ProcessManager {
     processId: string,
     limits: { stdoutMax?: number; stderrMax?: number } = {},
   ): Promise<ProcessSnapshot> {
-    const tracked = this.tracked.get(processId);
-    const r = await process.read(processId, {
-      waitMs: 0,
-      maxBytes: 1_048_576,
-      stdoutOffset: 0,
-      stderrOffset: 0,
-    });
-    // Re-read full buffers: process.read with offset 0 returns slices up to maxBytes.
-    // For snapshot use totals + first max of available slice (accumulated in registry).
-    const stdoutMax = limits.stdoutMax ?? tracked?.stdoutMax ?? 16_384;
-    const stderrMax = limits.stderrMax ?? tracked?.stderrMax ?? 16_384;
-    const startedMs = tracked?.startedMs ?? host.nowMs();
-    const finished = r.status !== 'running';
-    const finishedMs = finished ? host.nowMs() : null;
+    const t = this.require(processId);
+    const stdoutMax = limits.stdoutMax ?? t.stdoutMax ?? 16_384;
+    const stderrMax = limits.stderrMax ?? t.stderrMax ?? 16_384;
+    const startedMs = t.startedMs;
+    const finished = t.done;
+    const finishedMs = finished ? (t.finishedMs ?? host.nowMs()) : null;
+    const timedOut = t.result?.timedOut === true;
+    const status: ProcessStatus = finished ? mapFinishedStatus(t) : 'running';
+
+    // Prefer pump-accumulated text; fall back to wait() capture if present.
+    const stdout = t.stdoutAcc || t.result?.stdout || '';
+    const stderr = t.stderrAcc || t.result?.stderr || '';
+
     return {
       process_id: processId,
-      backend_id: tracked?.backendId ?? this.backendId,
-      status: mapStatus(r.status, r.timedOut),
-      exit_code: finished && !r.timedOut ? r.exitCode : r.timedOut ? null : null,
-      signal: r.timedOut ? 'SIGKILL' : r.status === 'cancelled' ? 'SIGTERM' : null,
-      timed_out: r.timedOut,
+      backend_id: t.backendId,
+      status,
+      exit_code: finished && t.result && !timedOut ? t.result.exitCode : null,
+      signal: timedOut
+        ? 'SIGKILL'
+        : t.terminateRequested
+          ? (t.requestedSignal ?? 'SIGTERM')
+          : null,
+      timed_out: timedOut,
       started_at: new Date(startedMs).toISOString(),
       finished_at: finishedMs ? new Date(finishedMs).toISOString() : null,
       duration_ms: finishedMs ? finishedMs - startedMs : host.nowMs() - startedMs,
-      stdin_available: r.stdinOpen,
-      tty: tracked?.tty === true,
+      stdin_available: finished ? false : t.stdinAvailable,
+      tty: t.tty === true,
       output_cursor: null,
-      stdout: preview(r.stdout, stdoutMax),
-      stderr: preview(r.stderr, stderrMax),
+      stdout: preview(stdout, stdoutMax),
+      stderr: preview(stderr, stderrMax),
     };
   }
 
@@ -393,45 +496,59 @@ export class ProcessManager {
     processId: string,
     limits: { stdoutMax?: number; stderrMax?: number } = {},
   ): Promise<ProcessSnapshot> {
-    let stdoutOff = 0;
-    let stderrOff = 0;
-    let stdout = '';
-    let stderr = '';
-    for (;;) {
-      const r = await process.read(processId, {
-        waitMs: 500,
-        maxBytes: 256_000,
-        stdoutOffset: stdoutOff,
-        stderrOffset: stderrOff,
+    const t = this.require(processId);
+    await t.pump;
+    return this.snapshot(processId, limits);
+  }
+
+  private require(processId: string): Tracked {
+    const t = this.tracked.get(processId);
+    if (!t) {
+      throw Object.assign(new Error(`Unknown process_id: ${processId}`), {
+        code: 'not_found',
+        statusCode: 404,
       });
-      if (r.stdout) stdout += r.stdout;
-      if (r.stderr) stderr += r.stderr;
-      stdoutOff = r.nextStdoutOffset;
-      stderrOff = r.nextStderrOffset;
-      // Complete only when eof (exit + both pipe EOFs + buffer fully read).
-      if (r.eof) {
-        const tracked = this.tracked.get(processId);
-        const startedMs = tracked?.startedMs ?? host.nowMs();
-        const finishedMs = host.nowMs();
-        const stdoutMax = limits.stdoutMax ?? tracked?.stdoutMax ?? 16_384;
-        const stderrMax = limits.stderrMax ?? tracked?.stderrMax ?? 16_384;
-        return {
-          process_id: processId,
-          backend_id: tracked?.backendId ?? this.backendId,
-          status: mapStatus(r.status, r.timedOut),
-          exit_code: r.timedOut ? null : r.exitCode,
-          signal: r.timedOut ? 'SIGKILL' : r.status === 'cancelled' ? 'SIGTERM' : null,
-          timed_out: r.timedOut,
-          started_at: new Date(startedMs).toISOString(),
-          finished_at: new Date(finishedMs).toISOString(),
-          duration_ms: finishedMs - startedMs,
-          stdin_available: false,
-          tty: tracked?.tty === true,
-          output_cursor: null,
-          stdout: preview(stdout, stdoutMax),
-          stderr: preview(stderr, stderrMax),
-        };
+    }
+    return t;
+  }
+
+  /**
+   * Progressive drain of stdout/stderr via Process.read, then Process.wait for exit metadata.
+   * Notifies readWait long-pollers when data arrives or the process finishes.
+   */
+  private async pumpOutputs(t: Tracked): Promise<void> {
+    const p = t.proc;
+    const pumpStream = async (stream: 'stdout' | 'stderr') => {
+      for (;;) {
+        let chunk: Uint8Array;
+        try {
+          chunk = await p.read(stream);
+        } catch {
+          break;
+        }
+        if (chunk.byteLength === 0) break;
+        const text = utf8Decode(chunk);
+        if (stream === 'stdout') t.stdoutAcc += text;
+        else t.stderrAcc += text;
+        notifyWaiters(t);
       }
+    };
+
+    try {
+      await Promise.all([pumpStream('stdout'), pumpStream('stderr')]);
+      try {
+        t.result = await p.wait();
+        // wait() returns full buffers; fill acc if pump got nothing (race/edge).
+        if (!t.stdoutAcc && t.result.stdout) t.stdoutAcc = t.result.stdout;
+        if (!t.stderrAcc && t.result.stderr) t.stderrAcc = t.result.stderr;
+      } catch {
+        /* closed mid-wait */
+      }
+    } finally {
+      t.done = true;
+      t.finishedMs = host.nowMs();
+      t.stdinAvailable = false;
+      notifyWaiters(t);
     }
   }
 }

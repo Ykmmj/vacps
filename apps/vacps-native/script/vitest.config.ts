@@ -7,7 +7,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Unit tests for pure / lightly-mocked script logic.
- * Modules that require full QuickJS Host stay in C++ gtest integration tests.
+ * Modules that require full QuickJS ScriptRuntime stay in C++ gtest integration tests.
  */
 export default defineConfig({
   test: {
@@ -19,7 +19,7 @@ export default defineConfig({
   resolve: {
     alias: {
       'vacps:crypto': path.join(root, 'tests/mocks/vacps-crypto.ts'),
-      'vacps:store': path.join(root, 'tests/mocks/vacps-store-shim.ts'),
+      'vacps:store': path.join(root, 'tests/mocks/vacps-store-mock.ts'),
       'vacps:host': path.join(root, 'tests/mocks/vacps-host.ts'),
       'vacps:log': path.join(root, 'tests/mocks/vacps-log.ts'),
     },

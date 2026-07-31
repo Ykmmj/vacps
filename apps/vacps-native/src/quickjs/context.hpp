@@ -2,7 +2,7 @@
 
 #include "app/error.hpp"
 #include "quickjs/runtime.hpp"
-#include "quickjs/value.hpp"
+#include "quickjs/raii/value.hpp"
 
 #include <quickjs.h>
 
@@ -47,7 +47,7 @@ class Context {
 
   /**
    * Evaluate source. On exception returns Error (exception cleared).
-   * Does not drain promise jobs — caller (Host) should drain.
+   * Does not drain promise jobs — caller (ScriptRuntime) should drain.
    */
   [[nodiscard]] Result<Value> eval(
       std::string_view source,

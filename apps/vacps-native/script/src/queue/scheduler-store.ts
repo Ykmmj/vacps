@@ -297,7 +297,10 @@ export class SchedulerStore {
     }
 
     const results = await this.db.transaction(steps);
-    if ((results[0]?.changes ?? 0) !== 1) {
+    const first = results[0];
+    const changes =
+      first != null && !Array.isArray(first) ? first.changes : 0;
+    if (changes !== 1) {
       return {
         claimed: false,
         reason: 'cas_miss',
@@ -342,7 +345,7 @@ function rowToScheduler(row: Record<string, unknown>): StoredScheduler {
 
 /**
  * Minimal 5-field cron matcher (minute hour dom month dow), UTC wall clock.
- * Fallback when next_run_at is missing (legacy only).
+ * Fallback when next_run_at is missing.
  */
 export function cronMatchesUtc(cron: string, date: Date): boolean {
   const parts = cron.trim().split(/\s+/);

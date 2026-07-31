@@ -41,7 +41,7 @@ else()
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )
   # Populate only — do not add_subdirectory (tarball has no root CMake package).
-  # CMP0169: direct Populate(name) with declared details is deprecated; keep OLD for now.
+  # CMP0169: direct Populate(name) with declared details needs OLD policy.
   if(POLICY CMP0169)
     cmake_policy(SET CMP0169 OLD)
   endif()
@@ -198,8 +198,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(simdutf)
 message(STATUS "Using simdutf ${VACPS_SIMDUTF_VERSION}")
 
-# ── QuickJS (bellard official release; static, no quickjs-libc host yet) ──
-# Design §25.6 / §23: RAII host owns Runtime+Context; pure engine only for now.
+# ── QuickJS (bellard official release; static, no quickjs-libc) ──
+# RAII ScriptRuntime owns Runtime+Context; pure engine (no libc host).
 # Official release: https://bellard.org/quickjs/ (2026-06-04)
 set(VACPS_QUICKJS_VERSION 2026-06-04)
 set(VACPS_QUICKJS_URL
