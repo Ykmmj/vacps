@@ -28,6 +28,8 @@ import {
   type RegistrationStatus,
 } from './registration/control-plane-state';
 import { ProcessManager } from './runtime/process-manager';
+import { configurePathGuard } from './runtime/path-guard';
+import { assertControlPlaneAuthConfig } from './security/http-auth';
 import { createServer } from './server/app';
 import type { App } from './server/router';
 import { TaskStore } from './storage/task-store';
@@ -59,6 +61,11 @@ export class Application {
 
   async initialize(): Promise<void> {
     this.config = loadConfig();
+    assertControlPlaneAuthConfig(this.config);
+    configurePathGuard({
+      dataDir: host.dataDir(),
+      extraRoots: this.config.FS_ALLOWED_ROOTS,
+    });
     const path = `${host.dataDir()}/agent.db`;
     this.db = store.open(path);
     this.store = new TaskStore(this.db);

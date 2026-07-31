@@ -13,6 +13,13 @@ export interface AgentConfig {
   AGENT_PRIVATE_KEY: string | undefined;
   AGENT_PUBLIC_KEY: string | undefined;
   CONTROL_PLANE_PUBLIC_KEY: string | undefined;
+  /**
+   * When true, missing CONTROL_PLANE_PUBLIC_KEY does not fail boot and
+   * unsigned HTTP is allowed. Dev/tests only (`VACPS_ALLOW_INSECURE_NO_AUTH=1`).
+   */
+  ALLOW_INSECURE_NO_AUTH: boolean;
+  /** Extra filesystem roots allowed by path sandbox (absolute). */
+  FS_ALLOWED_ROOTS: string[];
   REGISTRATION_TOKEN: string | undefined;
   REGISTRATION_INTERVAL_SECONDS: number;
   TELEMETRY_FALLBACK_INTERVAL_SECONDS: number;
@@ -44,6 +51,20 @@ export function isAbsoluteHttpUrl(url: string | undefined): url is string {
   return /^https?:\/\/[^\s/$.?#].[^\s]*$/i.test(url.trim());
 }
 
+function envTruthy(name: string): boolean {
+  const v = env(name);
+  if (v === undefined) return false;
+  return v === '1' || v.toLowerCase() === 'true' || v.toLowerCase() === 'yes';
+}
+
+function parseAllowedRoots(): string[] {
+  const raw = env('VACPS_FS_ALLOWED_ROOTS') ?? env('FS_ALLOWED_ROOTS') ?? '';
+  return raw
+    .split(/[:\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s.startsWith('/'));
+}
+
 export function loadConfig(): AgentConfig {
   const backendId = env('BACKEND_ID') ?? env('VACPS_BACKEND_ID') ?? 'local';
   const tagsRaw = env('BACKEND_TAGS') ?? '';
@@ -63,6 +84,8 @@ export function loadConfig(): AgentConfig {
     AGENT_PUBLIC_KEY: env('AGENT_PUBLIC_KEY') ?? env('VACPS_AGENT_PUBLIC_KEY'),
     CONTROL_PLANE_PUBLIC_KEY:
       env('CONTROL_PLANE_PUBLIC_KEY') ?? env('VACPS_CONTROL_PLANE_PUBLIC_KEY'),
+    ALLOW_INSECURE_NO_AUTH: envTruthy('VACPS_ALLOW_INSECURE_NO_AUTH'),
+    FS_ALLOWED_ROOTS: parseAllowedRoots(),
     REGISTRATION_TOKEN: env('REGISTRATION_TOKEN') ?? env('VACPS_REGISTRATION_TOKEN'),
     REGISTRATION_INTERVAL_SECONDS: envInt('REGISTRATION_INTERVAL_SECONDS', 300, 60, 86_400),
     TELEMETRY_FALLBACK_INTERVAL_SECONDS: envInt(

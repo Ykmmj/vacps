@@ -141,7 +141,9 @@ run_docker run --rm \
       echo '==> script load smoke'
       rm -f /tmp/vacps-script-run.log
       set +e
-      timeout 3 \"\$BIN\" --script script/dist/vacps.mjs --data-dir /tmp/vacps-script-smoke --port 18793 \
+      # Smoke has no CP key; production installs must set CONTROL_PLANE_PUBLIC_KEY.
+      VACPS_ALLOW_INSECURE_NO_AUTH=1 timeout 3 \"\$BIN\" --script script/dist/vacps.mjs \
+        --data-dir /tmp/vacps-script-smoke --port 18793 \
         >/tmp/vacps-script-run.log 2>&1
       rc=\$?
       set -e
