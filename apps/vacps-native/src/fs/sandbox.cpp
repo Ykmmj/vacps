@@ -13,6 +13,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #if defined(__linux__)
 #include <dirent.h>
@@ -124,6 +125,7 @@ Result<std::filesystem::path> authorize_openat2(
   const auto rel = relative_under(abs, root);
   open_how how{};
   how.flags = static_cast<__u64>(O_PATH | O_CLOEXEC);
+  how.mode = 0;
   how.resolve = RESOLVE_BENEATH;
   const std::string rel_owned{rel};
   const char* path = rel.empty() ? "." : rel_owned.c_str();
@@ -140,33 +142,65 @@ Result<std::filesystem::path> authorize_openat2(
   if (errno == ENOSYS) {
     return std::unexpected(Error{"path sandbox: openat2 not supported"});
   }
-  if (errno != ENOENT) {
+  if (errno != ENOENT && errno != ENOTDIR) {
     return std::unexpected(Error{std::format(
         "path sandbox: openat2 failed: {}", std::strerror(errno))});
   }
 
-  // Non-existent leaf: verify parent under root.
-  auto parent = abs.parent_path();
-  if (parent.empty()) parent = root;
-  const auto parent_rel = relative_under(parent, root);
-  const std::string prel{parent_rel};
-  const char* ppath = parent_rel.empty() ? "." : prel.c_str();
-  const int pfd = sys_openat2(root_fd.get(), ppath, &how);
-  if (pfd < 0) {
-    return std::unexpected(Error{std::format(
-        "path sandbox: parent openat2 failed: {}", std::strerror(errno))});
+  // Path (or an intermediate parent) does not exist yet. Walk up to the deepest
+  // existing ancestor under root via openat2, then re-append missing components
+  // lexically (basenames only — no ".." — so we stay under the verified ancestor).
+  std::filesystem::path cur = abs;
+  std::vector<std::filesystem::path> missing;
+  for (;;) {
+    auto parent = cur.parent_path();
+    if (parent.empty() || parent == cur) {
+      return std::unexpected(
+          Error{"path sandbox: parent openat2 failed: No such file or directory"});
+    }
+    const auto base = cur.filename();
+    if (base.empty() || base == "." || base == "..") {
+      return std::unexpected(Error{"path sandbox: invalid path basename"});
+    }
+    missing.push_back(base);
+    cur = parent.lexically_normal();
+
+    const auto parent_rel = relative_under(cur, root);
+    // relative_under returns "" for the root itself, or for paths that escape
+    // (lexically_relative starts with ".."). Distinguish with path_under_root.
+    if (parent_rel.empty() && cur != root.lexically_normal() && !path_under_root(cur, root)) {
+      return std::unexpected(Error{"path sandbox: parent resolved outside allowlist"});
+    }
+    const std::string prel{parent_rel};
+    const char* ppath = parent_rel.empty() ? "." : prel.c_str();
+    const int pfd = sys_openat2(root_fd.get(), ppath, &how);
+    if (pfd < 0) {
+      if (errno == ENOSYS) {
+        return std::unexpected(Error{"path sandbox: openat2 not supported"});
+      }
+      if (errno == ENOENT || errno == ENOTDIR) {
+        // Still missing — only give up once we are at the allowlisted root.
+        if (cur == root.lexically_normal()) {
+          return std::unexpected(Error{std::format(
+              "path sandbox: parent openat2 failed: {}", std::strerror(errno))});
+        }
+        continue;
+      }
+      return std::unexpected(Error{std::format(
+          "path sandbox: parent openat2 failed: {}", std::strerror(errno))});
+    }
+    OwnedFd parent_holder{pfd};
+    auto parent_real = fd_to_path(pfd);
+    if (!parent_real) return parent_real;
+    if (!path_under_root(*parent_real, root) || is_kernel_filesystem(*parent_real)) {
+      return std::unexpected(Error{"path sandbox: parent resolved outside allowlist"});
+    }
+    std::filesystem::path out = *parent_real;
+    for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+      out /= *it;
+    }
+    return out.lexically_normal();
   }
-  OwnedFd parent_holder{pfd};
-  auto parent_real = fd_to_path(pfd);
-  if (!parent_real) return parent_real;
-  if (!path_under_root(*parent_real, root) || is_kernel_filesystem(*parent_real)) {
-    return std::unexpected(Error{"path sandbox: parent resolved outside allowlist"});
-  }
-  const auto base = abs.filename();
-  if (base.empty() || base == "." || base == "..") {
-    return std::unexpected(Error{"path sandbox: invalid path basename"});
-  }
-  return (*parent_real / base).lexically_normal();
 }
 
 #endif  // __linux__
@@ -320,8 +354,12 @@ Result<std::filesystem::path> PathSandbox::authorize_absolute(
 #if defined(__linux__)
   auto via_openat2 = authorize_openat2(abs, *matched);
   if (via_openat2) return via_openat2;
-  if (via_openat2.error().message.find("not supported") != std::string::npos ||
-      via_openat2.error().message.find("not found") != std::string::npos) {
+  // Fall back when openat2 is missing, or when intermediate parents are absent
+  // (strerror may be "No such file or directory", not "not found").
+  const auto& msg = via_openat2.error().message;
+  if (msg.find("not supported") != std::string::npos ||
+      msg.find("No such file") != std::string::npos ||
+      msg.find("not found") != std::string::npos) {
     return authorize_realpath_fallback(abs, *matched);
   }
   return via_openat2;
@@ -342,26 +380,27 @@ Result<OwnedFd> PathSandbox::open_relative(
         "path sandbox: cannot open root {}: {}", root.string(), std::strerror(errno))});
   }
 
+  // openat2: how.mode must be 0 unless O_CREAT or O_TMPFILE is set (else EINVAL).
   open_how how{};
   how.resolve = RESOLVE_BENEATH;
-  how.mode = 0644;
+  how.mode = 0;
   switch (mode) {
     case OpenMode::Read:
       how.flags = static_cast<__u64>(O_RDONLY | O_CLOEXEC);
       break;
     case OpenMode::WriteTrunc:
       how.flags = static_cast<__u64>(O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC);
+      how.mode = 0644;
       break;
     case OpenMode::WriteAppend:
       how.flags = static_cast<__u64>(O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC);
+      how.mode = 0644;
       break;
     case OpenMode::Dir:
       how.flags = static_cast<__u64>(O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-      how.mode = 0;
       break;
     case OpenMode::PathOnly:
       how.flags = static_cast<__u64>(O_PATH | O_CLOEXEC);
-      how.mode = 0;
       break;
   }
 
