@@ -17,8 +17,8 @@ inline constexpr std::size_t kDefaultHeapLimitBytes = 32u * 1024u * 1024u;
 inline constexpr std::size_t kDefaultStackLimitBytes = 1u * 1024u * 1024u;
 
 /**
- * Default wall-clock budget for a single Host JS entry (eval / invoke_export).
- * Covers busy loops via JS_SetInterruptHandler; I/O wait is also checked.
+ * Default CPU wall-clock budget for a single synchronous JS turn
+ * (JS_Call / drain_jobs batch). Does **not** cover native I/O wait time.
  * 0 disables the watchdog (tests that intentionally run unbounded work).
  */
 inline constexpr std::chrono::milliseconds kDefaultJsTimeBudget{30'000};

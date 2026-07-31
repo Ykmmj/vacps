@@ -180,6 +180,9 @@ message(STATUS "Using Ada ${VACPS_ADA_VERSION}")
 set(VACPS_SIMDUTF_VERSION 9.0.0)
 set(VACPS_SIMDUTF_URL
   "https://github.com/simdutf/simdutf/archive/refs/tags/v${VACPS_SIMDUTF_VERSION}.tar.gz")
+# SHA256 of the GitHub tag tarball (verified 2026-07-31).
+set(VACPS_SIMDUTF_SHA256
+  "fd2ce975f29809a975a8da8843cfb3a7265af3f71be548f199d23cf65e101764")
 
 message(STATUS "Fetching simdutf ${VACPS_SIMDUTF_VERSION} ...")
 set(SIMDUTF_TESTS OFF CACHE BOOL "" FORCE)
@@ -189,6 +192,7 @@ set(SIMDUTF_ICONV OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   simdutf
   URL ${VACPS_SIMDUTF_URL}
+  URL_HASH SHA256=${VACPS_SIMDUTF_SHA256}
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(simdutf)

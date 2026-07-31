@@ -6,10 +6,17 @@ export interface RunResult {
   readonly lastInsertRowid: number;
 }
 
+export interface TransactionStep {
+  readonly sql: string;
+  readonly params?: readonly SqlParam[];
+  readonly exec?: boolean;
+}
+
 export interface Store {
   exec(sql: string): Promise<void>;
   run(sql: string, params?: readonly SqlParam[]): Promise<RunResult>;
   query(sql: string, params?: readonly SqlParam[]): Promise<Array<Record<string, unknown>>>;
+  transaction(steps: readonly TransactionStep[]): Promise<RunResult[]>;
   begin(): Promise<void>;
   commit(): Promise<void>;
   rollback(): Promise<void>;

@@ -63,25 +63,7 @@ describe('claimAndEnqueue CAS + txn', () => {
     const s = (await schedulers.get(id))!;
     const nowMs = Date.parse('2024-06-01T09:00:30.000Z');
 
-    const insert = async (slot: {
-      occurrenceId: string;
-      scheduledForMs: number;
-      revision: number;
-    }) => {
-      const dispatch = {
-        ...task,
-        task_id: slot.occurrenceId,
-        source: 'schedule',
-        schedule_id: id,
-      } as TaskDispatch;
-      await tasks.insertOccurrenceTask(dispatch, {
-        scheduleId: id,
-        scheduleRevision: slot.revision,
-        scheduledForMs: slot.scheduledForMs,
-      });
-    };
-
-    const r1 = await schedulers.claimAndEnqueue(s, nowMs, insert);
+    const r1 = await schedulers.claimAndEnqueue(s, nowMs);
     expect(r1.claimed).toBe(true);
     expect(r1.slots).toHaveLength(1);
     expect((await tasks.getTask(r1.slots[0]!.occurrenceId))?.status).toBe('queued');
@@ -90,7 +72,7 @@ describe('claimAndEnqueue CAS + txn', () => {
     expect(after.nextRunAt).toBe('2024-06-01T10:00:00.000Z');
 
     // Re-read and try claim with stale cursor — CAS miss
-    const r2 = await schedulers.claimAndEnqueue({ ...s, nextRunAt: s.nextRunAt }, nowMs, insert);
+    const r2 = await schedulers.claimAndEnqueue({ ...s, nextRunAt: s.nextRunAt }, nowMs);
     expect(r2.claimed).toBe(false);
     expect(r2.reason).toBe('cas_miss');
 
@@ -140,6 +122,7 @@ describe('claimAndEnqueue CAS + txn', () => {
         throw new Error('forced insert failure');
       }),
     ).rejects.toThrow(/forced insert failure/);
+    // beforeInsert throws → no transaction runs; cursor unchanged
 
     const after = (await schedulers.get(id))!;
     expect(after.nextRunAt).toBe('2024-06-01T09:00:00.000Z');
@@ -240,13 +223,7 @@ describe('claimAndEnqueue CAS + txn', () => {
     });
 
     const s = (await schedulers.get(id))!;
-    const r = await schedulers.claimAndEnqueue(
-      s,
-      Date.parse('2024-06-01T10:00:00.000Z'),
-      async () => {
-        throw new Error('should not insert');
-      },
-    );
+    const r = await schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T10:00:00.000Z'));
     expect(r.claimed).toBe(false);
     expect(r.reason).toBe('disabled');
     expect((await tasks.getTask('manual-1'))?.status).toBe('queued');
@@ -259,13 +236,7 @@ describe('claimAndEnqueue CAS + txn', () => {
     const s = (await schedulers.get(id))!;
     // writeRow canonicalizes
     expect(s.nextRunAt).toBe('2024-06-01T09:00:00.000Z');
-    const r = await schedulers.claimAndEnqueue(
-      s,
-      Date.parse('2024-06-01T09:01:00.000Z'),
-      async () => {
-        /* no task */
-      },
-    );
+    const r = await schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T09:01:00.000Z'));
     expect(r.claimed).toBe(true);
   });
 });

@@ -122,9 +122,7 @@ void Host::notify_progress() {
 }
 
 asio::awaitable<void> Host::wait_progress() {
-  if (shutting_down_) {
-    co_return;
-  }
+  // Always park on a timer — never busy-return. cancel_host_async() cancels waiters.
   const auto gen = progress_generation_;
   auto executor = co_await asio::this_coro::executor;
   auto timer = std::make_shared<asio::steady_timer>(executor);
@@ -133,38 +131,14 @@ asio::awaitable<void> Host::wait_progress() {
   auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
   (void)ec;
   progress_waiters_.remove(timer);
-  // gen may have advanced (real progress) or we were cancelled for shutdown.
   (void)gen;
   co_return;
 }
 
 asio::awaitable<bool> Host::wait_progress_or_deadline() {
-  if (shutting_down_) {
-    co_return true;
-  }
-  if (runtime_.interrupt_expired()) {
-    co_return false;
-  }
-  auto remaining = runtime_.interrupt_remaining();
-  if (!remaining.has_value()) {
-    co_await wait_progress();
-    co_return true;
-  }
-  if (*remaining <= std::chrono::milliseconds{0}) {
-    co_return false;
-  }
-
-  auto executor = co_await asio::this_coro::executor;
-  auto timer = std::make_shared<asio::steady_timer>(executor);
-  timer->expires_after(*remaining);
-  progress_waiters_.push_back(timer);
-  auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
-  progress_waiters_.remove(timer);
-  // Timer fired (deadline) or cancelled by notify_progress / shutdown.
-  if (runtime_.interrupt_expired()) {
-    co_return false;
-  }
-  (void)ec;
+  // Native I/O wait is NOT under the JS CPU interrupt budget. Only park until
+  // notify_progress / cancel_host_async wakes us.
+  co_await wait_progress();
   co_return true;
 }
 
@@ -198,32 +172,29 @@ asio::awaitable<VoidResult> Host::await_settled(Value& value) {
 
   // Per-turn microtask budget: drain runnable jobs, then yield once if more remain.
   // Jobs already in the QuickJS queue do not wait on native I/O; post is fairness only.
+  // CPU interrupt is armed only around each drain_jobs call — not across native waits.
   constexpr std::size_t kMaxJobsPerTurn = 128;
 
   for (;;) {
-    if (runtime_.interrupt_expired()) {
-      co_return std::unexpected(Error{"js interrupted: time budget exceeded"});
-    }
     const JSPromiseStateEnum st = JS_PromiseState(ctx, value.get());
     if (st == JS_PROMISE_PENDING) {
-      auto drained = runtime_.drain_jobs_budgeted(kMaxJobsPerTurn);
-      if (!drained) {
-        co_return std::unexpected(std::move(drained.error()));
+      {
+        InterruptScope turn{runtime_, js_time_budget_};
+        auto drained = runtime_.drain_jobs_budgeted(kMaxJobsPerTurn);
+        if (!drained) {
+          co_return std::unexpected(std::move(drained.error()));
+        }
       }
       if (JS_PromiseState(ctx, value.get()) != JS_PROMISE_PENDING) {
         continue;
       }
       // Never busy-spin: always co_await so other Asio handlers can run.
       if (JS_IsJobPending(runtime_.get())) {
-        // Runnable microtasks remain after the per-turn budget;
-        // yield to the io_context for fairness.
         auto ex = co_await asio::this_coro::executor;
         co_await asio::post(ex, asio::use_awaitable);
       } else {
-        // No runnable JS; wait for native settle, or fail if budget ends first.
-        if (!co_await wait_progress_or_deadline()) {
-          co_return std::unexpected(Error{"js interrupted: time budget exceeded"});
-        }
+        // No runnable JS; park until native settle (notify_progress).
+        co_await wait_progress();
       }
       continue;
     }
@@ -242,8 +213,7 @@ asio::awaitable<VoidResult> Host::await_settled(Value& value) {
 }
 
 asio::awaitable<Result<Value>> Host::await_value(Value value) {
-  // Cover eval_module → await_value paths (eval's InterruptScope already ended).
-  InterruptScope guard{runtime_, js_time_budget_};
+  // No wall-clock InterruptScope across the await — only per-turn drain jobs.
   if (auto a = co_await await_settled(value); !a) {
     co_return std::unexpected(std::move(a.error()));
   }
@@ -261,8 +231,6 @@ asio::awaitable<Result<Value>> Host::invoke_export(
   if (script_ns_.empty()) {
     co_return std::unexpected(Error{"business script not loaded"});
   }
-  // One wall-clock budget for JS_Call + promise drain / await.
-  InterruptScope guard{runtime_, js_time_budget_};
   Value fn = Value::get_property_str(ctx, script_ns_.get(), name);
   if (fn.is_exception()) {
     co_return std::unexpected(context_.take_exception_error());
@@ -270,7 +238,12 @@ asio::awaitable<Result<Value>> Host::invoke_export(
   if (!fn.is_function()) {
     co_return std::unexpected(Error{std::format("export '{}' is not a function", name)});
   }
-  Value out{ctx, JS_Call(ctx, fn.get(), JS_UNDEFINED, argc, argv)};
+  // CPU interrupt only for the synchronous JS_Call turn — not native I/O awaits.
+  Value out;
+  {
+    InterruptScope guard{runtime_, js_time_budget_};
+    out = Value{ctx, JS_Call(ctx, fn.get(), JS_UNDEFINED, argc, argv)};
+  }
   if (out.is_exception()) {
     co_return std::unexpected(context_.take_exception_error());
   }
@@ -296,10 +269,10 @@ asio::awaitable<VoidResult> Host::load_and_initialize(std::string_view script_pa
 
   const std::string filename{script_path};
   JSModuleDef* mod = nullptr;
+  Value pending;
   {
-    // Separate scope so invoke_export can arm its own InterruptScope.
+    // Interrupt only for compile + first eval turn — not while awaiting imports.
     InterruptScope load_guard{runtime_, js_time_budget_};
-    // COMPILE_ONLY: value is a module function; EvalFunction consumes it.
     Value compiled{
         ctx,
         JS_Eval(
@@ -313,22 +286,22 @@ asio::awaitable<VoidResult> Host::load_and_initialize(std::string_view script_pa
           std::format("compile script failed: {}", context_.take_exception_error().message)});
     }
     mod = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled.get()));
-    Value pending{ctx, JS_EvalFunction(ctx, compiled.release())};
+    pending = Value{ctx, JS_EvalFunction(ctx, compiled.release())};
     if (pending.is_exception()) {
       co_return std::unexpected(
           Error{std::format("eval script failed: {}", context_.take_exception_error().message)});
     }
-    if (auto a = co_await await_settled(pending); !a) {
-      co_return std::unexpected(
-          Error{std::format("script module failed: {}", a.error().message)});
-    }
+  }
+  if (auto a = co_await await_settled(pending); !a) {
+    co_return std::unexpected(
+        Error{std::format("script module failed: {}", a.error().message)});
+  }
 
-    script_ns_ = Value{ctx, JS_GetModuleNamespace(ctx, mod)};
-    if (script_ns_.is_exception()) {
-      script_ns_.reset();
-      co_return std::unexpected(
-          Error{std::format("module namespace: {}", context_.take_exception_error().message)});
-    }
+  script_ns_ = Value{ctx, JS_GetModuleNamespace(ctx, mod)};
+  if (script_ns_.is_exception()) {
+    script_ns_.reset();
+    co_return std::unexpected(
+        Error{std::format("module namespace: {}", context_.take_exception_error().message)});
   }
 
   auto init = co_await invoke_export("initialize", 0, nullptr);
@@ -344,13 +317,12 @@ asio::awaitable<VoidResult> Host::load_and_initialize(std::string_view script_pa
 
 asio::awaitable<VoidResult> Host::shutdown_script() {
   if (!script_initialized_) {
-    cancel_host_async();
     co_return VoidResult{};
   }
+  // Leave progress waiters live so await db.close() / other Promises can settle.
   auto sh = co_await invoke_export("shutdown", 0, nullptr);
   script_initialized_ = false;
   script_ns_.reset();
-  cancel_host_async();
   if (!sh) {
     co_return std::unexpected(
         Error{std::format("shutdown() failed: {}", sh.error().message)});

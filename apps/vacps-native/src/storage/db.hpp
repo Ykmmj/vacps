@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -64,6 +65,65 @@ class Database {
   [[nodiscard]] VoidResult begin();
   [[nodiscard]] VoidResult commit();
   [[nodiscard]] VoidResult rollback();
+
+  /**
+   * Run `work` inside BEGIN IMMEDIATE … COMMIT on this connection.
+   * Intended for a single db_pool job so no other SQL can interleave.
+   * On work error / exception: ROLLBACK and propagate.
+   */
+  template <class F>
+  [[nodiscard]] auto with_transaction(F&& work) -> std::invoke_result_t<F&, Database&> {
+    using R = std::invoke_result_t<F&, Database&>;
+    if (auto b = begin(); !b) {
+      if constexpr (std::is_same_v<R, VoidResult>) {
+        return std::unexpected(std::move(b.error()));
+      } else {
+        return std::unexpected(std::move(b.error()));
+      }
+    }
+    try {
+      R result = work(*this);
+      if constexpr (std::is_same_v<R, VoidResult>) {
+        if (!result) {
+          (void)rollback();
+          return result;
+        }
+      } else {
+        if (!result) {
+          (void)rollback();
+          return result;
+        }
+      }
+      if (auto c = commit(); !c) {
+        (void)rollback();
+        return std::unexpected(std::move(c.error()));
+      }
+      return result;
+    } catch (...) {
+      (void)rollback();
+      throw;
+    }
+  }
+
+  /** One run/exec step for a multi-statement transaction unit. */
+  struct TxStep {
+    std::string sql;
+    std::vector<SqlValue> params;
+    /** true → execute (DML/DDL), false → exec multi-statement script (no binds). */
+    bool is_run{true};
+  };
+
+  struct TxStepResult {
+    std::int64_t changes{0};
+    std::int64_t last_insert_rowid{0};
+  };
+
+  /**
+   * Atomically run all steps (BEGIN … each step … COMMIT) without yielding.
+   * Use from a single db_pool job only.
+   */
+  [[nodiscard]] Result<std::vector<TxStepResult>> run_transaction(
+      const std::vector<TxStep>& steps);
 
   [[nodiscard]] std::int64_t last_insert_rowid() const;
   [[nodiscard]] std::int64_t changes() const;

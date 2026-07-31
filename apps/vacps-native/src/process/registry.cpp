@@ -402,13 +402,21 @@ asio::awaitable<Result<StartInfo>> Registry::start(
               co_return;
             }
             entry->produced_out += n;
-            if (entry->stdout_acc.size() < entry->hard_max_out) {
-              const auto room = entry->hard_max_out - entry->stdout_acc.size();
+            // Hard caps: per-entry hard_max AND global max_total_buffer_bytes.
+            const auto used = total_buffered_bytes();
+            const auto global_room =
+                used < limits_.max_total_buffer_bytes
+                    ? limits_.max_total_buffer_bytes - used
+                    : std::size_t{0};
+            const auto entry_room =
+                entry->stdout_acc.size() < entry->hard_max_out
+                    ? entry->hard_max_out - entry->stdout_acc.size()
+                    : std::size_t{0};
+            const auto room = std::min(entry_room, global_room);
+            if (room > 0) {
               entry->stdout_acc.append(buf.data(), std::min(n, room));
-              if (n > room) entry->stdout_truncated = true;
-            } else {
-              entry->stdout_truncated = true;
             }
+            if (n > room) entry->stdout_truncated = true;
             reclaim_finished_for_limits();
             notify_waiters(*entry);
           }
@@ -431,13 +439,20 @@ asio::awaitable<Result<StartInfo>> Registry::start(
               co_return;
             }
             entry->produced_err += n;
-            if (entry->stderr_acc.size() < entry->hard_max_err) {
-              const auto room = entry->hard_max_err - entry->stderr_acc.size();
+            const auto used = total_buffered_bytes();
+            const auto global_room =
+                used < limits_.max_total_buffer_bytes
+                    ? limits_.max_total_buffer_bytes - used
+                    : std::size_t{0};
+            const auto entry_room =
+                entry->stderr_acc.size() < entry->hard_max_err
+                    ? entry->hard_max_err - entry->stderr_acc.size()
+                    : std::size_t{0};
+            const auto room = std::min(entry_room, global_room);
+            if (room > 0) {
               entry->stderr_acc.append(buf.data(), std::min(n, room));
-              if (n > room) entry->stderr_truncated = true;
-            } else {
-              entry->stderr_truncated = true;
             }
+            if (n > room) entry->stderr_truncated = true;
             reclaim_finished_for_limits();
             notify_waiters(*entry);
           }
