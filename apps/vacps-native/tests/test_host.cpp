@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -355,5 +356,79 @@ TEST_F(HostTest, TypedArrayViewUsesOffsetAndLength) {
   EXPECT_EQ((*bytes)[0], 2);
   EXPECT_EQ((*bytes)[1], 3);
   EXPECT_EQ((*bytes)[2], 4);
+}
+
+TEST_F(HostTest, InterruptBusyLoopWithinBudget) {
+  using namespace std::chrono_literals;
+  asio::io_context ioc{1};
+  vacps::js::HostOptions opts;
+  opts.js_time_budget = 50ms;
+  auto host_r = vacps::js::Host::create(cfg_, ioc, opts);
+  ASSERT_TRUE(host_r) << host_r.error().message;
+
+  const auto t0 = std::chrono::steady_clock::now();
+  auto value = (*host_r)->eval("while (true) {}", "<busy>");
+  const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+  ASSERT_FALSE(value) << "busy loop should be interrupted";
+  // QuickJS throws uncatchable "interrupted" (message may include InternalError).
+  EXPECT_NE(value.error().message.find("interrupted"), std::string::npos)
+      << value.error().message;
+  // Must not hang for seconds; allow some slack for CI load.
+  EXPECT_LT(elapsed, 2s) << "interrupt watchdog took too long";
+}
+
+TEST_F(HostTest, InterruptBudgetZeroAllowsShortWork) {
+  using namespace std::chrono_literals;
+  asio::io_context ioc{1};
+  vacps::js::HostOptions opts;
+  opts.js_time_budget = 0ms;  // watchdog off
+  auto host_r = vacps::js::Host::create(cfg_, ioc, opts);
+  ASSERT_TRUE(host_r) << host_r.error().message;
+  auto value = (*host_r)->eval("(() => 1 + 1)()", "<ok>");
+  ASSERT_TRUE(value) << value.error().message;
+}
+
+TEST_F(HostTest, InterruptPromiseMicrotaskBusyLoop) {
+  using namespace std::chrono_literals;
+  asio::io_context ioc{1};
+  vacps::js::HostOptions opts;
+  opts.js_time_budget = 80ms;
+  auto host_r = vacps::js::Host::create(cfg_, ioc, opts);
+  ASSERT_TRUE(host_r) << host_r.error().message;
+  auto host = std::move(*host_r);
+
+  bool saw_err = false;
+  std::string msg;
+  const auto t0 = std::chrono::steady_clock::now();
+  asio::co_spawn(
+      ioc,
+      [host, &saw_err, &msg]() -> asio::awaitable<void> {
+        // Promise then-handler runs an infinite loop during job drain / await.
+        auto val = host->eval(
+            R"js((() => Promise.resolve().then(() => { while (true) {} }))())js",
+            "<promise-busy>");
+        if (!val) {
+          saw_err = true;
+          msg = val.error().message;
+          co_return;
+        }
+        auto settled = co_await host->await_value(std::move(*val));
+        if (!settled) {
+          saw_err = true;
+          msg = settled.error().message;
+        }
+        co_return;
+      },
+      asio::detached);
+  ioc.run();
+  const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+  ASSERT_TRUE(saw_err) << "expected interrupt of promise busy loop";
+  EXPECT_TRUE(
+      msg.find("interrupted") != std::string::npos ||
+      msg.find("time budget") != std::string::npos)
+      << msg;
+  EXPECT_LT(elapsed, 3s) << "promise busy interrupt took too long";
 }
 
