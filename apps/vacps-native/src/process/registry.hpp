@@ -51,6 +51,14 @@ struct ReadInfo {
   std::size_t next_stderr_offset{0};
 };
 
+struct WriteOptions {
+  bool close_stdin{false};
+  /** 0 = no timeout. Default 30s so a stalled peer cannot hang the io_context forever. */
+  std::int32_t timeout_ms{30'000};
+  /** Reject payloads larger than this (default 1 MiB). */
+  std::size_t max_bytes{1 * 1024 * 1024};
+};
+
 /**
  * Long-lived subprocess registry (Boost.Process v2 + Asio).
  * Single-threaded: all methods co_awaited / called on the host io_context.
@@ -72,10 +80,14 @@ class Registry {
       std::string id,
       ReadOptions opts = {});
 
-  [[nodiscard]] Result<std::size_t> write(
-      const std::string& id,
-      std::string_view data,
-      bool close_stdin);
+  /**
+   * Async stdin write (never blocks the io_context thread on a full pipe).
+   * Serializes concurrent writes to the same process. Owns `data` until complete.
+   */
+  [[nodiscard]] asio::awaitable<Result<std::size_t>> write(
+      std::string id,
+      std::string data,
+      WriteOptions opts = {});
 
   /** signal: SIGTERM | SIGINT | SIGKILL (case-insensitive). */
   [[nodiscard]] Result<bool> terminate(
@@ -93,6 +105,7 @@ class Registry {
 
   [[nodiscard]] std::shared_ptr<Entry> find(const std::string& id) const;
   void notify_waiters(Entry& e) noexcept;
+  void notify_write_waiters(Entry& e) noexcept;
   void schedule_timeout(std::shared_ptr<Entry> e, std::int32_t timeout_ms);
   void schedule_grace_kill(std::shared_ptr<Entry> e, std::int32_t grace_ms);
   void kill_group(Entry& e, int sig) noexcept;

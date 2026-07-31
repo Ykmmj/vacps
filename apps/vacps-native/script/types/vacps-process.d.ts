@@ -50,6 +50,10 @@ declare module 'vacps:process' {
 
   export interface WriteOptions {
     readonly close?: boolean;
+    /** Stdin write deadline in ms (0 = no timeout). Default 30000. */
+    readonly timeoutMs?: number;
+    /** Max payload size in bytes (default 1 MiB). */
+    readonly maxBytes?: number;
   }
 
   export interface TerminateOptions {

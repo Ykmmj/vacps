@@ -81,9 +81,12 @@ struct Registry::Entry {
   bool stdin_open{false};
   bool out_eof{false};
   bool err_eof{false};
+  /** One in-flight stdin write at a time (serializes concurrent write() calls). */
+  bool write_busy{false};
   std::int32_t exit_code{0};
 
   std::vector<std::shared_ptr<asio::steady_timer>> read_waiters;
+  std::vector<std::shared_ptr<asio::steady_timer>> write_waiters;
   std::shared_ptr<asio::steady_timer> timeout_timer;
   std::shared_ptr<asio::steady_timer> grace_timer;
 };
@@ -112,6 +115,15 @@ std::shared_ptr<Registry::Entry> Registry::find(const std::string& id) const {
 void Registry::notify_waiters(Entry& e) noexcept {
   auto waiters = std::move(e.read_waiters);
   e.read_waiters.clear();
+  for (auto& t : waiters) {
+    if (t) t->cancel();
+  }
+  notify_write_waiters(e);
+}
+
+void Registry::notify_write_waiters(Entry& e) noexcept {
+  auto waiters = std::move(e.write_waiters);
+  e.write_waiters.clear();
   for (auto& t : waiters) {
     if (t) t->cancel();
   }
@@ -357,29 +369,98 @@ asio::awaitable<Result<ReadInfo>> Registry::read(std::string id, ReadOptions opt
   co_return info;
 }
 
-Result<std::size_t> Registry::write(
-    const std::string& id,
-    std::string_view data,
-    bool close_stdin) {
+asio::awaitable<Result<std::size_t>> Registry::write(
+    std::string id,
+    std::string data,
+    WriteOptions opts) {
   auto entry = find(id);
-  if (!entry) return std::unexpected(Error{"process.write: unknown process id"});
-  if (entry->finished || !entry->stdin_open || !entry->in_pipe) {
-    return std::unexpected(Error{"process.write: stdin is not available"});
+  if (!entry) {
+    co_return std::unexpected(Error{"process.write: unknown process id"});
   }
+
+  // Serialize writes on this process (single-threaded queue via timer wake).
+  while (entry->write_busy) {
+    if (entry->finished || !entry->stdin_open) {
+      co_return std::unexpected(Error{"process.write: stdin is not available"});
+    }
+    auto waiter = std::make_shared<asio::steady_timer>(ex_);
+    waiter->expires_at(asio::steady_timer::time_point::max());
+    entry->write_waiters.push_back(waiter);
+    auto [wec] = co_await waiter->async_wait(asio::as_tuple(asio::use_awaitable));
+    (void)wec;
+    auto& w = entry->write_waiters;
+    w.erase(std::remove(w.begin(), w.end(), waiter), w.end());
+    // Re-find: entry may have been cleared on shutdown (map still holds shared_ptr).
+    if (entry->finished) {
+      co_return std::unexpected(Error{"process.write: process finished"});
+    }
+  }
+
+  if (entry->finished || !entry->stdin_open || !entry->in_pipe) {
+    co_return std::unexpected(Error{"process.write: stdin is not available"});
+  }
+
+  const std::size_t maxb = opts.max_bytes > 0 ? opts.max_bytes : (1u * 1024u * 1024u);
+  if (data.size() > maxb) {
+    co_return std::unexpected(Error{std::format(
+        "process.write: payload {} bytes exceeds max_bytes {}", data.size(), maxb)});
+  }
+
+  entry->write_busy = true;
+  struct WriteBusyGuard {
+    Entry* e;
+    Registry* reg;
+    ~WriteBusyGuard() {
+      if (e) {
+        e->write_busy = false;
+        if (reg) reg->notify_write_waiters(*e);
+      }
+    }
+  } busy_guard{entry.get(), this};
+
+  std::shared_ptr<asio::steady_timer> write_timer;
+  if (opts.timeout_ms > 0) {
+    write_timer = std::make_shared<asio::steady_timer>(ex_);
+    write_timer->expires_after(std::chrono::milliseconds(opts.timeout_ms));
+    write_timer->async_wait([entry](const boost::system::error_code& ec) {
+      if (ec || !entry || !entry->in_pipe || !entry->stdin_open) return;
+      boost::system::error_code cancel_ec;
+      entry->in_pipe->cancel(cancel_ec);
+    });
+  }
+
+  std::size_t written = 0;
   try {
     if (!data.empty()) {
-      boost::system::error_code ec;
-      asio::write(*entry->in_pipe, asio::buffer(data.data(), data.size()), ec);
-      if (ec) return std::unexpected(Error{std::format("process.write: {}", ec.message())});
+      auto [ec, n] = co_await asio::async_write(
+          *entry->in_pipe,
+          asio::buffer(data),
+          asio::as_tuple(asio::use_awaitable));
+      if (write_timer) {
+        write_timer->cancel();
+        write_timer.reset();
+      }
+      if (ec) {
+        if (ec == asio::error::operation_aborted) {
+          co_return std::unexpected(Error{"process.write: timed out or cancelled"});
+        }
+        co_return std::unexpected(Error{std::format("process.write: {}", ec.message())});
+      }
+      written = n;
+    } else if (write_timer) {
+      write_timer->cancel();
+      write_timer.reset();
     }
-    if (close_stdin) {
-      boost::system::error_code ec;
-      entry->in_pipe->close(ec);
+
+    if (opts.close_stdin && entry->in_pipe && entry->stdin_open) {
+      boost::system::error_code close_ec;
+      entry->in_pipe->close(close_ec);
       entry->stdin_open = false;
     }
-    return data.size();
+    co_return written;
   } catch (const std::exception& e) {
-    return std::unexpected(Error{std::format("process.write: {}", e.what())});
+    if (write_timer) write_timer->cancel();
+    co_return std::unexpected(Error{std::format("process.write: {}", e.what())});
   }
 }
 

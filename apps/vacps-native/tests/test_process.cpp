@@ -1,4 +1,5 @@
 #include "process/process.hpp"
+#include "process/registry.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -107,4 +108,102 @@ TEST(ProcessTest, TimeoutKillsProcessGroup) {
   ASSERT_TRUE(r) << r.error().message;
   EXPECT_TRUE(r->timed_out);
   EXPECT_LT(elapsed, std::chrono::seconds(3));
+}
+
+TEST(ProcessRegistryTest, AsyncWriteToCatAndClose) {
+  asio::io_context ioc{1};
+  vacps::process::Registry reg(ioc.get_executor());
+  bool ok = false;
+  std::string err;
+  std::string out;
+
+  asio::co_spawn(
+      ioc,
+      [&]() -> asio::awaitable<void> {
+        vacps::process::StartOptions so;
+        so.close_stdin = false;
+        so.timeout_ms = 10'000;
+        auto started = co_await reg.start({"/bin/cat"}, so);
+        if (!started) {
+          err = started.error().message;
+          co_return;
+        }
+        vacps::process::WriteOptions wo;
+        wo.close_stdin = false;
+        wo.timeout_ms = 5'000;
+        auto w1 = co_await reg.write(started->id, "hello-async-write\n", wo);
+        if (!w1) {
+          err = w1.error().message;
+          co_return;
+        }
+        EXPECT_EQ(*w1, std::string("hello-async-write\n").size());
+
+        wo.close_stdin = true;
+        auto w2 = co_await reg.write(started->id, "", wo);
+        if (!w2) {
+          err = w2.error().message;
+          co_return;
+        }
+
+        vacps::process::ReadOptions ro;
+        ro.wait_ms = 3'000;
+        ro.max_bytes = 65'536;
+        for (int i = 0; i < 50; ++i) {
+          auto rd = co_await reg.read(started->id, ro);
+          if (!rd) {
+            err = rd.error().message;
+            co_return;
+          }
+          out += rd->stdout_slice;
+          if (rd->eof || rd->status != "running") break;
+          ro.stdout_offset = rd->next_stdout_offset;
+          ro.stderr_offset = rd->next_stderr_offset;
+        }
+        if (out.find("hello-async-write") == std::string::npos) {
+          err = "missing stdout: " + out;
+          co_return;
+        }
+        ok = true;
+        co_return;
+      },
+      asio::detached);
+
+  ioc.run();
+  ASSERT_TRUE(ok) << err;
+}
+
+TEST(ProcessRegistryTest, WriteRejectsOversizedPayload) {
+  asio::io_context ioc{1};
+  vacps::process::Registry reg(ioc.get_executor());
+  bool rejected = false;
+  std::string err;
+
+  asio::co_spawn(
+      ioc,
+      [&]() -> asio::awaitable<void> {
+        vacps::process::StartOptions so;
+        so.close_stdin = false;
+        so.timeout_ms = 5'000;
+        auto started = co_await reg.start({"/bin/cat"}, so);
+        if (!started) {
+          err = started.error().message;
+          co_return;
+        }
+        vacps::process::WriteOptions wo;
+        wo.max_bytes = 16;
+        wo.timeout_ms = 2'000;
+        auto w = co_await reg.write(started->id, std::string(64, 'x'), wo);
+        if (w) {
+          err = "expected reject for oversized write";
+          co_return;
+        }
+        err = w.error().message;
+        rejected = err.find("max_bytes") != std::string::npos;
+        (void)reg.terminate(started->id, "SIGKILL", 0);
+        co_return;
+      },
+      asio::detached);
+
+  ioc.run();
+  EXPECT_TRUE(rejected) << err;
 }
