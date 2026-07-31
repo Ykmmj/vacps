@@ -22,16 +22,36 @@ namespace vacps::fs {
 /**
  * Open file handle — primary I/O API for vacps:fs.
  *
- * Dual backend (selected at open; exclusive per instance):
- * 1. Asio: random_access_file when use_asio_file (probe ok) + executor
- * 2. Pool: private FD + sync I/O offloaded via thread_pool
+ * ## Dual backend (product requirement — keep both)
  *
- * Path policy is JS-only (`script/src/runtime/path-guard.ts` at tool boundaries).
- * C++ resolves paths and does pure open/read/write — no allowlist in native.
+ * Selected once at open; exclusive per instance for the lifetime of the File:
  *
- * Flags are Asio file_base bitmasks (numeric values match POSIX open flags on
- * Linux), not string modes. Primary API is awaitable async_*; sync methods are
- * for the pool backend and unit tests.
+ * 1. **Asio** — `boost::asio::random_access_file` when `use_asio_file` is true
+ *    (runtime `probe_io_uring()` succeeded) and an ioc executor is provided.
+ *    Preferred path for non-blocking file I/O on hosts with working io_uring.
+ * 2. **Pool** — private FD + sync POSIX I/O offloaded on `thread_pool`.
+ *    Required fallback when io_uring is unavailable or blocked (e.g. Docker
+ *    default seccomp → setup EPERM). Constructing Asio file objects in that
+ *    environment throws; we never probe-fail and still open Asio.
+ *
+ * This is **not** transitional dual-path junk and must not be “simplified” to
+ * a single backend. Review feedback that asks for “blocking POSIX only first”
+ * rejects the product constraint: we need io_uring where it works **and** a
+ * reliable pool path where it does not, behind one JS/C++ File surface.
+ *
+ * Known Asio API limit (document, do not pretend to unify via fake wrappers):
+ * pool open passes `OpenOptions::mode` to `open(2)`; Asio
+ * `random_access_file::open(path, flags)` does not take user mode bits and
+ * uses the library default for create. Callers that need exact create mode
+ * on both backends must accept that Asio limitation until Asio exposes mode.
+ *
+ * Path policy is JS-only (`script/src/runtime/path-guard.ts` at tool
+ * boundaries). C++ resolves paths and does pure open/read/write — no
+ * allowlist in native.
+ *
+ * Flags are Asio `file_base` bitmasks (numeric values match POSIX open flags
+ * on Linux), not string modes. Primary API is awaitable `async_*`; sync
+ * methods are for the pool backend and unit tests.
  *
  * Namespace ops (mkdir/list/rename/…) stay on path helpers in async.hpp.
  * Content I/O is only through this class. Pool FD ownership is private (not a

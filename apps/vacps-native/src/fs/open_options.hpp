@@ -68,8 +68,13 @@ struct OpenOptions {
 #endif
   };
   /**
-   * Permission bits when create is set (pool-backend open only).
-   * Asio random_access_file open uses its own default mode (0777).
+   * Permission bits when create is set.
+   *
+   * Applied on the **pool** backend (`open(2)` third argument). The **Asio**
+   * backend (`random_access_file::open`) has no mode parameter in current
+   * Boost.Asio — it uses the library default for O_CREAT. That asymmetry is
+   * an Asio API limit under the intentional dual-backend design (see File),
+   * not a reason to drop either backend.
    */
   unsigned mode{0644};
 };

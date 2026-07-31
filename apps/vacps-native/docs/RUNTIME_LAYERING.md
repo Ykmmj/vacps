@@ -19,7 +19,8 @@
 - C++：`resolve_path`（相对路径拼 `data_dir`）+ 纯 open/read/write。
 - **`fs::File`** = 打开文件的 **handle API**：
   - open flags = Boost.Asio `file_base` bitmask（Linux 上与 open(2) / Node `O_*` 同值），**不是**字符串 OpenMode
-  - 双后端：`probe_io_uring()` 成功 → Asio `random_access_file`；否则 pool + 私有 FD RAII
+  - **双后端是产品要求，不是过渡方案**：`probe_io_uring()` 成功 → Asio `random_access_file`（首选）；否则 pool + 私有 FD。必须同时保留：有 io_uring 时用非阻塞 file I/O，Docker seccomp 等拦 io_uring 时仍能跑。审查若要求“先砍成单后端 POSIX”与此冲突，以本设计为准。
+  - create 时 `mode`：pool 走 `open(2)`；Asio `random_access_file::open` 当前无 mode 参数（Boost API 限制），文档化差异，不为“语义完全一致”拆掉 Asio。
 - 命名空间操作（mkdir / readDirectory / rename / exists / remove / stat）走 path 级 free helpers（`async_*` 卸载到 `thread_pool`）。内容 I/O 仅 `File`。
 
 ## BootstrapConfig（不是产品 Config bag）

@@ -162,7 +162,8 @@ MCP / 文件工具的黑名单与 workspace 约束在 JS `runtime/path-guard.ts`
 | -- | --- |
 | 打开 | `File.open(path, flags, mode?)` 或 `File.open(path, { flags, mode? })` |
 | flags | Node/POSIX 风格整数位掩码（`O_RDONLY` / `O_WRONLY` / `O_RDWR` / `O_CREAT` / …）；**无**字符串 OpenMode |
-| 后端 | `probe_io_uring()` 成功 → Asio `random_access_file`；否则 `thread_pool` + 私有 FD |
+| 后端 | **双后端（必保留）**：`probe_io_uring()` 成功 → Asio `random_access_file`；否则 `thread_pool` + 私有 FD。不是临时兼容层，不可合并为“仅 POSIX” |
+| create `mode` | pool：`open(2)` 使用 JS/`OpenOptions.mode`；Asio：`random_access_file::open` 无 mode 参数（Boost 限制） |
 | I/O | `read` / `readAt` / `write` / `writeAt` / `readText` / `writeText` / `truncate` / `stat` / `flush` / `close`（全部 `Promise`） |
 
 ### 命名空间 ops（path helpers）

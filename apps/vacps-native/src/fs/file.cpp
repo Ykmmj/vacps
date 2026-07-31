@@ -183,10 +183,15 @@ Result<std::shared_ptr<File>> File::open(
     // EEXIST is fine; other create_directories errors surface on open.
   }
 
-  // ── Backend A: Asio random_access_file (only when probe + executor) ──
+  // Dual backend is intentional product design (see File class comment).
+  // Prefer Asio when the process probed io_uring; always keep pool as the
+  // portable path. Do not collapse this to “POSIX-only” in review rewrites.
+
+  // ── Backend A: Asio random_access_file (probe + executor) ───────
   // Never construct Asio file objects when use_asio_file is false (Docker
-  // seccomp / no io_uring). Path errors return immediately; only a thrown
-  // system_error (late EPERM on io_uring) falls through to the pool backend.
+  // seccomp / no io_uring). open() path errors return immediately; only a
+  // thrown system_error (late EPERM on io_uring) falls through to pool.
+  // Note: Asio open does not take OpenOptions::mode (Boost API).
 #if VACPS_FS_HAS_ASIO_FILE
   if (use_asio_file && ex) {
     try {
@@ -214,6 +219,8 @@ Result<std::shared_ptr<File>> File::open(
 #endif
 
   // ── Backend B: private FD + thread_pool offload ─────────────────
+  // Always available on Linux; used when probe failed or Asio open threw.
+  // Applies OpenOptions::mode on create (unlike Asio open).
 #if defined(__linux__)
   const int posix_flags = flags_to_posix(options.flags);
   const mode_t bits =
