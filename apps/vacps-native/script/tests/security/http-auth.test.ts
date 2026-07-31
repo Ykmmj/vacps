@@ -52,9 +52,9 @@ describe('assertControlPlaneAuthConfig', () => {
 
   it('rejects missing key in production mode', () => {
     expect(() => assertControlPlaneAuthConfig({})).toThrow(/CONTROL_PLANE_PUBLIC_KEY is required/);
-    expect(() =>
-      assertControlPlaneAuthConfig({ ALLOW_INSECURE_NO_AUTH: false }),
-    ).toThrow(/CONTROL_PLANE_PUBLIC_KEY is required/);
+    expect(() => assertControlPlaneAuthConfig({ ALLOW_INSECURE_NO_AUTH: false })).toThrow(
+      /CONTROL_PLANE_PUBLIC_KEY is required/,
+    );
   });
 });
 

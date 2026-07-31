@@ -63,9 +63,7 @@ export function assertSafeAbsolutePath(filePath: string): string {
     throw pathError(`path under kernel filesystem is not allowed.`);
   }
   if (!isUnderAllowedRoot(normalized)) {
-    throw pathError(
-      `path is outside allowed roots (${allowedRoots.join(', ') || 'none'}).`,
-    );
+    throw pathError(`path is outside allowed roots (${allowedRoots.join(', ') || 'none'}).`);
   }
   return normalized;
 }

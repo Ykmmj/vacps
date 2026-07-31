@@ -10,10 +10,7 @@ import { probeShellEnvironment } from '../runtime/shell-environment';
 import * as files from '../runtime/files';
 import { hashRequest, IdempotencyStore } from '../runtime/idempotency';
 import type { ProcessManager } from '../runtime/process-manager';
-import {
-  allowUnsignedWhenNoKey,
-  isPublicHttpPath,
-} from '../security/http-auth';
+import { allowUnsignedWhenNoKey, isPublicHttpPath } from '../security/http-auth';
 import { verifyControlPlaneRequest } from '../security/control-plane-verify';
 import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
 import { createApp, type App, type Reply } from './router';
@@ -74,8 +71,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return reply.code(401).send({
         error: {
           code: 'unauthorized',
-          message:
-            'CONTROL_PLANE_PUBLIC_KEY is required; unsigned requests are not accepted.',
+          message: 'CONTROL_PLANE_PUBLIC_KEY is required; unsigned requests are not accepted.',
         },
       });
     }
