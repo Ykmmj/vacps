@@ -108,7 +108,6 @@ endif()
 # Layout: src/{main,app,quickjs,process,storage,http,crypto,fs}
 add_library(vacps_native_core STATIC
   src/app/version.cpp
-  src/app/config.cpp
   src/app/log.cpp
   src/storage/db.cpp
   src/fs/fs.cpp
@@ -119,12 +118,15 @@ add_library(vacps_native_core STATIC
   src/process/registry.cpp
   src/crypto/crypto.cpp
   src/http/script_dispatch.cpp
+  src/http/server.cpp
+  src/http/session.cpp
   src/http/client.cpp
   src/quickjs/runtime.cpp
   src/quickjs/context.cpp
   src/quickjs/host.cpp
   src/quickjs/modules.cpp
   src/quickjs/url_globals.cpp
+  src/quickjs/encoding_globals.cpp
 )
 
 target_include_directories(vacps_native_core PUBLIC
@@ -150,6 +152,7 @@ target_link_libraries(vacps_native_core PUBLIC
   vacps_quickjs
   vacps_boost_process
   ada
+  simdutf::simdutf
   spdlog::spdlog
   nlohmann_json::nlohmann_json
   OpenSSL::SSL
@@ -205,7 +208,6 @@ if(VACPS_BUILD_TESTS)
     tests/test_fs_async.cpp
     tests/test_db.cpp
     tests/test_process.cpp
-    tests/test_config.cpp
     tests/test_host.cpp
     tests/test_js_native_api.cpp
     tests/test_promise_bridge.cpp

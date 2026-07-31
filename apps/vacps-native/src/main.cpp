@@ -1,7 +1,7 @@
-#include "app/config.hpp"
-#include "quickjs/host.hpp"
 #include "app/log.hpp"
 #include "app/version.hpp"
+#include "fs/sandbox.hpp"
+#include "quickjs/host.hpp"
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -28,15 +28,12 @@ void print_usage(const char* argv0) {
       << "Usage: " << argv0 << " [options]\n"
       << "  --version, -V     Print version and exit\n"
       << "  --help, -h        Show help\n"
-      << "  --host HOST       Listen host\n"
-      << "  --port PORT       Listen port (1..65535)\n"
-      << "  --data-dir DIR    Data directory\n"
+      << "  --data-dir DIR    Data directory (default: VACPS_DATA_DIR or \"data\")\n"
       << "  --script PATH     Business ESM bundle (required)\n"
       << "  --log-level LVL   log level\n"
       << "\n"
-      << "C++: Asio transport + vacps:* capabilities.\n"
-      << "JS: vacps:http.Server + all routes. Promise await uses Asio.\n"
-      << "Non-loopback --host requires VACPS_ALLOW_REMOTE_BIND=true.\n";
+      << "C++: Asio event loop + vacps:* modules.\n"
+      << "Agent policy (listen, auth, CP keys, …) is owned by the business script.\n";
 }
 
 std::string resolve_default_script() {
@@ -51,10 +48,28 @@ std::string resolve_default_script() {
   return {};
 }
 
+std::string env_or_empty(const char* key) {
+  if (const char* v = std::getenv(key); v != nullptr && v[0] != '\0') {
+    return v;
+  }
+  return {};
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  auto cfg = vacps::Config::from_env();
+  vacps::js::HostOptions host_opts;
+  host_opts.data_dir = "data";
+  if (auto d = env_or_empty("VACPS_DATA_DIR"); !d.empty()) {
+    host_opts.data_dir = std::move(d);
+  }
+  host_opts.ca_bundle = env_or_empty("VACPS_CA_BUNDLE");
+  host_opts.fs_extra_roots = vacps::fs::fs_extra_roots_from_env();
+
+  std::string log_level = "info";
+  if (auto l = env_or_empty("VACPS_LOG_LEVEL"); !l.empty()) {
+    log_level = std::move(l);
+  }
   std::string script_path = resolve_default_script();
 
   for (int i = 1; i < argc; ++i) {
@@ -67,21 +82,8 @@ int main(int argc, char** argv) {
       print_usage(argv[0]);
       return EXIT_SUCCESS;
     }
-    if (arg == "--host" && i + 1 < argc) {
-      cfg.listen_host = argv[++i];
-      continue;
-    }
-    if (arg == "--port" && i + 1 < argc) {
-      auto port = vacps::parse_port(argv[++i]);
-      if (!port) {
-        std::cerr << "invalid --port: " << port.error().message << '\n';
-        return EXIT_FAILURE;
-      }
-      cfg.listen_port = *port;
-      continue;
-    }
     if (arg == "--data-dir" && i + 1 < argc) {
-      cfg.data_dir = argv[++i];
+      host_opts.data_dir = argv[++i];
       continue;
     }
     if (arg == "--script" && i + 1 < argc) {
@@ -89,7 +91,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (arg == "--log-level" && i + 1 < argc) {
-      cfg.log_level = argv[++i];
+      log_level = argv[++i];
       continue;
     }
     std::cerr << "unknown argument: " << arg << '\n';
@@ -97,9 +99,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  vacps::apply_remote_bind_policy(cfg);
-
-  vacps::log::init(cfg.log_level);
+  vacps::log::init(log_level);
   vacps::log::info("vacps-agent {} starting", vacps::version());
 
   if (script_path.empty()) {
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
   try {
     asio::io_context ioc{1};
 
-    auto host_r = vacps::js::Host::create(cfg, ioc);
+    auto host_r = vacps::js::Host::create(ioc, std::move(host_opts));
     if (!host_r) {
       vacps::log::error("quickjs host failed: {}", host_r.error().message);
       vacps::log::flush();
@@ -124,7 +124,6 @@ int main(int argc, char** argv) {
     asio::co_spawn(
         ioc,
         [host, script_path, &ioc, &bootstrap_ec, &running]() -> asio::awaitable<void> {
-          // Business script owns vacps:http.Server (createServer + listen in initialize).
           auto init = co_await host->load_and_initialize(script_path);
           if (!init) {
             vacps::log::error("script init failed: {}", init.error().message);
@@ -134,7 +133,6 @@ int main(int argc, char** argv) {
           }
           running = true;
 
-          // Periodic registration / telemetry (JS tickControlPlane).
           auto executor = co_await asio::this_coro::executor;
           asio::steady_timer timer{executor};
           for (;;) {
@@ -162,17 +160,22 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
 
-    // Server/signal stopped the reactor; drain then script shutdown.
-    if (running) {
-      ioc.restart();
-      ioc.poll();
-
+    // Fallback path when the process stops without Server::request_stop
+    // (e.g. bootstrap tick ended while script still ready). Prefer Server's
+    // structured graceful_shutdown when a listener is up.
+    if (running && host->script_ready()) {
       ioc.restart();
       asio::co_spawn(
           ioc,
           [host, &ioc]() -> asio::awaitable<void> {
+            host->cancel_host_async();
+            host->processes().shutdown();
+            co_await host->wait_async_idle(std::chrono::seconds{5});
             if (auto sh = co_await host->shutdown_script(); !sh) {
               vacps::log::error("script shutdown: {}", sh.error().message);
+            }
+            if (auto drain = host->drain_jobs(); !drain) {
+              vacps::log::debug("post-shutdown job drain: {}", drain.error().message);
             }
             ioc.stop();
             co_return;

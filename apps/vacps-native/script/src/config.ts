@@ -8,6 +8,9 @@ export interface AgentConfig {
   BACKEND_ID: string;
   BACKEND_NAME: string;
   BACKEND_TAGS: string[];
+  /** Inbound bind (passed to http.createServer). Not owned by C++ Config. */
+  LISTEN_HOST: string;
+  LISTEN_PORT: number;
   PUBLIC_BASE_URL: string | undefined;
   CONTROL_PLANE_URL: string | undefined;
   AGENT_PRIVATE_KEY: string | undefined;
@@ -70,6 +73,8 @@ export function loadConfig(): AgentConfig {
   const tagsRaw = env('BACKEND_TAGS') ?? '';
   const publicBase = stripSlash(env('PUBLIC_BASE_URL') ?? env('VACPS_PUBLIC_BASE_URL'));
   const controlPlane = stripSlash(env('CONTROL_PLANE_URL') ?? env('VACPS_CONTROL_PLANE_URL'));
+  const listenHost = env('VACPS_LISTEN_HOST') ?? env('LISTEN_HOST') ?? '127.0.0.1';
+  const listenPort = envInt('VACPS_LISTEN_PORT', envInt('LISTEN_PORT', 8788, 1, 65535), 1, 65535);
   return {
     BACKEND_ID: backendId,
     BACKEND_NAME: env('BACKEND_NAME') ?? backendId,
@@ -77,6 +82,8 @@ export function loadConfig(): AgentConfig {
       .split(',')
       .map((t) => t.trim())
       .filter(Boolean),
+    LISTEN_HOST: listenHost,
+    LISTEN_PORT: listenPort,
     // Drop non-absolute values so registration waits for quick-tunnel / managed URL.
     PUBLIC_BASE_URL: isAbsoluteHttpUrl(publicBase) ? publicBase : undefined,
     CONTROL_PLANE_URL: isAbsoluteHttpUrl(controlPlane) ? controlPlane : undefined,

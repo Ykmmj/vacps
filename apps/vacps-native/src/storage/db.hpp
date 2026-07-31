@@ -52,10 +52,14 @@ class Database {
   /** Single statement with optional bound parameters (? placeholders). */
   [[nodiscard]] VoidResult execute(std::string_view sql, const std::vector<SqlValue>& params = {});
 
+  /** Default max rows for query(); oversized results return an error. */
+  static constexpr std::size_t kDefaultMaxQueryRows = 10'000;
+
   /** SELECT (or any statement with a result set) + optional binds. */
   [[nodiscard]] Result<QueryResult> query(
       std::string_view sql,
-      const std::vector<SqlValue>& params = {});
+      const std::vector<SqlValue>& params = {},
+      std::size_t max_rows = kDefaultMaxQueryRows);
 
   [[nodiscard]] VoidResult begin();
   [[nodiscard]] VoidResult commit();

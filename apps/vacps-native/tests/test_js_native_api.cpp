@@ -1,4 +1,3 @@
-#include "app/config.hpp"
 #include "app/log.hpp"
 #include "quickjs/convert.hpp"
 #include "quickjs/host.hpp"
@@ -48,8 +47,7 @@ class JsNativeApiTest : public ::testing::Test {
            std::to_string(::getpid()) /
            std::to_string(reinterpret_cast<std::uintptr_t>(this));
     fs::create_directories(dir_);
-    cfg_.data_dir = dir_.string();
-    cfg_.log_level = "info";
+    host_opts_.data_dir = dir_.string();
   }
 
   void TearDown() override {
@@ -57,7 +55,7 @@ class JsNativeApiTest : public ::testing::Test {
     fs::remove_all(dir_, ec);
   }
 
-  vacps::Config cfg_{};
+  vacps::js::HostOptions host_opts_{};
   fs::path dir_;
 };
 
@@ -73,7 +71,7 @@ TEST_F(JsNativeApiTest, AllNativeModules) {
   ASSERT_FALSE(src.empty()) << "empty test script";
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 

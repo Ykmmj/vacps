@@ -7,16 +7,16 @@ export interface RunResult {
 }
 
 export interface Store {
-  exec(sql: string): void;
-  run(sql: string, params?: readonly SqlParam[]): RunResult;
-  query(sql: string, params?: readonly SqlParam[]): Array<Record<string, unknown>>;
-  begin(): void;
-  commit(): void;
-  rollback(): void;
+  exec(sql: string): Promise<void>;
+  run(sql: string, params?: readonly SqlParam[]): Promise<RunResult>;
+  query(sql: string, params?: readonly SqlParam[]): Promise<Array<Record<string, unknown>>>;
+  begin(): Promise<void>;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
   path(): string;
-  close(): void;
+  close(): Promise<void>;
 }
 
-export function open(_path: string): Store {
+export function open(_path: string): Promise<Store> {
   throw new Error('vacps:store.open is not available in unit tests; use openMemoryStore()');
 }

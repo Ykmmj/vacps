@@ -12,9 +12,9 @@ export interface ControlPlaneState {
   lastError?: string;
 }
 
-export function loadControlPlaneState(db: Store): ControlPlaneState {
-  migrateAgentDb(db);
-  const rows = db.query('SELECT key, value FROM agent_state;');
+export async function loadControlPlaneState(db: Store): Promise<ControlPlaneState> {
+  await migrateAgentDb(db);
+  const rows = await db.query('SELECT key, value FROM agent_state;');
   const map = new Map<string, string>();
   for (const row of rows) {
     const k = String(row['key'] ?? '');
@@ -43,21 +43,21 @@ export function loadControlPlaneState(db: Store): ControlPlaneState {
   return out;
 }
 
-export function saveControlPlaneState(db: Store, state: ControlPlaneState): void {
-  migrateAgentDb(db);
-  const put = (key: string, value: string) => {
-    db.run(
+export async function saveControlPlaneState(db: Store, state: ControlPlaneState): Promise<void> {
+  await migrateAgentDb(db);
+  const put = async (key: string, value: string) => {
+    await db.run(
       'INSERT INTO agent_state(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;',
       [key, value],
     );
   };
-  put('registration_status', state.registrationStatus);
-  if (state.lastRegistrationAt) put('last_registration_at', state.lastRegistrationAt);
-  if (state.lastTelemetryAt) put('last_telemetry_at', state.lastTelemetryAt);
-  put('telemetry_interval_seconds', String(state.telemetryIntervalSeconds));
+  await put('registration_status', state.registrationStatus);
+  if (state.lastRegistrationAt) await put('last_registration_at', state.lastRegistrationAt);
+  if (state.lastTelemetryAt) await put('last_telemetry_at', state.lastTelemetryAt);
+  await put('telemetry_interval_seconds', String(state.telemetryIntervalSeconds));
   if (state.lastError) {
-    put('last_error', state.lastError);
+    await put('last_error', state.lastError);
   } else {
-    db.run('DELETE FROM agent_state WHERE key = ?;', ['last_error']);
+    await db.run('DELETE FROM agent_state WHERE key = ?;', ['last_error']);
   }
 }

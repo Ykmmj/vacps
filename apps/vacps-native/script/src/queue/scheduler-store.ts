@@ -48,15 +48,18 @@ export interface ClaimResult {
  * Local schedule store. Firing uses absolute next_run_at; revision-gated merge on sync.
  */
 export class SchedulerStore {
-  constructor(private readonly db: Store) {
-    migrateAgentDb(db);
+  private constructor(private readonly db: Store) {}
+
+  static async create(db: Store): Promise<SchedulerStore> {
+    await migrateAgentDb(db);
+    return new SchedulerStore(db);
   }
 
   /**
    * Apply control-plane wire with revision merge rules.
    * Returns whether local row was written.
    */
-  upsertFromWire(input: {
+  async upsertFromWire(input: {
     id: string;
     cron: string;
     timezone: string;
@@ -67,8 +70,8 @@ export class SchedulerStore {
     nextRunAt?: string | null;
     /** If higher/new rev has no next and enabled, fill with this (caller-computed). */
     computeNextIfMissing?: () => string | undefined;
-  }): boolean {
-    const local = this.get(input.id);
+  }): Promise<boolean> {
+    const local = await this.get(input.id);
     const incomingRev = input.revision ?? local?.revision ?? 1;
     const policy = input.policy ?? local?.policy ?? DEFAULT_SCHEDULE_POLICY;
 
@@ -116,7 +119,7 @@ export class SchedulerStore {
     if (!merged.enabled) nextRunAt = undefined;
     if (nextRunAt) nextRunAt = canonicalUtcIso(nextRunAt);
 
-    this.writeRow({
+    await this.writeRow({
       id: input.id,
       cron: merged.cron,
       timezone: merged.timezone,
@@ -130,7 +133,7 @@ export class SchedulerStore {
   }
 
   /** Unconditional local write (tests / internal). */
-  writeRow(input: {
+  async writeRow(input: {
     id: string;
     cron: string;
     timezone: string;
@@ -139,10 +142,10 @@ export class SchedulerStore {
     revision: number;
     policy: SchedulePolicy;
     nextRunAt?: string;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     const next = input.nextRunAt ? (canonicalUtcIso(input.nextRunAt) ?? null) : null;
-    this.db.run(
+    await this.db.run(
       `INSERT INTO schedulers(
          id, cron, timezone, enabled, task_json, last_fired_minute,
          next_run_at, revision, last_claimed_at, policy_json, updated_at
@@ -170,23 +173,23 @@ export class SchedulerStore {
     );
   }
 
-  remove(id: string): void {
-    this.db.run('DELETE FROM schedulers WHERE id = ?;', [id]);
+  async remove(id: string): Promise<void> {
+    await this.db.run('DELETE FROM schedulers WHERE id = ?;', [id]);
   }
 
-  list(): StoredScheduler[] {
-    const rows = this.db.query('SELECT * FROM schedulers ORDER BY id ASC;');
+  async list(): Promise<StoredScheduler[]> {
+    const rows = await this.db.query('SELECT * FROM schedulers ORDER BY id ASC;');
     return rows.map(rowToScheduler);
   }
 
-  get(id: string): StoredScheduler | undefined {
-    const rows = this.db.query('SELECT * FROM schedulers WHERE id = ?;', [id]);
+  async get(id: string): Promise<StoredScheduler | undefined> {
+    const rows = await this.db.query('SELECT * FROM schedulers WHERE id = ?;', [id]);
     if (rows.length === 0) return undefined;
     return rowToScheduler(rows[0]!);
   }
 
-  listEnabled(): StoredScheduler[] {
-    return this.list().filter((s) => s.enabled);
+  async listEnabled(): Promise<StoredScheduler[]> {
+    return (await this.list()).filter((s) => s.enabled);
   }
 
   /**
@@ -195,11 +198,11 @@ export class SchedulerStore {
    *
    * Prefer {@link claimAndEnqueue} which runs UPDATE+INSERT in one transaction.
    */
-  claimAndEnqueue(
+  async claimAndEnqueue(
     schedule: StoredScheduler,
     nowMs: number,
-    insertTask: (slot: ClaimEnqueueSlot, schedule: StoredScheduler) => void,
-  ): ClaimResult {
+    insertTask: (slot: ClaimEnqueueSlot, schedule: StoredScheduler) => void | Promise<void>,
+  ): Promise<ClaimResult> {
     if (!schedule.enabled) {
       return { claimed: false, reason: 'disabled', slots: [], advancedNext: null };
     }
@@ -233,8 +236,8 @@ export class SchedulerStore {
     const nowIso = new Date().toISOString();
 
     try {
-      this.db.begin();
-      const upd = this.db.run(
+      await this.db.begin();
+      const upd = await this.db.run(
         `UPDATE schedulers SET
            next_run_at = ?,
            last_claimed_at = ?,
@@ -255,7 +258,7 @@ export class SchedulerStore {
         ],
       );
       if (upd.changes !== 1) {
-        this.db.rollback();
+        await this.db.rollback();
         return {
           claimed: false,
           reason: 'cas_miss',
@@ -266,10 +269,10 @@ export class SchedulerStore {
       }
 
       for (const slot of slots) {
-        insertTask(slot, schedule);
+        await insertTask(slot, schedule);
       }
 
-      this.db.commit();
+      await this.db.commit();
       return {
         claimed: true,
         plan,
@@ -278,7 +281,7 @@ export class SchedulerStore {
       };
     } catch (e) {
       try {
-        this.db.rollback();
+        await this.db.rollback();
       } catch {
         /* ignore */
       }

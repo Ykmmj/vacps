@@ -8,18 +8,20 @@ declare module 'vacps:store' {
 
   /**
    * Store instance created by JS via open() — not a process singleton from C++.
+   * All SQLite I/O runs on a serial host db thread; every mutator returns a Promise.
    */
   export interface Store {
-    exec(sql: string): void;
-    run(sql: string, params?: readonly SqlParam[]): RunResult;
-    query(sql: string, params?: readonly SqlParam[]): Array<Record<string, unknown>>;
-    begin(): void;
-    commit(): void;
-    rollback(): void;
+    exec(sql: string): Promise<void>;
+    run(sql: string, params?: readonly SqlParam[]): Promise<RunResult>;
+    query(sql: string, params?: readonly SqlParam[]): Promise<Array<Record<string, unknown>>>;
+    begin(): Promise<void>;
+    commit(): Promise<void>;
+    rollback(): Promise<void>;
+    /** Sync path string (no I/O). */
     path(): string;
-    close(): void;
+    close(): Promise<void>;
   }
 
-  /** Factory: create a new SQLite connection (C++ capability, JS owns the instance). */
-  export function open(path: string): Store;
+  /** Factory: open a new SQLite connection on the serial db pool. */
+  export function open(path: string): Promise<Store>;
 }

@@ -1,5 +1,8 @@
 #include "fs/fs.hpp"
 
+#include "crypto/crypto.hpp"
+
+#include <array>
 #include <chrono>
 #include <fstream>
 #include <format>
@@ -64,6 +67,52 @@ Result<std::vector<std::uint8_t>> read_bytes(const std::filesystem::path& path) 
     return std::unexpected(std::move(text.error()));
   }
   return std::vector<std::uint8_t>(text->begin(), text->end());
+}
+
+Result<std::vector<std::uint8_t>> read_range(
+    const std::filesystem::path& path,
+    std::uint64_t offset,
+    std::size_t max_bytes) {
+  if (max_bytes == 0) {
+    return std::vector<std::uint8_t>{};
+  }
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return std::unexpected(Error{std::format("read failed: {}", path.string())});
+  }
+  if (offset > 0) {
+    in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!in) {
+      // Offset past EOF → empty slice.
+      return std::vector<std::uint8_t>{};
+    }
+  }
+  std::vector<std::uint8_t> buf(max_bytes);
+  in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(max_bytes));
+  const auto n = static_cast<std::size_t>(in.gcount());
+  buf.resize(n);
+  return buf;
+}
+
+Result<FileDigest> hash_file(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return std::unexpected(Error{std::format("hash failed: {}", path.string())});
+  }
+  vacps::crypto::Sha256 hasher;
+  std::array<char, 64 * 1024> chunk{};
+  std::uint64_t total = 0;
+  while (in) {
+    in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    const auto n = static_cast<std::size_t>(in.gcount());
+    if (n == 0) break;
+    total += n;
+    hasher.update(reinterpret_cast<const std::uint8_t*>(chunk.data()), n);
+  }
+  FileDigest out;
+  out.size_bytes = total;
+  out.sha256_hex = vacps::crypto::to_hex(hasher.finalize());
+  return out;
 }
 
 VoidResult write_text(const std::filesystem::path& path, std::string_view data) {

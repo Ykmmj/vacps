@@ -33,8 +33,8 @@ export class ShellExecutor {
 
   async execute(task: TaskDispatch): Promise<void> {
     const id = task.task_id;
-    if (this.store.isCancelRequested(id)) {
-      this.store.updateTask(id, {
+    if (await this.store.isCancelRequested(id)) {
+      await this.store.updateTask(id, {
         status: 'cancelled',
         error: { code: 'cancelled', message: 'Cancelled before start.' },
       });
@@ -42,14 +42,14 @@ export class ShellExecutor {
     }
 
     if (task.kind === 'agent') {
-      this.store.updateTask(id, {
+      await this.store.updateTask(id, {
         status: 'failed',
         error: {
           code: 'capability_unavailable',
           message: 'Pi runtime is not available on this backend.',
         },
       });
-      this.store.appendLog(id, 'system', 'Pi runtime not available on native');
+      await this.store.appendLog(id, 'system', 'Pi runtime not available on native');
       return;
     }
 
@@ -67,7 +67,7 @@ export class ShellExecutor {
       argv = [shell, '-lc', task.command];
     }
 
-    this.store.appendLog(id, 'system', `exec: ${argv.map(shellQuote).join(' ')}`);
+    await this.store.appendLog(id, 'system', `exec: ${argv.map(shellQuote).join(' ')}`);
     log.info(`task ${id} start kind=${task.kind}`);
 
     try {
@@ -107,7 +107,7 @@ export class ShellExecutor {
       const captureOrStore = (max: number) => max > 0;
 
       for (;;) {
-        if (this.store.isCancelRequested(id)) {
+        if (await this.store.isCancelRequested(id)) {
           await process.terminate(started.id, { signal: 'SIGKILL', graceMs: 0 });
           final = await process.read(started.id, {
             waitMs: 2_000,
@@ -125,9 +125,9 @@ export class ShellExecutor {
             stderr = r.text;
             stderrTruncated = stderrTruncated || r.cut;
           }
-          if (captureStdout && stdout) this.store.appendLog(id, 'stdout', stdout);
-          if (captureStderr && stderr) this.store.appendLog(id, 'stderr', stderr);
-          this.store.updateTask(id, {
+          if (captureStdout && stdout) await this.store.appendLog(id, 'stdout', stdout);
+          if (captureStderr && stderr) await this.store.appendLog(id, 'stderr', stderr);
+          await this.store.updateTask(id, {
             status: 'cancelled',
             error: { code: 'cancelled', message: 'Cancelled during execution.' },
             result: processResult(
@@ -172,11 +172,11 @@ export class ShellExecutor {
         if (final.eof) break;
       }
 
-      if (captureStdout && stdout) this.store.appendLog(id, 'stdout', stdout);
-      if (captureStderr && stderr) this.store.appendLog(id, 'stderr', stderr);
+      if (captureStdout && stdout) await this.store.appendLog(id, 'stdout', stdout);
+      if (captureStderr && stderr) await this.store.appendLog(id, 'stderr', stderr);
 
       if (final.timedOut || final.status === 'timed_out') {
-        this.store.updateTask(id, {
+        await this.store.updateTask(id, {
           status: 'timed_out',
           error: { code: 'timed_out', message: `Timeout after ${task.timeout_seconds}s` },
           result: processResult(
@@ -194,7 +194,7 @@ export class ShellExecutor {
       }
 
       if (final.status === 'cancelled') {
-        this.store.updateTask(id, {
+        await this.store.updateTask(id, {
           status: 'cancelled',
           error: { code: 'cancelled', message: 'Process terminated.' },
           result: processResult(
@@ -212,7 +212,7 @@ export class ShellExecutor {
       }
 
       if (final.exitCode === 0) {
-        this.store.updateTask(id, {
+        await this.store.updateTask(id, {
           status: 'succeeded',
           result: processResult(
             0,
@@ -226,7 +226,7 @@ export class ShellExecutor {
           ),
         });
       } else {
-        this.store.updateTask(id, {
+        await this.store.updateTask(id, {
           status: 'failed',
           error: {
             code: 'exit_nonzero',
@@ -246,10 +246,10 @@ export class ShellExecutor {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      this.store.appendLog(id, 'system', `error: ${msg}`);
-      const cur = this.store.getTask(id);
+      await this.store.appendLog(id, 'system', `error: ${msg}`);
+      const cur = await this.store.getTask(id);
       if (cur && !isTerminalTaskStatus(cur.status)) {
-        this.store.updateTask(id, {
+        await this.store.updateTask(id, {
           status: 'failed',
           error: { code: 'exec_error', message: msg },
         });

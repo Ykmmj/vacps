@@ -1,4 +1,3 @@
-#include "app/config.hpp"
 #include "app/log.hpp"
 #include "http/script_dispatch.hpp"
 #include "quickjs/host.hpp"
@@ -37,15 +36,14 @@ class JsTasksTest : public ::testing::Test {
     dir_ = fs::temp_directory_path() / "vacps_js_tasks" / std::to_string(::getpid()) /
            std::to_string(reinterpret_cast<std::uintptr_t>(this));
     fs::create_directories(dir_);
-    cfg_.data_dir = dir_.string();
-    cfg_.log_level = "info";
+    host_opts_.data_dir = dir_.string();
     // Match default backend id in agent-config when BACKEND_ID unset.
     setenv("BACKEND_ID", "local", 1);
     // Integration tests dispatch unsigned HTTP; production requires a CP key.
     setenv("VACPS_ALLOW_INSECURE_NO_AUTH", "1", 1);
   }
 
-  vacps::Config cfg_{};
+  vacps::js::HostOptions host_opts_{};
   fs::path dir_;
 };
 
@@ -53,7 +51,7 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
   ASSERT_TRUE(fs::exists(business_script())) << business_script();
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -191,7 +189,7 @@ TEST_F(JsTasksTest, RetryAndCrashRecovery) {
   }
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -260,7 +258,7 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -352,7 +350,7 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -485,7 +483,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -621,7 +619,7 @@ TEST_F(JsTasksTest, ProcessStartReadTerminate) {
   ASSERT_TRUE(fs::exists(business_script()));
 
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 

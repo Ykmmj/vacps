@@ -198,7 +198,8 @@ VoidResult Database::execute(std::string_view sql, const std::vector<SqlValue>& 
 
 Result<QueryResult> Database::query(
     std::string_view sql,
-    const std::vector<SqlValue>& params) {
+    const std::vector<SqlValue>& params,
+    std::size_t max_rows) {
   auto stmt_r = prepare(sql);
   if (!stmt_r) {
     return std::unexpected(std::move(stmt_r.error()));
@@ -228,6 +229,11 @@ Result<QueryResult> Database::query(
       cleanup();
       return std::unexpected(Error{std::format(
           "sqlite query failed: {}", sqlite3_errmsg(db_))});
+    }
+    if (out.rows.size() >= max_rows) {
+      cleanup();
+      return std::unexpected(Error{std::format(
+          "sqlite query exceeded max_rows={}", max_rows)});
     }
     std::vector<SqlValue> row;
     row.reserve(static_cast<std::size_t>(ncols));

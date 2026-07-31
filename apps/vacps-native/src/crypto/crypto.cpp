@@ -64,6 +64,59 @@ std::vector<std::uint8_t> sha256(const std::vector<std::uint8_t>& data) {
   return sha256_bytes(data.data(), data.size());
 }
 
+Sha256::Sha256() {
+  auto* ctx = EVP_MD_CTX_new();
+  if (ctx != nullptr && EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1) {
+    ctx_ = ctx;
+  } else if (ctx != nullptr) {
+    EVP_MD_CTX_free(ctx);
+  }
+}
+
+Sha256::Sha256(Sha256&& other) noexcept : ctx_(other.ctx_) {
+  other.ctx_ = nullptr;
+}
+
+Sha256& Sha256::operator=(Sha256&& other) noexcept {
+  if (this != &other) {
+    if (ctx_ != nullptr) {
+      EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
+    }
+    ctx_ = other.ctx_;
+    other.ctx_ = nullptr;
+  }
+  return *this;
+}
+
+Sha256::~Sha256() {
+  if (ctx_ != nullptr) {
+    EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
+    ctx_ = nullptr;
+  }
+}
+
+void Sha256::update(const std::uint8_t* data, std::size_t len) {
+  if (ctx_ == nullptr || data == nullptr || len == 0) return;
+  (void)EVP_DigestUpdate(static_cast<EVP_MD_CTX*>(ctx_), data, len);
+}
+
+void Sha256::update(std::string_view data) {
+  update(reinterpret_cast<const std::uint8_t*>(data.data()), data.size());
+}
+
+std::vector<std::uint8_t> Sha256::finalize() {
+  std::vector<std::uint8_t> out(32, 0);
+  if (ctx_ == nullptr) return out;
+  unsigned int out_len = 0;
+  if (EVP_DigestFinal_ex(static_cast<EVP_MD_CTX*>(ctx_), out.data(), &out_len) != 1) {
+    return std::vector<std::uint8_t>(32, 0);
+  }
+  out.resize(out_len);
+  EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
+  ctx_ = nullptr;
+  return out;
+}
+
 std::string to_hex(const std::vector<std::uint8_t>& bytes) {
   static constexpr char kHex[] = "0123456789abcdef";
   std::string out;

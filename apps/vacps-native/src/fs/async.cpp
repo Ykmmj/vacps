@@ -123,6 +123,26 @@ asio::awaitable<Result<std::vector<std::uint8_t>>> async_read_bytes(
   co_return std::vector<std::uint8_t>(text->begin(), text->end());
 }
 
+asio::awaitable<Result<std::vector<std::uint8_t>>> async_read_range(
+    AsyncOptions opts,
+    std::filesystem::path path,
+    std::uint64_t offset,
+    std::size_t max_bytes) {
+  // Range reads always go through the pool (seek + limited read); avoids loading
+  // entire files when only a prefix is needed.
+  co_return co_await async_offload(
+      opts.pool, [path = std::move(path), offset, max_bytes] {
+        return read_range(path, offset, max_bytes);
+      });
+}
+
+asio::awaitable<Result<FileDigest>> async_hash_file(
+    AsyncOptions opts,
+    std::filesystem::path path) {
+  co_return co_await async_offload(
+      opts.pool, [path = std::move(path)] { return hash_file(path); });
+}
+
 asio::awaitable<VoidResult> async_write_text(
     AsyncOptions opts,
     std::filesystem::path path,

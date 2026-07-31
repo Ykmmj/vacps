@@ -1,8 +1,8 @@
 import type { Store } from 'vacps:store';
 
 /** Apply ordered schema migrations (idempotent). */
-export function migrateAgentDb(db: Store): void {
-  db.exec(`
+export async function migrateAgentDb(db: Store): Promise<void> {
+  await db.exec(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY NOT NULL,
@@ -11,7 +11,7 @@ export function migrateAgentDb(db: Store): void {
   `);
 
   const applied = new Set(
-    db.query('SELECT version FROM schema_migrations;').map((r) => Number(r['version'])),
+    (await db.query('SELECT version FROM schema_migrations;')).map((r) => Number(r['version'])),
   );
 
   const migrations: Array<{ version: number; sql: string }> = [
@@ -108,16 +108,16 @@ export function migrateAgentDb(db: Store): void {
 
   for (const m of migrations) {
     if (applied.has(m.version)) continue;
-    db.begin();
+    await db.begin();
     try {
-      db.exec(m.sql);
-      db.run('INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?);', [
+      await db.exec(m.sql);
+      await db.run('INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?);', [
         m.version,
         new Date().toISOString(),
       ]);
-      db.commit();
+      await db.commit();
     } catch (e) {
-      db.rollback();
+      await db.rollback();
       throw e;
     }
   }

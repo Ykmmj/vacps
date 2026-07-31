@@ -13,6 +13,7 @@ import type { ProcessManager } from '../runtime/process-manager';
 import { allowUnsignedWhenNoKey, isPublicHttpPath } from '../security/http-auth';
 import { verifyControlPlaneRequest } from '../security/control-plane-verify';
 import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
+import { utf8ByteSlice } from '../util/utf8';
 import { createApp, type App, type Reply } from './router';
 
 export interface CreateServerInput {
@@ -84,7 +85,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         headers: request.headers,
         body: request.raw.body ?? '',
       });
-      if (!input.queue.claimNonce(nonce)) {
+      if (!(await input.queue.claimNonce(nonce))) {
         return reply.code(401).send({
           error: {
             code: 'replayed_request',
@@ -183,7 +184,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
 
     if (parsed.data.idempotency_key) {
-      const prior = input.queue.findByIdempotencyKey(parsed.data.idempotency_key);
+      const prior = await input.queue.findByIdempotencyKey(parsed.data.idempotency_key);
       if (prior) {
         return reply.code(202).send({
           task_id: prior.task.task_id,
@@ -196,8 +197,8 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       }
     }
 
-    const { created } = input.queue.enqueue(parsed.data);
-    const stored = input.queue.getTask(parsed.data.task_id);
+    const { created } = await input.queue.enqueue(parsed.data);
+    const stored = await input.queue.getTask(parsed.data.task_id);
     return reply.code(202).send({
       task_id: parsed.data.task_id,
       status: stored?.status ?? 'queued',
@@ -209,7 +210,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
 
   app.get('/tasks/:id', async (request, reply) => {
     const id = request.params.id ?? '';
-    const task = input.queue.getTask(id);
+    const task = await input.queue.getTask(id);
     if (!task) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
@@ -249,7 +250,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
 
   app.get('/tasks/:id/logs', async (request, reply) => {
     const id = request.params.id ?? '';
-    const task = input.queue.getTask(id);
+    const task = await input.queue.getTask(id);
     if (!task) {
       return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
@@ -297,11 +298,10 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       };
     }
 
-    // Stream-style read: absolute **byte** offsets over concatenated stream text.
+    // Stream-style read: absolute **UTF-8 byte** offsets over concatenated stream text.
     if (stream === 'stdout' || stream === 'stderr') {
-      const rows = input.queue.listLogs(id, { stream, offset: 0, limit: 50_000 });
+      const rows = await input.queue.listLogs(id, { stream, offset: 0, limit: 50_000 });
       const full = rows.map((r) => r.data).join('');
-      const totalBytes = full.length;
       const streamVersion = `sha256:${crypto.sha256Hex(full)}`;
       const expected =
         typeof request.query.expected_stream_version === 'string'
@@ -322,35 +322,31 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           },
         });
       }
-      const start = Math.min(offset, totalBytes);
-      const end = Math.min(start + maxBytes, totalBytes);
-      const content = full.slice(start, end);
+      const slice = utf8ByteSlice(full, offset, offset + maxBytes);
       const terminal = isTerminalTaskStatus(task.status);
       return {
         task_id: id,
         stream,
-        offset: start,
-        next_offset: end,
-        eof: terminal && end >= totalBytes,
-        total_bytes: totalBytes,
+        offset: slice.start,
+        next_offset: slice.end,
+        eof: terminal && slice.end >= slice.totalBytes,
+        total_bytes: slice.totalBytes,
         truncated: false,
         expired: false,
         encoding: 'utf-8',
-        content,
+        content: slice.content,
         stream_version: streamVersion,
         // Do not re-embed full log rows (would bypass max_bytes).
       };
     }
 
-    const logs = input.queue.listLogs(id, { offset: 0, limit: 500 });
+    const logs = await input.queue.listLogs(id, { offset: 0, limit: 500 });
 
     // Control-plane tasks.get preview expects `commands[]` (Node shape), not raw log rows.
-    const allStdout = input.queue
-      .listLogs(id, { stream: 'stdout', offset: 0, limit: 2000 })
+    const allStdout = (await input.queue.listLogs(id, { stream: 'stdout', offset: 0, limit: 2000 }))
       .map((r) => r.data)
       .join('');
-    const allStderr = input.queue
-      .listLogs(id, { stream: 'stderr', offset: 0, limit: 2000 })
+    const allStderr = (await input.queue.listLogs(id, { stream: 'stderr', offset: 0, limit: 2000 }))
       .map((r) => r.data)
       .join('');
     const clip = (s: string) => (s.length > previewMax ? s.slice(0, previewMax) : s);
@@ -397,7 +393,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
 
   app.post('/tasks/:id/cancel', async (request, reply) => {
     const id = request.params.id ?? '';
-    const result = input.queue.cancel(id);
+    const result = await input.queue.cancel(id);
     if (result.status === 'not_found') {
       return reply.code(404).send({ error: { code: 'not_found', message: 'Task not found.' } });
     }
@@ -415,7 +411,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/tasks/:id/retry', async (request, reply) => {
     const id = request.params.id ?? '';
     try {
-      const result = input.queue.retry(id);
+      const result = await input.queue.retry(id);
       return reply.code(202).send({ ok: true, ...result });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
@@ -960,7 +956,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   });
 
   // ── Schedulers (SQLite; no Redis/BullMQ) ──────────────────────────
-  app.get('/schedulers', async () => input.queue.listSchedulers());
+  app.get('/schedulers', async () => await input.queue.listSchedulers());
 
   app.put('/schedulers/:id', async (request, reply) => {
     const id = request.params.id ?? '';
@@ -990,7 +986,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         : undefined;
     const policy =
       body.policy && typeof body.policy === 'object' ? parseSchedulePolicy(body.policy) : undefined;
-    input.queue.upsertScheduler({
+    await input.queue.upsertScheduler({
       id,
       cron: body.cron,
       timezone: body.timezone,
@@ -1010,7 +1006,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.delete('/schedulers/:id', async (request, reply) => {
     const id = request.params.id ?? '';
     try {
-      input.queue.deleteScheduler(id);
+      await input.queue.deleteScheduler(id);
     } catch {
       /* best-effort */
     }
@@ -1034,7 +1030,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .code(400)
         .send({ error: { code: 'invalid_task', message: template.error.message } });
     }
-    const taskId = input.queue.runScheduleNow({ id, task: template.data });
+    const taskId = await input.queue.runScheduleNow({ id, task: template.data });
     return { task_id: taskId };
   });
 

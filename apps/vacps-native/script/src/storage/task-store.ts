@@ -17,15 +17,18 @@ export interface StoredTask {
 }
 
 export class TaskStore {
-  constructor(private readonly db: Store) {
-    migrateAgentDb(db);
+  private constructor(private readonly db: Store) {}
+
+  static async create(db: Store): Promise<TaskStore> {
+    await migrateAgentDb(db);
+    return new TaskStore(db);
   }
 
   /**
    * Insert task. Returns false if task_id already exists.
    * If idempotency_key is set and already mapped, returns false (caller should load existing).
    */
-  createTask(
+  async createTask(
     task: TaskDispatch,
     status: TaskStatus = 'queued',
     occurrence?: {
@@ -33,15 +36,15 @@ export class TaskStore {
       scheduleRevision: number;
       scheduledForMs: number;
     },
-  ): boolean {
+  ): Promise<boolean> {
     const now = new Date().toISOString();
     if (task.idempotency_key) {
-      const byKey = this.findByIdempotencyKey(task.idempotency_key);
+      const byKey = await this.findByIdempotencyKey(task.idempotency_key);
       if (byKey) return false;
     }
-    const existing = this.getTask(task.task_id);
+    const existing = await this.getTask(task.task_id);
     if (existing) return false;
-    this.db.run(
+    await this.db.run(
       `INSERT INTO tasks(
         id, backend_id, kind, status, profile, input_json,
         cancel_requested, created_at, updated_at,
@@ -62,7 +65,7 @@ export class TaskStore {
       ],
     );
     if (task.idempotency_key) {
-      this.db.run(
+      await this.db.run(
         `INSERT INTO task_idempotency(idempotency_key, task_id, created_at)
          VALUES(?, ?, ?);`,
         [task.idempotency_key, task.task_id, now],
@@ -76,16 +79,16 @@ export class TaskStore {
    * Throws on unexpected constraint errors (caller must rollback claim txn).
    * Returns true if a new row was inserted.
    */
-  insertOccurrenceTask(
+  async insertOccurrenceTask(
     task: TaskDispatch,
     occurrence: {
       scheduleId: string;
       scheduleRevision: number;
       scheduledForMs: number;
     },
-  ): boolean {
+  ): Promise<boolean> {
     const now = new Date().toISOString();
-    const result = this.db.run(
+    const result = await this.db.run(
       `INSERT INTO tasks(
         id, backend_id, kind, status, profile, input_json,
         cancel_requested, created_at, updated_at,
@@ -109,10 +112,11 @@ export class TaskStore {
     return result.changes === 1;
   }
 
-  findByIdempotencyKey(key: string): StoredTask | undefined {
-    const rows = this.db.query('SELECT task_id FROM task_idempotency WHERE idempotency_key = ?;', [
-      key,
-    ]);
+  async findByIdempotencyKey(key: string): Promise<StoredTask | undefined> {
+    const rows = await this.db.query(
+      'SELECT task_id FROM task_idempotency WHERE idempotency_key = ?;',
+      [key],
+    );
     if (rows.length === 0) return undefined;
     return this.getTask(String(rows[0]!['task_id']));
   }
@@ -121,15 +125,15 @@ export class TaskStore {
    * On agent start: tasks left in `running` must NOT re-execute (side effects).
    * Mark failed with agent_restarted (design §21).
    */
-  recoverInterruptedOnBoot(): number {
-    const rows = this.db.query(
+  async recoverInterruptedOnBoot(): Promise<number> {
+    const rows = await this.db.query(
       `SELECT id FROM tasks WHERE status = 'running' OR status = 'starting';`,
     );
     const now = new Date().toISOString();
     let n = 0;
     for (const row of rows) {
       const id = String(row['id']);
-      this.db.run(
+      await this.db.run(
         `UPDATE tasks SET
           status = 'failed',
           error_json = ?,
@@ -147,15 +151,15 @@ export class TaskStore {
           id,
         ],
       );
-      this.appendLog(id, 'system', 'interrupted by agent restart (agent_restarted)');
+      await this.appendLog(id, 'system', 'interrupted by agent restart (agent_restarted)');
       n += 1;
     }
     return n;
   }
 
   /** Clone dispatch with a new task_id for retry. */
-  enqueueRetryOf(taskId: string, newTaskId: string): StoredTask | undefined {
-    const cur = this.getTask(taskId);
+  async enqueueRetryOf(taskId: string, newTaskId: string): Promise<StoredTask | undefined> {
+    const cur = await this.getTask(taskId);
     if (!cur) return undefined;
     if (!isTerminalTaskStatus(cur.status)) {
       throw new Error('Can only retry terminal tasks.');
@@ -166,20 +170,20 @@ export class TaskStore {
       task_id: newTaskId,
       source: cur.task.source ?? 'api',
     } as TaskDispatch;
-    this.createTask(next, 'queued');
-    this.appendLog(newTaskId, 'system', `retry_of=${taskId}`);
+    await this.createTask(next, 'queued');
+    await this.appendLog(newTaskId, 'system', `retry_of=${taskId}`);
     return this.getTask(newTaskId);
   }
 
-  getTask(taskId: string): StoredTask | undefined {
-    const rows = this.db.query('SELECT * FROM tasks WHERE id = ?;', [taskId]);
+  async getTask(taskId: string): Promise<StoredTask | undefined> {
+    const rows = await this.db.query('SELECT * FROM tasks WHERE id = ?;', [taskId]);
     if (rows.length === 0) return undefined;
     return rowToStored(rows[0]!);
   }
 
   /** Oldest queued task, or undefined. */
-  claimNextQueued(): StoredTask | undefined {
-    const rows = this.db.query(
+  async claimNextQueued(): Promise<StoredTask | undefined> {
+    const rows = await this.db.query(
       `SELECT * FROM tasks
        WHERE status = 'queued' AND cancel_requested = 0
        ORDER BY created_at ASC LIMIT 1;`,
@@ -187,16 +191,16 @@ export class TaskStore {
     if (rows.length === 0) return undefined;
     const task = rowToStored(rows[0]!);
     const now = new Date().toISOString();
-    this.db.run(
+    await this.db.run(
       `UPDATE tasks SET status = 'running', started_at = ?, updated_at = ?
        WHERE id = ? AND status = 'queued';`,
       [now, now, task.task.task_id],
     );
-    const again = this.getTask(task.task.task_id);
+    const again = await this.getTask(task.task.task_id);
     return again?.status === 'running' ? again : undefined;
   }
 
-  updateTask(
+  async updateTask(
     taskId: string,
     update: {
       status?: TaskStatus;
@@ -205,8 +209,8 @@ export class TaskStore {
       startedAt?: string;
       finishedAt?: string;
     },
-  ): void {
-    const cur = this.getTask(taskId);
+  ): Promise<void> {
+    const cur = await this.getTask(taskId);
     if (!cur) return;
     const now = new Date().toISOString();
     const status = update.status ?? cur.status;
@@ -227,7 +231,7 @@ export class TaskStore {
       update.finishedAt ??
       (update.status && isTerminalTaskStatus(update.status) ? now : (cur.finishedAt ?? null));
 
-    this.db.run(
+    await this.db.run(
       `UPDATE tasks SET
         status = ?,
         result_json = ?,
@@ -240,16 +244,16 @@ export class TaskStore {
     );
   }
 
-  requestCancel(taskId: string): boolean {
-    const cur = this.getTask(taskId);
+  async requestCancel(taskId: string): Promise<boolean> {
+    const cur = await this.getTask(taskId);
     if (!cur) return false;
     if (isTerminalTaskStatus(cur.status)) return false;
-    this.db.run(`UPDATE tasks SET cancel_requested = 1, updated_at = ? WHERE id = ?;`, [
+    await this.db.run(`UPDATE tasks SET cancel_requested = 1, updated_at = ? WHERE id = ?;`, [
       new Date().toISOString(),
       taskId,
     ]);
     if (cur.status === 'queued') {
-      this.updateTask(taskId, {
+      await this.updateTask(taskId, {
         status: 'cancelled',
         finishedAt: new Date().toISOString(),
         error: { code: 'cancelled', message: 'Cancelled before start.' },
@@ -258,39 +262,43 @@ export class TaskStore {
     return true;
   }
 
-  isCancelRequested(taskId: string): boolean {
-    const rows = this.db.query('SELECT cancel_requested FROM tasks WHERE id = ?;', [taskId]);
+  async isCancelRequested(taskId: string): Promise<boolean> {
+    const rows = await this.db.query('SELECT cancel_requested FROM tasks WHERE id = ?;', [taskId]);
     if (rows.length === 0) return false;
     return Number(rows[0]!['cancel_requested']) === 1;
   }
 
-  appendLog(taskId: string, stream: 'stdout' | 'stderr' | 'system', data: string): void {
-    const seqRows = this.db.query(
+  async appendLog(
+    taskId: string,
+    stream: 'stdout' | 'stderr' | 'system',
+    data: string,
+  ): Promise<void> {
+    const seqRows = await this.db.query(
       'SELECT COALESCE(MAX(sequence), 0) AS m FROM task_logs WHERE task_id = ?;',
       [taskId],
     );
     const next = Number(seqRows[0]?.['m'] ?? 0) + 1;
-    this.db.run(
+    await this.db.run(
       `INSERT INTO task_logs(task_id, sequence, stream, data, created_at)
        VALUES(?, ?, ?, ?, ?);`,
       [taskId, next, stream, data, new Date().toISOString()],
     );
   }
 
-  listLogs(
+  async listLogs(
     taskId: string,
     opts?: { stream?: string; offset?: number; limit?: number },
-  ): Array<{ sequence: number; stream: string; data: string; createdAt: string }> {
+  ): Promise<Array<{ sequence: number; stream: string; data: string; createdAt: string }>> {
     const offset = opts?.offset ?? 0;
     const limit = opts?.limit ?? 500;
     const rows = opts?.stream
-      ? this.db.query(
+      ? await this.db.query(
           `SELECT * FROM task_logs
            WHERE task_id = ? AND stream = ? AND sequence > ?
            ORDER BY sequence ASC LIMIT ?;`,
           [taskId, opts.stream, offset, limit],
         )
-      : this.db.query(
+      : await this.db.query(
           `SELECT * FROM task_logs
            WHERE task_id = ? AND sequence > ?
            ORDER BY sequence ASC LIMIT ?;`,
@@ -304,33 +312,37 @@ export class TaskStore {
     }));
   }
 
-  claimNonce(nonce: string, ttlSeconds = 600): boolean {
+  async claimNonce(nonce: string, ttlSeconds = 600): Promise<boolean> {
     const now = Math.floor(Date.now() / 1000);
-    this.db.run('DELETE FROM request_nonces WHERE expires_at < ?;', [now]);
-    const existing = this.db.query('SELECT nonce FROM request_nonces WHERE nonce = ?;', [nonce]);
+    await this.db.run('DELETE FROM request_nonces WHERE expires_at < ?;', [now]);
+    const existing = await this.db.query('SELECT nonce FROM request_nonces WHERE nonce = ?;', [
+      nonce,
+    ]);
     if (existing.length > 0) return false;
-    this.db.run('INSERT INTO request_nonces(nonce, expires_at) VALUES(?, ?);', [
+    await this.db.run('INSERT INTO request_nonces(nonce, expires_at) VALUES(?, ?);', [
       nonce,
       now + ttlSeconds,
     ]);
     return true;
   }
 
-  hasRunning(): boolean {
-    const rows = this.db.query("SELECT 1 AS x FROM tasks WHERE status = 'running' LIMIT 1;");
+  async hasRunning(): Promise<boolean> {
+    const rows = await this.db.query("SELECT 1 AS x FROM tasks WHERE status = 'running' LIMIT 1;");
     return rows.length > 0;
   }
 
   /** Counts for /metrics queue block. */
-  queueCounts(): { waiting: number; active: number; failed: number } {
-    const one = (status: string) => {
-      const rows = this.db.query('SELECT COUNT(*) AS c FROM tasks WHERE status = ?;', [status]);
+  async queueCounts(): Promise<{ waiting: number; active: number; failed: number }> {
+    const one = async (status: string) => {
+      const rows = await this.db.query('SELECT COUNT(*) AS c FROM tasks WHERE status = ?;', [
+        status,
+      ]);
       return Number(rows[0]?.['c'] ?? 0) || 0;
     };
     return {
-      waiting: one('queued'),
-      active: one('running') + one('starting'),
-      failed: one('failed'),
+      waiting: await one('queued'),
+      active: (await one('running')) + (await one('starting')),
+      failed: await one('failed'),
     };
   }
 }

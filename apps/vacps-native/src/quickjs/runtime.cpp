@@ -1,7 +1,7 @@
 #include "quickjs/runtime.hpp"
 
 #include "app/log.hpp"
-#include "quickjs/cstring.hpp"
+#include "quickjs/js_bridge.hpp"
 #include "quickjs/value.hpp"
 
 #include <format>
@@ -124,16 +124,13 @@ Result<std::size_t> Runtime::drain_jobs_budgeted(std::size_t max_jobs) {
         break;  // no more jobs
       }
       if (err < 0) {
+        draining_jobs_ = false;
         if (ctx != nullptr) {
           Value ex{ctx, JS_GetException(ctx)};
-          auto cs = CString::from_value(ctx, ex.get());
-          draining_jobs_ = false;
-          if (!cs.empty()) {
-            return std::unexpected(
-                Error{std::format("JS_ExecutePendingJob failed: {}", cs.view())});
-          }
+          return std::unexpected(Error{std::format(
+              "JS_ExecutePendingJob failed: {}",
+              format_js_exception(ctx, ex.get()))});
         }
-        draining_jobs_ = false;
         return std::unexpected(Error{"JS_ExecutePendingJob failed"});
       }
       ++ran;

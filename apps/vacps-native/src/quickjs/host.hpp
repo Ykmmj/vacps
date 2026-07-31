@@ -1,6 +1,5 @@
 #pragma once
 
-#include "app/config.hpp"
 #include "app/error.hpp"
 #include "fs/sandbox.hpp"
 #include "process/registry.hpp"
@@ -27,29 +26,28 @@ namespace vacps::js {
 
 namespace asio = boost::asio;
 
+/**
+ * Construction knobs for Host. Callers (main / tests) fill these in;
+ * Host and modules do not invent process policy from a Config bag.
+ */
 struct HostOptions {
+  /** Agent state directory (relative fs paths, host.dataDir()). */
+  std::string data_dir{"data"};
+  /**
+   * Optional default CA file for outbound https.request when the script
+   * omits ca_bundle. Empty → platform CA resolution in the client.
+   */
+  std::string ca_bundle;
   std::size_t heap_limit_bytes{kDefaultHeapLimitBytes};
   std::size_t stack_limit_bytes{kDefaultStackLimitBytes};
-  /**
-   * Wall-clock budget for one Host JS entry (eval / invoke_export + await).
-   * 0 disables the interrupt watchdog for that Host.
-   */
   std::chrono::milliseconds js_time_budget{kDefaultJsTimeBudget};
-  /**
-   * Extra fs roots beyond data_dir + /tmp (also from Config::fs_allowed_roots).
-   * When set, merged with config at Host::create.
-   */
+  /** Extra PathSandbox roots beyond data_dir + /tmp. */
   std::vector<std::string> fs_extra_roots;
 };
 
 /**
- * QuickJS + Asio host infrastructure only:
- * - Runtime / Context ownership
- * - Load business ESM + invoke_export + Promise await (await_settled)
- * - notify_progress for Asio→JS resume
- *
- * Product capabilities live in vacps:* modules (http.Server, store, process, fs, …).
- * Process config is Host::config(); not a separate HostState bag.
+ * QuickJS + Asio host: runtime/context, script load, Promise await, sandbox.
+ * Product policy (listen, auth, CP keys) is JavaScript.
  */
 class Host : public std::enable_shared_from_this<Host> {
  public:
@@ -58,7 +56,6 @@ class Host : public std::enable_shared_from_this<Host> {
   ~Host();
 
   [[nodiscard]] static Result<std::shared_ptr<Host>> create(
-      const Config& cfg,
       asio::io_context& ioc,
       HostOptions opts = {});
 
@@ -67,25 +64,34 @@ class Host : public std::enable_shared_from_this<Host> {
   [[nodiscard]] Runtime& runtime() noexcept { return runtime_; }
   [[nodiscard]] Context& context() noexcept { return context_; }
   [[nodiscard]] asio::io_context& ioc() noexcept { return *ioc_; }
-  /** Blocking FS/metadata offload; content fallback when io_uring unusable. */
+  /** Shared pool for blocking fs / non-serial work (size 2). */
   [[nodiscard]] asio::thread_pool& pool() noexcept { return *pool_; }
   /**
-   * True only if probe_io_uring() passed (setup+NOP+wait). When false, vacps:fs
-   * content I/O uses thread_pool (Docker default seccomp, kernel disable, etc.).
+   * Serial SQLite executor (size 1). All vacps:store DB work must run here so
+   * connections stay single-threaded and the JS io_context is never blocked.
    */
+  [[nodiscard]] asio::thread_pool& db_pool() noexcept { return *db_pool_; }
   [[nodiscard]] bool use_stream_file() const noexcept { return use_stream_file_; }
-  [[nodiscard]] const Config& config() const noexcept { return cfg_; }
+  [[nodiscard]] const std::string& data_dir() const noexcept { return data_dir_; }
+  [[nodiscard]] const std::string& ca_bundle() const noexcept { return ca_bundle_; }
 
-  /** Long-lived subprocess registry (vacps:process start/read/write/terminate). */
   [[nodiscard]] vacps::process::Registry& processes() noexcept { return *processes_; }
-
-  /**
-   * vacps:fs path sandbox (openat2 RESOLVE_BENEATH + allowlist roots).
-   * All JS fs paths must pass PathSandbox::authorize.
-   */
   [[nodiscard]] const vacps::fs::PathSandbox& path_sandbox() const noexcept {
     return path_sandbox_;
   }
+
+  /**
+   * Process-level async scope: every spawn_js_promise begins an op; settle/end
+   * leaves it. Graceful shutdown waits for outstanding ops before stopping ioc.
+   */
+  void async_op_begin() noexcept;
+  void async_op_end() noexcept;
+  [[nodiscard]] std::size_t outstanding_async_ops() const noexcept {
+    return outstanding_async_;
+  }
+  /** Wait until outstanding_async_ops()==0 or timeout. */
+  [[nodiscard]] asio::awaitable<void> wait_async_idle(
+      std::chrono::milliseconds timeout = std::chrono::seconds{5});
 
   [[nodiscard]] Result<Value> eval(
       std::string_view source,
@@ -98,10 +104,6 @@ class Host : public std::enable_shared_from_this<Host> {
 
   [[nodiscard]] VoidResult drain_jobs() { return runtime_.drain_jobs(); }
 
-  /**
-   * Wake await_settled after Asio-side work resolves a JS Promise.
-   * Bumps progress_generation_ then cancels progress waiters (event version).
-   */
   void notify_progress();
 
   [[nodiscard]] std::uint64_t progress_generation() const noexcept {
@@ -117,13 +119,11 @@ class Host : public std::enable_shared_from_this<Host> {
   [[nodiscard]] asio::awaitable<VoidResult> load_and_initialize(std::string_view script_path);
   [[nodiscard]] asio::awaitable<VoidResult> shutdown_script();
 
-  /** Call a business-module export; awaits Promise results. */
   [[nodiscard]] asio::awaitable<Result<Value>> invoke_export(
       const char* name,
       int argc,
       JSValueConst* argv);
 
-  /** Await a Promise (or pass through non-promise values). */
   [[nodiscard]] asio::awaitable<Result<Value>> await_value(Value value);
 
  private:
@@ -131,12 +131,10 @@ class Host : public std::enable_shared_from_this<Host> {
       Runtime runtime,
       Context context,
       asio::io_context& ioc,
-      Config cfg,
-      std::chrono::milliseconds js_time_budget,
+      HostOptions opts,
       vacps::fs::PathSandbox path_sandbox);
 
   [[nodiscard]] asio::awaitable<void> wait_progress();
-  /** Wait for progress or deadline; returns false if interrupt budget expired. */
   [[nodiscard]] asio::awaitable<bool> wait_progress_or_deadline();
   [[nodiscard]] asio::awaitable<VoidResult> await_settled(Value& value);
 
@@ -144,9 +142,11 @@ class Host : public std::enable_shared_from_this<Host> {
   Context context_;
   asio::io_context* ioc_{nullptr};
   std::unique_ptr<asio::thread_pool> pool_;
+  std::unique_ptr<asio::thread_pool> db_pool_;
   std::unique_ptr<vacps::process::Registry> processes_;
   bool use_stream_file_{false};
-  Config cfg_{};
+  std::string data_dir_;
+  std::string ca_bundle_;
   vacps::fs::PathSandbox path_sandbox_{};
   std::chrono::milliseconds js_time_budget_{kDefaultJsTimeBudget};
   bool script_initialized_{false};
@@ -154,11 +154,10 @@ class Host : public std::enable_shared_from_this<Host> {
 
   Value script_ns_;
   std::list<std::shared_ptr<asio::steady_timer>> progress_waiters_;
-  /** Monotonic progress event version for wait_progress / multi-waiter safety. */
   std::uint64_t progress_generation_{0};
+  std::size_t outstanding_async_{0};
 };
 
-/** JSContext opaque → Host* (set in Host::create). */
 [[nodiscard]] inline Host* host_from(JSContext* ctx) noexcept {
   return static_cast<Host*>(JS_GetContextOpaque(ctx));
 }

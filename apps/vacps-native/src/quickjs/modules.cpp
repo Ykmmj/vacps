@@ -1,11 +1,15 @@
 #include "quickjs/modules.hpp"
 
+#include "quickjs/encoding_globals.hpp"
 #include "quickjs/url_globals.hpp"
 
 #include "crypto/crypto.hpp"
 #include "fs/async.hpp"
 #include "fs/fs.hpp"
 #include "fs/sandbox.hpp"
+
+#include <algorithm>
+#include <cstdlib>
 #include "http/client.hpp"
 #include "http/server.hpp"
 #include "quickjs/host.hpp"
@@ -83,10 +87,16 @@ JSModuleDef* init_module_log(JSContext* ctx, const char* name) {
 
 // ── vacps:store ───────────────────────────────────────────────────
 // Capability/factory only: JS creates instances via store.open(path).
-// C++ does not pre-open or own a process-global Database.
+// All SQLite work runs on Host::db_pool() (serial thread_pool size 1);
+// every mutating API returns a Promise so the JS/io_context thread never blocks.
+
+struct StoreState {
+  std::unique_ptr<vacps::Database> db;
+  std::string path;
+};
 
 struct StoreHandle {
-  std::unique_ptr<vacps::Database> db;
+  std::shared_ptr<StoreState> state;
 };
 
 JSClassID g_store_class_id = 0;
@@ -111,24 +121,18 @@ void ensure_store_class(JSContext* ctx) {
   }
 }
 
-vacps::Database* db_from_this(JSContext* ctx, JSValueConst this_val) {
+StoreHandle* store_handle_from_this(JSContext* ctx, JSValueConst this_val) {
   auto* h = static_cast<StoreHandle*>(JS_GetOpaque2(ctx, this_val, g_store_class_id));
-  if (h == nullptr || h->db == nullptr || !h->db->ok()) {
+  if (h == nullptr || !h->state) {
     JS_ThrowTypeError(ctx, "Store method requires an open Store instance");
     return nullptr;
   }
-  return h->db.get();
+  return h;
 }
 
-JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-  if (argc < 1) return JS_ThrowTypeError(ctx, "store.open(path)");
-  auto path = converter<std::string>::from_js(ctx, argv[0]);
-  if (!path) return throw_error(ctx, path.error());
-  auto db = vacps::Database::open(*path);
-  if (!db) return throw_error(ctx, db.error());
-
+JSValue make_store_object(JSContext* ctx, std::shared_ptr<StoreState> state) {
   ensure_store_class(ctx);
-  auto* handle = new StoreHandle{std::make_unique<vacps::Database>(std::move(*db))};
+  auto* handle = new StoreHandle{std::move(state)};
   Value obj{ctx, JS_NewObjectClass(ctx, static_cast<int>(g_store_class_id))};
   if (obj.is_exception()) {
     delete handle;
@@ -138,19 +142,82 @@ JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
   return obj.release();
 }
 
+/** store.open(path) → Promise<Store> — open + PRAGMA on db_pool. */
+JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.open: host not wired");
+  if (argc < 1) return JS_ThrowTypeError(ctx, "store.open(path)");
+  auto path = converter<std::string>::from_js(ctx, argv[0]);
+  if (!path) return throw_error(ctx, path.error());
+
+  return spawn_js_promise(
+      ctx,
+      host,
+      [path = std::move(*path), host](JSContext* c, PromiseBridge& bridge) mutable
+          -> boost::asio::awaitable<void> {
+        // Database is not default-constructible; async_offload needs a T that is
+        // (Asio co_spawn error path), so return unique_ptr.
+        auto opened = co_await vacps::fs::async_offload(
+            host->db_pool(),
+            [path]() -> Result<std::unique_ptr<vacps::Database>> {
+              auto db = vacps::Database::open(path);
+              if (!db) {
+                return std::unexpected(std::move(db.error()));
+              }
+              return std::make_unique<vacps::Database>(std::move(*db));
+            });
+        if (!opened) {
+          bridge.reject(opened.error());
+          co_return;
+        }
+        auto state = std::make_shared<StoreState>();
+        state->path = path;
+        state->db = std::move(*opened);
+        Value obj{c, make_store_object(c, std::move(state))};
+        if (obj.is_exception()) {
+          bridge.reject_message("store.open: failed to allocate Store object");
+          co_return;
+        }
+        bridge.resolve(std::move(obj));
+        co_return;
+      });
+}
+
 JSValue js_store_exec(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-  auto* db = db_from_this(ctx, this_val);
-  if (!db) return JS_EXCEPTION;
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.exec: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
   if (argc < 1) return JS_ThrowTypeError(ctx, "store.exec(sql)");
   auto sql = converter<std::string>::from_js(ctx, argv[0]);
   if (!sql) return throw_error(ctx, sql.error());
-  if (auto r = db->exec(*sql); !r) return throw_error(ctx, r.error());
-  return JS_UNDEFINED;
+  auto state = h->state;
+
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, sql = std::move(*sql), host](JSContext*, PromiseBridge& bridge) mutable
+          -> boost::asio::awaitable<void> {
+        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state, sql]() -> VoidResult {
+          if (!state->db || !state->db->ok()) {
+            return std::unexpected(Error{"store closed"});
+          }
+          return state->db->exec(sql);
+        });
+        if (!r) {
+          bridge.reject(r.error());
+          co_return;
+        }
+        bridge.resolve_undefined();
+        co_return;
+      });
 }
 
 JSValue js_store_run(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-  auto* db = db_from_this(ctx, this_val);
-  if (!db) return JS_EXCEPTION;
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.run: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
   if (argc < 1) return JS_ThrowTypeError(ctx, "store.run(sql[, params])");
   auto sql = converter<std::string>::from_js(ctx, argv[0]);
   if (!sql) return throw_error(ctx, sql.error());
@@ -160,17 +227,46 @@ JSValue js_store_run(JSContext* ctx, JSValueConst this_val, int argc, JSValueCon
     if (!p) return throw_error(ctx, p.error());
     params = std::move(*p);
   }
-  if (auto r = db->execute(*sql, params); !r) return throw_error(ctx, r.error());
-  auto obj = Value::new_object(ctx);
-  obj.set_property_str("changes", converter<std::int64_t>::to_js(ctx, db->changes()));
-  obj.set_property_str(
-      "lastInsertRowid", converter<std::int64_t>::to_js(ctx, db->last_insert_rowid()));
-  return obj.release();
+  auto state = h->state;
+
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, sql = std::move(*sql), params = std::move(params), host](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        struct Meta {
+          std::int64_t changes{0};
+          std::int64_t last_insert_rowid{0};
+        };
+        auto r = co_await vacps::fs::async_offload(
+            host->db_pool(),
+            [state, sql, params]() -> Result<Meta> {
+              if (!state->db || !state->db->ok()) {
+                return std::unexpected(Error{"store closed"});
+              }
+              if (auto ex = state->db->execute(sql, params); !ex) {
+                return std::unexpected(std::move(ex.error()));
+              }
+              return Meta{state->db->changes(), state->db->last_insert_rowid()};
+            });
+        if (!r) {
+          bridge.reject(r.error());
+          co_return;
+        }
+        auto obj = Value::new_object(c);
+        obj.set_property_str("changes", converter<std::int64_t>::to_js(c, r->changes));
+        obj.set_property_str(
+            "lastInsertRowid", converter<std::int64_t>::to_js(c, r->last_insert_rowid));
+        bridge.resolve(std::move(obj));
+        co_return;
+      });
 }
 
 JSValue js_store_query(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-  auto* db = db_from_this(ctx, this_val);
-  if (!db) return JS_EXCEPTION;
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.query: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
   if (argc < 1) return JS_ThrowTypeError(ctx, "store.query(sql[, params])");
   auto sql = converter<std::string>::from_js(ctx, argv[0]);
   if (!sql) return throw_error(ctx, sql.error());
@@ -180,43 +276,128 @@ JSValue js_store_query(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
     if (!p) return throw_error(ctx, p.error());
     params = std::move(*p);
   }
-  auto qr = db->query(*sql, params);
-  if (!qr) return throw_error(ctx, qr.error());
-  return query_result_to_js(ctx, *qr).release();
+  auto state = h->state;
+
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, sql = std::move(*sql), params = std::move(params), host](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto qr = co_await vacps::fs::async_offload(
+            host->db_pool(),
+            [state, sql, params]() -> Result<QueryResult> {
+              if (!state->db || !state->db->ok()) {
+                return std::unexpected(Error{"store closed"});
+              }
+              return state->db->query(sql, params);
+            });
+        if (!qr) {
+          bridge.reject(qr.error());
+          co_return;
+        }
+        bridge.resolve(query_result_to_js(c, *qr));
+        co_return;
+      });
 }
 
 JSValue js_store_begin(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
-  auto* db = db_from_this(ctx, this_val);
-  if (!db) return JS_EXCEPTION;
-  if (auto r = db->begin(); !r) return throw_error(ctx, r.error());
-  return JS_UNDEFINED;
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.begin: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  auto state = h->state;
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state]() -> VoidResult {
+          if (!state->db || !state->db->ok()) {
+            return std::unexpected(Error{"store closed"});
+          }
+          return state->db->begin();
+        });
+        if (!r) {
+          bridge.reject(r.error());
+          co_return;
+        }
+        bridge.resolve_undefined();
+        co_return;
+      });
 }
 
 JSValue js_store_commit(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
-  auto* db = db_from_this(ctx, this_val);
-  if (!db) return JS_EXCEPTION;
-  if (auto r = db->commit(); !r) return throw_error(ctx, r.error());
-  return JS_UNDEFINED;
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.commit: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  auto state = h->state;
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state]() -> VoidResult {
+          if (!state->db || !state->db->ok()) {
+            return std::unexpected(Error{"store closed"});
+          }
+          return state->db->commit();
+        });
+        if (!r) {
+          bridge.reject(r.error());
+          co_return;
+        }
+        bridge.resolve_undefined();
+        co_return;
+      });
 }
 
 JSValue js_store_rollback(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
-  auto* db = db_from_this(ctx, this_val);
-  if (!db) return JS_EXCEPTION;
-  if (auto r = db->rollback(); !r) return throw_error(ctx, r.error());
-  return JS_UNDEFINED;
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.rollback: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  auto state = h->state;
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto r = co_await vacps::fs::async_offload(host->db_pool(), [state]() -> VoidResult {
+          if (!state->db || !state->db->ok()) {
+            return std::unexpected(Error{"store closed"});
+          }
+          return state->db->rollback();
+        });
+        if (!r) {
+          bridge.reject(r.error());
+          co_return;
+        }
+        bridge.resolve_undefined();
+        co_return;
+      });
 }
 
 JSValue js_store_path(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
-  auto* db = db_from_this(ctx, this_val);
-  if (!db) return JS_EXCEPTION;
-  return converter<std::string>::to_js(ctx, db->path()).release();
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  return converter<std::string>::to_js(ctx, h->state->path).release();
 }
 
 JSValue js_store_close(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
-  auto* h = static_cast<StoreHandle*>(JS_GetOpaque2(ctx, this_val, g_store_class_id));
-  if (h == nullptr) return JS_ThrowTypeError(ctx, "Store.close on invalid object");
-  h->db.reset();
-  return JS_UNDEFINED;
+  auto* host = host_from(ctx);
+  if (host == nullptr) return throw_msg(ctx, "store.close: host not wired");
+  auto* h = store_handle_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  auto state = h->state;
+  return spawn_js_promise(
+      ctx,
+      host,
+      [state, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        co_await vacps::fs::async_offload(host->db_pool(), [state]() {
+          state->db.reset();
+          return true;
+        });
+        bridge.resolve_undefined();
+        co_return;
+      });
 }
 
 const JSCFunctionListEntry k_store_proto[] = {
@@ -259,21 +440,7 @@ JSValue js_host_version(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 JSValue js_host_data_dir(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   auto* host = host_from(ctx);
   if (!host) return throw_msg(ctx, "host: not initialized");
-  return converter<std::string>::to_js(ctx, host->config().data_dir).release();
-}
-
-JSValue js_host_listen_host(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  auto* host = host_from(ctx);
-  if (!host) return throw_msg(ctx, "host: not initialized");
-  return converter<std::string>::to_js(ctx, host->config().listen_host).release();
-}
-
-JSValue js_host_listen_port(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  auto* host = host_from(ctx);
-  if (!host) return throw_msg(ctx, "host: not initialized");
-  return converter<std::int32_t>::to_js(
-             ctx, static_cast<std::int32_t>(host->config().listen_port))
-      .release();
+  return converter<std::string>::to_js(ctx, host->data_dir()).release();
 }
 
 JSValue js_host_now_ms(JSContext* ctx, JSValueConst, int, JSValueConst*) {
@@ -306,8 +473,6 @@ JSValue js_host_getenv(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 const JSCFunctionListEntry k_host_exports[] = {
     JS_CFUNC_DEF("version", 0, js_host_version),
     JS_CFUNC_DEF("dataDir", 0, js_host_data_dir),
-    JS_CFUNC_DEF("listenHost", 0, js_host_listen_host),
-    JS_CFUNC_DEF("listenPort", 0, js_host_listen_port),
     JS_CFUNC_DEF("nowMs", 0, js_host_now_ms),
     JS_CFUNC_DEF("platform", 0, js_host_platform),
     JS_CFUNC_DEF("getenv", 1, js_host_getenv),
@@ -365,7 +530,11 @@ HttpServerHandle* http_server_from_this(JSContext* ctx, JSValueConst this_val) {
   return h;
 }
 
-/** http.createServer([options]) → Server  options: { host?, port? } */
+/**
+ * http.createServer([options]) → Server
+ * options: { host?, port? } — only values JS passes (loadConfig / explicit args).
+ * C++ does not read listen host/port from process Config or env.
+ */
 JSValue js_http_create_server(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* raw = host_from(ctx);
   if (raw == nullptr) {
@@ -373,25 +542,37 @@ JSValue js_http_create_server(JSContext* ctx, JSValueConst, int argc, JSValueCon
   }
   auto host = raw->shared_from_this();
 
-  vacps::Config cfg = host->config();
+  vacps::http::ListenEndpoint listen;
   if (argc >= 1 && is_object(argv[0])) {
     Value h = Value::get_property_str(ctx, argv[0], "host");
     if (!h.is_nullish()) {
       auto s = converter<std::string>::from_js(ctx, h.get());
-      if (s) cfg.listen_host = std::move(*s);
+      if (s) listen.host = std::move(*s);
     }
     Value p = Value::get_property_str(ctx, argv[0], "port");
     if (!p.is_nullish()) {
       auto port = converter<std::int32_t>::from_js(ctx, p.get());
       if (port && *port >= 1 && *port <= 65535) {
-        cfg.listen_port = static_cast<std::uint16_t>(*port);
+        listen.port = static_cast<std::uint16_t>(*port);
       }
     }
-    vacps::apply_remote_bind_policy(cfg);
+  }
+  // Capability safety on bind: non-loopback requires VACPS_ALLOW_REMOTE_BIND=true.
+  // Not product config — refuses accidental public bind from any createServer call.
+  {
+    const bool loopback = listen.host == "127.0.0.1" || listen.host == "localhost" ||
+                          listen.host == "::1";
+    const char* allow = std::getenv("VACPS_ALLOW_REMOTE_BIND");
+    const bool remote_ok =
+        allow != nullptr && (std::string_view{allow} == "true" || std::string_view{allow} == "1");
+    if (!loopback && !remote_ok) {
+      listen.host = "127.0.0.1";
+    }
   }
 
   ensure_http_server_class(ctx);
-  auto server = std::make_shared<vacps::http::Server>(host->ioc(), std::move(cfg), host);
+  auto server =
+      std::make_shared<vacps::http::Server>(host->ioc(), std::move(listen), host);
   auto* handle = new HttpServerHandle{std::move(server)};
   Value obj{ctx, JS_NewObjectClass(ctx, static_cast<int>(g_http_server_class_id))};
   if (obj.is_exception()) {
@@ -447,7 +628,7 @@ JSValue js_http_request(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
   }
 
   vacps::http::ClientRequest req;
-  req.ca_bundle = host->config().ca_bundle;
+  req.ca_bundle = host->ca_bundle();
 
   Value url_v = Value::get_property_str(ctx, argv[0], "url");
   if (url_v.is_nullish()) {
@@ -563,7 +744,7 @@ Result<std::filesystem::path> resolve_user_path(JSContext* ctx, JSValueConst pat
   if (!host) return std::unexpected(Error{"fs: host not initialized"});
   auto p = converter<std::string>::from_js(ctx, path_v);
   if (!p) return std::unexpected(std::move(p.error()));
-  return host->path_sandbox().authorize(*p, host->config().data_dir);
+  return host->path_sandbox().authorize(*p, host->data_dir());
 }
 
 // All vacps:fs async APIs use spawn_js_promise (promise_bridge.hpp).
@@ -659,6 +840,74 @@ JSValue js_fs_read_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
           bridge.reject(data.error());
         } else {
           bridge.resolve(bytes_to_js(c, *data));
+        }
+        co_return;
+      });
+}
+
+/**
+ * fs.readRange(path, offset, maxBytes) → Promise<ArrayBuffer>
+ * Reads at most maxBytes from offset without loading the whole file.
+ */
+JSValue js_fs_read_range(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  auto* host = host_from(ctx);
+  if (!host) return throw_msg(ctx, "fs: host not wired");
+  if (argc < 3) return JS_ThrowTypeError(ctx, "fs.readRange(path, offset, maxBytes)");
+  auto path = resolve_user_path(ctx, argv[0]);
+  if (!path) return throw_error(ctx, path.error());
+  auto off = converter<std::int32_t>::from_js(ctx, argv[1]);
+  if (!off) return throw_error(ctx, off.error());
+  if (*off < 0) return JS_ThrowTypeError(ctx, "fs.readRange: offset must be >= 0");
+  auto maxb = converter<std::int32_t>::from_js(ctx, argv[2]);
+  if (!maxb) return throw_error(ctx, maxb.error());
+  if (*maxb < 0) return JS_ThrowTypeError(ctx, "fs.readRange: maxBytes must be >= 0");
+  // Cap single range to 16 MiB to avoid accidental huge allocations.
+  const auto max_bytes = static_cast<std::size_t>(
+      std::min(*maxb, static_cast<std::int32_t>(16 * 1024 * 1024)));
+  return spawn_js_promise(
+      ctx,
+      host,
+      [host, path = std::move(*path), offset = static_cast<std::uint64_t>(*off), max_bytes](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto data = co_await vacps::fs::async_read_range(
+            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()},
+            std::move(path),
+            offset,
+            max_bytes);
+        if (!data) {
+          bridge.reject(data.error());
+        } else {
+          bridge.resolve(bytes_to_js(c, *data));
+        }
+        co_return;
+      });
+}
+
+/** fs.hashFile(path) → Promise<{ sizeBytes, sha256Hex }> (streaming). */
+JSValue js_fs_hash_file(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  auto* host = host_from(ctx);
+  if (!host) return throw_msg(ctx, "fs: host not wired");
+  if (argc < 1) return JS_ThrowTypeError(ctx, "fs.hashFile(path)");
+  auto path = resolve_user_path(ctx, argv[0]);
+  if (!path) return throw_error(ctx, path.error());
+  return spawn_js_promise(
+      ctx,
+      host,
+      [host, path = std::move(*path)](
+          JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto dig = co_await vacps::fs::async_hash_file(
+            vacps::fs::AsyncOptions{host->pool(), host->use_stream_file()}, std::move(path));
+        if (!dig) {
+          bridge.reject(dig.error());
+        } else {
+          auto obj = Value::new_object(c);
+          // sizeBytes as number (may exceed int32 for huge files — use double).
+          obj.set_property_str(
+              "sizeBytes",
+              Value{c, JS_NewFloat64(c, static_cast<double>(dig->size_bytes))});
+          obj.set_property_str(
+              "sha256Hex", converter<std::string>::to_js(c, dig->sha256_hex));
+          bridge.resolve(std::move(obj));
         }
         co_return;
       });
@@ -848,6 +1097,8 @@ const JSCFunctionListEntry k_fs_exports[] = {
     JS_CFUNC_DEF("writeText", 2, js_fs_write_text),
     JS_CFUNC_DEF("appendText", 2, js_fs_append_text),
     JS_CFUNC_DEF("readBytes", 1, js_fs_read_bytes),
+    JS_CFUNC_DEF("readRange", 3, js_fs_read_range),
+    JS_CFUNC_DEF("hashFile", 1, js_fs_hash_file),
     JS_CFUNC_DEF("writeBytes", 2, js_fs_write_bytes),
     JS_CFUNC_DEF("mkdir", 1, js_fs_mkdir),
     JS_CFUNC_DEF("exists", 1, js_fs_exists),
@@ -1473,6 +1724,9 @@ VoidResult install_native_modules(JSRuntime* rt, JSContext* ctx) {
   JS_SetModuleLoaderFunc(rt, nullptr, module_loader, nullptr);
   if (auto url = install_url_global(ctx); !url) {
     return url;
+  }
+  if (auto enc = install_encoding_globals(ctx); !enc) {
+    return enc;
   }
   return {};
 }

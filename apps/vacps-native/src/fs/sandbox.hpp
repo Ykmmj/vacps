@@ -20,14 +20,15 @@ namespace vacps::fs {
  *
  * Pure I/O helpers in fs.hpp stay policy-free for unit tests; Host wires this
  * sandbox into resolve_user_path for the JS module surface.
+ *
+ * Roots are always injected by the caller — this type never reads getenv.
  */
 class PathSandbox {
  public:
   PathSandbox() = default;
 
   /**
-   * Build from data_dir + always /tmp + extra absolute roots.
-   * Roots are absolutized and realpath'd when they exist.
+   * Build from data_dir + always /tmp + explicit extra absolute roots.
    */
   [[nodiscard]] static PathSandbox create(
       const std::filesystem::path& data_dir,
@@ -59,5 +60,11 @@ class PathSandbox {
 
 /** True for /proc, /sys, /dev and descendants. */
 [[nodiscard]] bool is_kernel_filesystem(const std::filesystem::path& abs) noexcept;
+
+/**
+ * Process-bootstrap helper only: parse VACPS_FS_ALLOWED_ROOTS / FS_ALLOWED_ROOTS.
+ * Call from main when filling HostOptions — never from Server or vacps:* modules.
+ */
+[[nodiscard]] std::vector<std::string> fs_extra_roots_from_env();
 
 }  // namespace vacps::fs

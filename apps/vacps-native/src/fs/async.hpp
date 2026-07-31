@@ -60,6 +60,16 @@ template <class F>
     AsyncOptions opts,
     std::filesystem::path path);
 
+[[nodiscard]] asio::awaitable<Result<std::vector<std::uint8_t>>> async_read_range(
+    AsyncOptions opts,
+    std::filesystem::path path,
+    std::uint64_t offset,
+    std::size_t max_bytes);
+
+[[nodiscard]] asio::awaitable<Result<FileDigest>> async_hash_file(
+    AsyncOptions opts,
+    std::filesystem::path path);
+
 [[nodiscard]] asio::awaitable<VoidResult> async_write_text(
     AsyncOptions opts,
     std::filesystem::path path,
