@@ -73,11 +73,11 @@ Context opaque = `Host*`（已删除 `HostState`）。
 
 ### 分工
 
-| 层 | 手段 |
-|----|------|
-| 业务错误 | `Result` / `std::expected`（尽量不 throw） |
+| 层           | 手段                                                             |
+| ------------ | ---------------------------------------------------------------- |
+| 业务错误     | `Result` / `std::expected`（尽量不 throw）                       |
 | 协程故障屏障 | `catch (std::exception)` / `catch (...)` → reject（若未 settle） |
-| 生命周期 | `spawn_js_promise`：settle-once + NotifyGuard |
+| 生命周期     | `spawn_js_promise`：settle-once + NotifyGuard                    |
 
 `progress_generation` + timer cancel 实现 `wait_progress` / `notify_progress` 事件版本协议。
 
