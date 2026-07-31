@@ -1075,6 +1075,18 @@ JSValue js_process_read(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
               converter<std::int32_t>::to_js(
                   c, static_cast<std::int32_t>(result->stderr_total)));
           obj.set_property_str(
+              "stdoutProduced",
+              converter<std::int32_t>::to_js(
+                  c, static_cast<std::int32_t>(result->stdout_produced)));
+          obj.set_property_str(
+              "stderrProduced",
+              converter<std::int32_t>::to_js(
+                  c, static_cast<std::int32_t>(result->stderr_produced)));
+          obj.set_property_str(
+              "stdoutTruncated", converter<bool>::to_js(c, result->stdout_truncated));
+          obj.set_property_str(
+              "stderrTruncated", converter<bool>::to_js(c, result->stderr_truncated));
+          obj.set_property_str(
               "nextStdoutOffset",
               converter<std::int32_t>::to_js(
                   c, static_cast<std::int32_t>(result->next_stdout_offset)));

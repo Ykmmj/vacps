@@ -41,12 +41,19 @@ struct ReadInfo {
   std::string status;  // running | exited | timed_out | cancelled
   std::int32_t exit_code{0};
   bool timed_out{false};
+  /** True only when process exited AND both pipes EOF AND no unread buffer. */
   bool eof{false};
   bool stdin_open{false};
   std::string stdout_slice;
   std::string stderr_slice;
+  /** Bytes retained in the registry buffer (may be < produced after hard_max). */
   std::size_t stdout_total{0};
   std::size_t stderr_total{0};
+  /** Total bytes observed on the pipe (includes discarded after hard_max). */
+  std::size_t stdout_produced{0};
+  std::size_t stderr_produced{0};
+  bool stdout_truncated{false};
+  bool stderr_truncated{false};
   std::size_t next_stdout_offset{0};
   std::size_t next_stderr_offset{0};
 };
@@ -109,7 +116,10 @@ class Registry {
   void schedule_timeout(std::shared_ptr<Entry> e, std::int32_t timeout_ms);
   void schedule_grace_kill(std::shared_ptr<Entry> e, std::int32_t grace_ms);
   void kill_group(Entry& e, int sig) noexcept;
-  void mark_finished(Entry& e, std::string_view status, std::int32_t code, bool timed_out);
+  /** Process wait completed; finished only after both pipe EOFs. */
+  void on_process_exit(Entry& e, std::int32_t code, bool timed_out, bool cancelled);
+  /** Mark fully complete when process_exited && out_eof && err_eof. */
+  void try_finish(Entry& e) noexcept;
 
   asio::any_io_executor ex_;
   std::unordered_map<std::string, std::shared_ptr<Entry>> entries_;

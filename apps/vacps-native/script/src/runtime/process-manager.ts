@@ -401,7 +401,8 @@ export class ProcessManager {
       if (r.stderr) stderr += r.stderr;
       stdoutOff = r.nextStdoutOffset;
       stderrOff = r.nextStderrOffset;
-      if (r.eof || r.status !== 'running') {
+      // Complete only when eof (exit + both pipe EOFs + buffer fully read).
+      if (r.eof) {
         const tracked = this.tracked.get(processId);
         const startedMs = tracked?.startedMs ?? host.nowMs();
         const finishedMs = host.nowMs();

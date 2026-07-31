@@ -38,12 +38,19 @@ declare module 'vacps:process' {
     readonly status: 'running' | 'exited' | 'timed_out' | 'cancelled' | string;
     readonly exitCode: number;
     readonly timedOut: boolean;
+    /** True only when process exited, both pipes EOF, and no unread buffer. */
     readonly eof: boolean;
     readonly stdinOpen: boolean;
     readonly stdout: string;
     readonly stderr: string;
+    /** Bytes retained in the agent buffer (capped by hard_max). */
     readonly stdoutTotal: number;
     readonly stderrTotal: number;
+    /** Bytes observed on the pipe (includes discarded after hard_max). */
+    readonly stdoutProduced?: number;
+    readonly stderrProduced?: number;
+    readonly stdoutTruncated?: boolean;
+    readonly stderrTruncated?: boolean;
     readonly nextStdoutOffset: number;
     readonly nextStderrOffset: number;
   }
