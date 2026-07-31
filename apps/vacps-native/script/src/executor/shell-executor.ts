@@ -4,6 +4,7 @@ import * as log from 'vacps:log';
 import * as process from 'vacps:process';
 
 import type { TaskStore } from '../storage/task-store';
+import { resolveExecutable } from '../util/resolve-executable';
 
 /**
  * Run command/shell tasks via vacps:process start/read/terminate
@@ -60,9 +61,9 @@ export class ShellExecutor {
 
     let argv: string[];
     if (task.kind === 'command') {
-      argv = [task.program, ...(task.arguments ?? [])];
+      argv = [await resolveExecutable(task.program), ...(task.arguments ?? [])];
     } else {
-      const shell = task.shell ?? '/bin/bash';
+      const shell = await resolveExecutable(task.shell ?? '/bin/bash');
       argv = [shell, '-lc', task.command];
     }
 

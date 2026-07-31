@@ -488,7 +488,8 @@ export async function filesGrep(input: {
       const all = parseRgJson(result.stdout, 10_000, maxBytes * 4);
       const page = all.slice(offset, offset + maxMatches);
       const nextOffset = offset + page.length;
-      const truncated = nextOffset < all.length || page.length >= maxMatches;
+      // Only truncated when more matches remain after this page.
+      const truncated = nextOffset < all.length;
       return {
         matches: page,
         match_count: page.length,
@@ -559,12 +560,14 @@ export async function filesGrep(input: {
 
   const page = allMatches.slice(offset, offset + maxMatches);
   const nextOffset = offset + page.length;
-  const truncated = nextOffset < allMatches.length || hitLimit;
+  const hasMoreInMemory = nextOffset < allMatches.length;
+  // hitLimit: collection stopped early (more may exist on disk) but no safe cursor beyond buffer.
+  const truncated = hasMoreInMemory || hitLimit;
   return {
     matches: page,
     match_count: page.length,
     truncated,
-    next_cursor: truncated ? encodeOffsetCursor(nextOffset) : null,
+    next_cursor: hasMoreInMemory ? encodeOffsetCursor(nextOffset) : null,
     engine: 'walk' as const,
   };
 }

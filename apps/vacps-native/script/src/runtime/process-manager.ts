@@ -1,8 +1,8 @@
 import * as crypto from 'vacps:crypto';
-import * as fs from 'vacps:fs';
 import * as host from 'vacps:host';
 import * as process from 'vacps:process';
 
+import { resolveExecutable } from '../util/resolve-executable';
 import { assertSafeAbsolutePath } from './path-guard';
 
 export type ProcessStatus = 'running' | 'exited' | 'signaled' | 'timed_out' | 'cancelled';
@@ -62,40 +62,6 @@ interface Tracked {
   hardMaxStdout?: number;
   hardMaxStderr?: number;
   tty?: boolean;
-}
-
-/** Resolve bare program names via common absolute paths (static agent often has empty PATH). */
-async function resolveExecutable(program: string): Promise<string> {
-  if (!program || program.includes('/')) return program;
-  const candidates: string[] = [
-    `/usr/bin/${program}`,
-    `/bin/${program}`,
-    `/usr/local/bin/${program}`,
-  ];
-  try {
-    const pathEnv = host.getenv('PATH') ?? '';
-    if (pathEnv) {
-      for (const dir of pathEnv.split(':')) {
-        if (!dir) continue;
-        const candidate = `${dir.replace(/\/$/, '')}/${program}`;
-        if (!candidates.includes(candidate)) candidates.push(candidate);
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  for (const c of candidates) {
-    try {
-      if (await fs.exists(c)) {
-        const st = await fs.stat(c);
-        if (st.type === 'file' || st.type === 'symlink') return c;
-      }
-    } catch {
-      /* try next */
-    }
-  }
-  // Prefer absolute path so Boost.Process does not depend on PATH.
-  return `/usr/bin/${program}`;
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -408,7 +374,7 @@ export class ProcessManager {
       finished_at: finishedMs ? new Date(finishedMs).toISOString() : null,
       duration_ms: finishedMs ? finishedMs - startedMs : host.nowMs() - startedMs,
       stdin_available: r.stdinOpen,
-      tty: false,
+      tty: tracked?.tty === true,
       output_cursor: null,
       stdout: preview(r.stdout, stdoutMax),
       stderr: preview(r.stderr, stderrMax),
@@ -452,7 +418,7 @@ export class ProcessManager {
           finished_at: new Date(finishedMs).toISOString(),
           duration_ms: finishedMs - startedMs,
           stdin_available: false,
-          tty: false,
+          tty: tracked?.tty === true,
           output_cursor: null,
           stdout: preview(stdout, stdoutMax),
           stderr: preview(stderr, stderrMax),
