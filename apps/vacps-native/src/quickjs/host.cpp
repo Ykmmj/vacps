@@ -50,6 +50,7 @@ Host::~Host() {
 
 void Host::cancel_host_async() noexcept {
   shutting_down_ = true;
+  ++progress_generation_;
   for (auto& t : progress_waiters_) {
     if (t) {
       t->cancel();
@@ -59,6 +60,7 @@ void Host::cancel_host_async() noexcept {
 }
 
 void Host::notify_progress() {
+  ++progress_generation_;
   std::list<std::shared_ptr<asio::steady_timer>> waiters;
   waiters.swap(progress_waiters_);
   for (auto& t : waiters) {
@@ -69,6 +71,10 @@ void Host::notify_progress() {
 }
 
 asio::awaitable<void> Host::wait_progress() {
+  if (shutting_down_) {
+    co_return;
+  }
+  const auto gen = progress_generation_;
   auto executor = co_await asio::this_coro::executor;
   auto timer = std::make_shared<asio::steady_timer>(executor);
   timer->expires_at(asio::steady_timer::time_point::max());
@@ -76,6 +82,8 @@ asio::awaitable<void> Host::wait_progress() {
   auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
   (void)ec;
   progress_waiters_.remove(timer);
+  // gen may have advanced (real progress) or we were cancelled for shutdown.
+  (void)gen;
   co_return;
 }
 
@@ -106,26 +114,29 @@ asio::awaitable<VoidResult> Host::await_settled(Value& value) {
     co_return VoidResult{};
   }
 
+  // Per-turn microtask budget: drain runnable jobs, then yield once if more remain.
+  // Jobs already in the QuickJS queue do not wait on native I/O; post is fairness only.
+  constexpr std::size_t kMaxJobsPerTurn = 128;
+
   for (;;) {
     const JSPromiseStateEnum st = JS_PromiseState(ctx, value.get());
     if (st == JS_PROMISE_PENDING) {
-      if (auto d = drain_jobs(); !d) {
-        co_return d;
+      auto drained = runtime_.drain_jobs_budgeted(kMaxJobsPerTurn);
+      if (!drained) {
+        co_return std::unexpected(std::move(drained.error()));
       }
       if (JS_PromiseState(ctx, value.get()) != JS_PROMISE_PENDING) {
         continue;
       }
-      // Must always suspend when still pending so co_spawn'ed Asio work
-      // (fs/process) can run on this io_context. Never busy-spin.
-      if (!JS_IsJobPending(runtime_.get())) {
-        co_await wait_progress();
-      } else {
-        // Jobs exist but may depend on native completion — yield one tick.
+      // Never busy-spin: always co_await so other Asio handlers can run.
+      if (JS_IsJobPending(runtime_.get())) {
+        // Runnable microtasks remain after the per-turn budget;
+        // yield to the io_context for fairness.
         auto ex = co_await asio::this_coro::executor;
         co_await asio::post(ex, asio::use_awaitable);
-      }
-      if (auto d = drain_jobs(); !d) {
-        co_return d;
+      } else {
+        // No runnable JS; wait for native settle + notify_progress.
+        co_await wait_progress();
       }
       continue;
     }

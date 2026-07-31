@@ -13,6 +13,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/thread_pool.hpp>
 
+#include <cstdint>
 #include <cstddef>
 #include <list>
 #include <memory>
@@ -76,8 +77,15 @@ class Host : public std::enable_shared_from_this<Host> {
 
   [[nodiscard]] VoidResult drain_jobs() { return runtime_.drain_jobs(); }
 
-  /** Wake await_settled after Asio-side work resolves a JS Promise. */
+  /**
+   * Wake await_settled after Asio-side work resolves a JS Promise.
+   * Bumps progress_generation_ then cancels progress waiters (event version).
+   */
   void notify_progress();
+
+  [[nodiscard]] std::uint64_t progress_generation() const noexcept {
+    return progress_generation_;
+  }
 
   void cancel_host_async() noexcept;
 
@@ -111,6 +119,8 @@ class Host : public std::enable_shared_from_this<Host> {
 
   Value script_ns_;
   std::list<std::shared_ptr<asio::steady_timer>> progress_waiters_;
+  /** Monotonic progress event version for wait_progress / multi-waiter safety. */
+  std::uint64_t progress_generation_{0};
 };
 
 /** JSContext opaque → Host* (set in Host::create). */

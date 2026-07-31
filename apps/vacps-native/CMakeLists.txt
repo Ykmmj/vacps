@@ -206,6 +206,7 @@ if(VACPS_BUILD_TESTS)
     tests/test_config.cpp
     tests/test_host.cpp
     tests/test_js_native_api.cpp
+    tests/test_promise_bridge.cpp
     tests/test_url_global.cpp
     tests/test_http_client.cpp
     tests/test_js_tasks.cpp
