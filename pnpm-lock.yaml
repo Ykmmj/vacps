@@ -126,8 +126,8 @@ importers:
         specifier: ^13.0.1
         version: 13.0.1
       bullmq:
-        specifier: ^5.53.2
-        version: 5.81.1
+        specifier: ^5.81.2
+        version: 5.81.2
       fastify:
         specifier: ^5.3.3
         version: 5.10.0
@@ -1336,8 +1336,8 @@ packages:
     resolution: {integrity: sha512-ZMANVnAixE6AWWnPzlW2KpUrxhm9woycYvPOo67jWHyFowASTEd9s+QN1EIMsSDtwhIxN4sWE1jotpuDUIgyIw==}
     engines: {node: '>=6.14.2'}
 
-  bullmq@5.81.1:
-    resolution: {integrity: sha512-sofyDem/1oPT3BSe4MGJQYhDM5+D+js41VIfhd47db9b/xfY6wZ9Use9RAZBRwqtxQqZ1NhUTae19+kCysWbBg==}
+  bullmq@5.81.2:
+    resolution: {integrity: sha512-Hi9GaVCC6HE9bQP65j/FNv1aL1fcEukTF99ezS5pl1Ud+joCFpNWiPCV45mWdkEmpuacS0XJdMMFGKPIHCwoPg==}
     engines: {node: '>=12.22.0'}
     peerDependencies:
       redis: '>=5.0.0'
@@ -3849,7 +3849,7 @@ snapshots:
       node-gyp-build: 4.8.4
     optional: true
 
-  bullmq@5.81.1:
+  bullmq@5.81.2:
     dependencies:
       cron-parser: 4.9.0
       ioredis: 5.11.1
