@@ -5,6 +5,7 @@
 #include "crypto/crypto.hpp"
 #include "fs/async.hpp"
 #include "fs/fs.hpp"
+#include "fs/sandbox.hpp"
 #include "http/client.hpp"
 #include "http/server.hpp"
 #include "quickjs/host.hpp"
@@ -553,16 +554,16 @@ JSModuleDef* init_module_http(JSContext* ctx, const char* name) {
   return m;
 }
 
-// ── vacps:fs (async: stream_file and/or thread_pool; pure path resolve) ──
-// Product path policy (MCP tools) is JS runtime/path-guard.ts — not here.
+// ── vacps:fs (async: stream_file and/or thread_pool + PathSandbox) ──
+// Tool-layer path-guard.ts remains defense-in-depth; C++ enforces allowlist
+// + openat2(RESOLVE_BENEATH) so symlink escape cannot leave configured roots.
 
 Result<std::filesystem::path> resolve_user_path(JSContext* ctx, JSValueConst path_v) {
   auto* host = host_from(ctx);
   if (!host) return std::unexpected(Error{"fs: host not initialized"});
   auto p = converter<std::string>::from_js(ctx, path_v);
   if (!p) return std::unexpected(std::move(p.error()));
-  // Relative → dataDir join only (no policy). Absolute paths pass through.
-  return vacps::fs::resolve_path(host->config().data_dir, *p);
+  return host->path_sandbox().authorize(*p, host->config().data_dir);
 }
 
 // All vacps:fs async APIs use spawn_js_promise (promise_bridge.hpp).
@@ -913,6 +914,24 @@ JSValue js_process_run(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
       }
       opts.timeout_ms = *ms;
     }
+    Value max_out = Value::get_property_str(ctx, argv[1], "maxStdoutBytes");
+    if (!max_out.is_nullish()) {
+      auto n = converter<std::int32_t>::from_js(ctx, max_out.get());
+      if (!n) return throw_error(ctx, n.error());
+      if (*n < 0) {
+        return JS_ThrowTypeError(ctx, "process.run: maxStdoutBytes must be >= 0");
+      }
+      opts.max_stdout_bytes = static_cast<std::size_t>(*n);
+    }
+    Value max_err = Value::get_property_str(ctx, argv[1], "maxStderrBytes");
+    if (!max_err.is_nullish()) {
+      auto n = converter<std::int32_t>::from_js(ctx, max_err.get());
+      if (!n) return throw_error(ctx, n.error());
+      if (*n < 0) {
+        return JS_ThrowTypeError(ctx, "process.run: maxStderrBytes must be >= 0");
+      }
+      opts.max_stderr_bytes = static_cast<std::size_t>(*n);
+    }
   }
 
   return spawn_js_promise(
@@ -933,6 +952,18 @@ JSValue js_process_run(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
               "stdout", converter<std::string>::to_js(c, result->stdout_str));
           obj.set_property_str(
               "stderr", converter<std::string>::to_js(c, result->stderr_str));
+          obj.set_property_str(
+              "stdoutProduced",
+              converter<std::int32_t>::to_js(
+                  c, static_cast<std::int32_t>(result->stdout_produced)));
+          obj.set_property_str(
+              "stderrProduced",
+              converter<std::int32_t>::to_js(
+                  c, static_cast<std::int32_t>(result->stderr_produced)));
+          obj.set_property_str(
+              "stdoutTruncated", converter<bool>::to_js(c, result->stdout_truncated));
+          obj.set_property_str(
+              "stderrTruncated", converter<bool>::to_js(c, result->stderr_truncated));
           bridge.resolve(std::move(obj));
         }
         co_return;

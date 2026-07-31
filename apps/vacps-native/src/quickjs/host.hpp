@@ -2,6 +2,7 @@
 
 #include "app/config.hpp"
 #include "app/error.hpp"
+#include "fs/sandbox.hpp"
 #include "process/registry.hpp"
 #include "quickjs/context.hpp"
 #include "quickjs/convert.hpp"
@@ -20,6 +21,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace vacps::js {
 
@@ -33,6 +35,11 @@ struct HostOptions {
    * 0 disables the interrupt watchdog for that Host.
    */
   std::chrono::milliseconds js_time_budget{kDefaultJsTimeBudget};
+  /**
+   * Extra fs roots beyond data_dir + /tmp (also from Config::fs_allowed_roots).
+   * When set, merged with config at Host::create.
+   */
+  std::vector<std::string> fs_extra_roots;
 };
 
 /**
@@ -71,6 +78,14 @@ class Host : public std::enable_shared_from_this<Host> {
 
   /** Long-lived subprocess registry (vacps:process start/read/write/terminate). */
   [[nodiscard]] vacps::process::Registry& processes() noexcept { return *processes_; }
+
+  /**
+   * vacps:fs path sandbox (openat2 RESOLVE_BENEATH + allowlist roots).
+   * All JS fs paths must pass PathSandbox::authorize.
+   */
+  [[nodiscard]] const vacps::fs::PathSandbox& path_sandbox() const noexcept {
+    return path_sandbox_;
+  }
 
   [[nodiscard]] Result<Value> eval(
       std::string_view source,
@@ -117,7 +132,8 @@ class Host : public std::enable_shared_from_this<Host> {
       Context context,
       asio::io_context& ioc,
       Config cfg,
-      std::chrono::milliseconds js_time_budget);
+      std::chrono::milliseconds js_time_budget,
+      vacps::fs::PathSandbox path_sandbox);
 
   [[nodiscard]] asio::awaitable<void> wait_progress();
   /** Wait for progress or deadline; returns false if interrupt budget expired. */
@@ -131,6 +147,7 @@ class Host : public std::enable_shared_from_this<Host> {
   std::unique_ptr<vacps::process::Registry> processes_;
   bool use_stream_file_{false};
   Config cfg_{};
+  vacps::fs::PathSandbox path_sandbox_{};
   std::chrono::milliseconds js_time_budget_{kDefaultJsTimeBudget};
   bool script_initialized_{false};
   bool shutting_down_{false};

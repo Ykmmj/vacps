@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace vacps {
 
@@ -19,6 +20,12 @@ struct Config {
    * Empty → resolve platform defaults at request time (fail-closed if missing).
    */
   std::string ca_bundle;
+  /**
+   * Extra absolute filesystem roots for vacps:fs PathSandbox
+   * (env VACPS_FS_ALLOWED_ROOTS, colon/comma separated).
+   * Always includes data_dir and /tmp.
+   */
+  std::vector<std::string> fs_allowed_roots;
 
   /** Load from environment (command line overrides applied separately). */
   static Config from_env();

@@ -37,8 +37,8 @@ struct FileStat {
  * - Absolute: returned lexically normalized.
  * - Relative: joined under workspace_root, then lexically normalized.
  *
- * MCP / tool path policy (forbid /proc, workspace escape, …) lives in JS
- * `runtime/path-guard.ts`, not here.
+ * Product policy for vacps:fs JS module is PathSandbox (openat2 + allowlist)
+ * in resolve_user_path. MCP tool paths also use JS `runtime/path-guard.ts`.
  */
 [[nodiscard]] Result<std::filesystem::path> resolve_path(
     const std::filesystem::path& workspace_root,

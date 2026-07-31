@@ -33,7 +33,8 @@ Host::Host(
     Context context,
     asio::io_context& ioc,
     Config cfg,
-    std::chrono::milliseconds js_time_budget)
+    std::chrono::milliseconds js_time_budget,
+    vacps::fs::PathSandbox path_sandbox)
     : runtime_(std::move(runtime)),
       context_(std::move(context)),
       ioc_(&ioc),
@@ -41,6 +42,7 @@ Host::Host(
       processes_(std::make_unique<vacps::process::Registry>(ioc.get_executor())),
       use_stream_file_(vacps::fs::probe_io_uring()),
       cfg_(std::move(cfg)),
+      path_sandbox_(std::move(path_sandbox)),
       js_time_budget_(js_time_budget) {}
 
 Host::~Host() {
@@ -330,12 +332,17 @@ Result<std::shared_ptr<Host>> Host::create(
     return std::unexpected(std::move(context.error()));
   }
 
+  std::vector<std::string> roots = cfg.fs_allowed_roots;
+  roots.insert(roots.end(), opts.fs_extra_roots.begin(), opts.fs_extra_roots.end());
+  auto sandbox = vacps::fs::PathSandbox::create(cfg.data_dir, std::move(roots));
+
   auto host = std::shared_ptr<Host>(new Host(
       std::move(*runtime),
       std::move(*context),
       ioc,
       cfg,
-      opts.js_time_budget));
+      opts.js_time_budget,
+      std::move(sandbox)));
 
   // Modules resolve Host via JS_GetContextOpaque.
   JS_SetContextOpaque(host->context().get(), host.get());
@@ -345,9 +352,10 @@ Result<std::shared_ptr<Host>> Host::create(
   }
 
   log::info(
-      "quickjs host ready (fs content={} js_time_budget_ms={})",
+      "quickjs host ready (fs content={} js_time_budget_ms={} fs_roots={})",
       host->use_stream_file() ? "stream_file/io_uring" : "thread_pool",
-      host->js_time_budget().count());
+      host->js_time_budget().count(),
+      host->path_sandbox().roots().size());
   return host;
 }
 

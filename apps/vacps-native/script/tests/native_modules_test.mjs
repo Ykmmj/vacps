@@ -153,10 +153,23 @@ await test('fs write/read/append/exists/list/rename/remove', async () => {
   assert(!(await fs.exists('js_api/fs/c.txt')), 'removed');
 });
 
-// Pure I/O: vacps:fs has no product path ban. MCP path-guard is JS-only.
-await test('fs pure I/O can read /proc', async () => {
-  const text = await fs.readText('/proc/self/status');
-  assert(typeof text === 'string' && text.includes('Name:'), 'read /proc/self/status');
+// PathSandbox rejects kernel fs and paths outside dataDir+/tmp allowlist.
+await test('fs sandbox rejects /proc and /etc', async () => {
+  let procDenied = false;
+  try {
+    await fs.readText('/proc/self/status');
+  } catch {
+    procDenied = true;
+  }
+  assert(procDenied, 'read /proc must fail under PathSandbox');
+
+  let etcDenied = false;
+  try {
+    await fs.readText('/etc/passwd');
+  } catch {
+    etcDenied = true;
+  }
+  assert(etcDenied, 'read /etc/passwd must fail under PathSandbox');
 });
 
 // ── vacps:crypto ──────────────────────────────────────────────────
