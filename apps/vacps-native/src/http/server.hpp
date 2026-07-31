@@ -1,119 +1,92 @@
 #pragma once
 
-#include "app/config.hpp"
 #include "app/error.hpp"
-#include "app/log.hpp"
 #include "http/session.hpp"
 #include "quickjs/host.hpp"
 
-#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/strand.hpp>
-#include <boost/asio/use_awaitable.hpp>
-#include <boost/beast/core/error.hpp>
 
-#include <csignal>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <memory>
-#include <utility>
+#include <string>
+#include <vector>
 
 namespace vacps::http {
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 
-/** HTTP transport only — zero product routing. Lifetime: shared_ptr. */
+/** Bind target for Server — always supplied by the caller (JS createServer options). */
+struct ListenEndpoint {
+  std::string host{"127.0.0.1"};
+  std::uint16_t port{8788};
+};
+
+/** Max time to wait for in-flight sessions after signal before forcing cancel. */
+inline constexpr std::chrono::seconds kGracefulSessionDrain{10};
+/** Max time to wait for native Promise async scope after process kill. */
+inline constexpr std::chrono::seconds kGracefulAsyncIdle{5};
+
+/**
+ * HTTP transport only — zero product routing. Lifetime: shared_ptr.
+ *
+ * Graceful stop (SIGINT/SIGTERM) — process-level async scope:
+ *  1. close acceptor (no new accepts)
+ *  2. cancel active sessions (close sockets)
+ *  3. wait for sessions to finish (up to kGracefulSessionDrain)
+ *  4. cancel Host progress waiters / process registry
+ *  5. wait for spawn_js_promise outstanding ops (up to kGracefulAsyncIdle)
+ *  6. JS shutdown export
+ *  7. stop io_context
+ */
 class Server : public std::enable_shared_from_this<Server> {
  public:
-  Server(asio::io_context& ioc, Config cfg, std::shared_ptr<vacps::js::Host> script)
-      : ioc_(ioc),
-        cfg_(std::move(cfg)),
-        script_(std::move(script)),
-        acceptor_(asio::make_strand(ioc)),
-        signals_(ioc, SIGINT, SIGTERM) {}
+  Server(
+      asio::io_context& ioc,
+      ListenEndpoint listen,
+      std::shared_ptr<vacps::js::Host> script);
 
   Server(const Server&) = delete;
   Server& operator=(const Server&) = delete;
 
-  [[nodiscard]] VoidResult start() {
-    beast::error_code ec;
-    tcp::endpoint ep(asio::ip::make_address(cfg_.listen_host, ec), cfg_.listen_port);
-    if (ec) {
-      return std::unexpected(Error{"invalid listen host: " + ec.message()});
-    }
-    acceptor_.open(ep.protocol(), ec);
-    if (ec) {
-      return std::unexpected(Error{"acceptor open: " + ec.message()});
-    }
-    acceptor_.set_option(asio::socket_base::reuse_address(true), ec);
-    acceptor_.bind(ep, ec);
-    if (ec) {
-      return std::unexpected(Error{"acceptor bind: " + ec.message()});
-    }
-    acceptor_.listen(asio::socket_base::max_listen_connections, ec);
-    if (ec) {
-      return std::unexpected(Error{"acceptor listen: " + ec.message()});
-    }
-
-    vacps::log::info("listening on http://{}:{}", cfg_.listen_host, cfg_.listen_port);
-
-    auto self = shared_from_this();
-    asio::co_spawn(
-        acceptor_.get_executor(),
-        [self]() -> asio::awaitable<void> { co_await self->accept_loop(); },
-        [](std::exception_ptr ep) {
-          if (!ep) return;
-          try {
-            std::rethrow_exception(ep);
-          } catch (const std::exception& e) {
-            vacps::log::error("accept loop: {}", e.what());
-          }
-        });
-
-    signals_.async_wait([self](beast::error_code, int signo) {
-      vacps::log::info("signal {}, shutting down", signo);
-      self->request_stop();
-    });
-    return {};
-  }
+  [[nodiscard]] VoidResult start();
 
   /** Close acceptor/signals only (does not stop io_context). */
-  void close() noexcept {
-    beast::error_code ignored;
-    acceptor_.close(ignored);
-    signals_.cancel(ignored);
-  }
+  void close() noexcept;
 
-  /** Close acceptor and stop io_context (signal / process shutdown). */
-  void request_stop() {
-    close();
-    ioc_.stop();
-  }
+  /**
+   * Begin graceful process shutdown (signal / process stop).
+   * Safe to call multiple times; only the first run performs the sequence.
+   */
+  void request_stop();
 
-  [[nodiscard]] bool is_open() const noexcept {
-    return acceptor_.is_open();
-  }
+  void session_started(std::shared_ptr<Session> session) noexcept;
+  void session_finished() noexcept;
+  void cancel_all_sessions() noexcept;
+
+  [[nodiscard]] std::size_t active_sessions() const noexcept;
+  [[nodiscard]] bool is_open() const noexcept;
+  [[nodiscard]] bool stopping() const noexcept;
 
  private:
-  asio::awaitable<void> accept_loop() {
-    for (;;) {
-      auto [ec, socket] =
-          co_await acceptor_.async_accept(asio::as_tuple(asio::use_awaitable));
-      if (ec) {
-        // closed / cancelled during shutdown
-        co_return;
-      }
-      std::make_shared<Session>(std::move(socket), script_)->run();
-    }
-  }
+  asio::awaitable<void> accept_loop();
+  asio::awaitable<void> graceful_shutdown();
 
   asio::io_context& ioc_;
-  Config cfg_;
+  ListenEndpoint listen_;
   std::shared_ptr<vacps::js::Host> script_;
   tcp::acceptor acceptor_;
   asio::signal_set signals_;
+  std::atomic<bool> stopping_{false};
+  std::atomic<std::size_t> active_sessions_{0};
+  /** Live sessions for cancel-on-stop (io_context thread only). */
+  std::vector<std::weak_ptr<Session>> sessions_;
 };
 
 }  // namespace vacps::http

@@ -122,14 +122,14 @@ export async function filesRead(input: {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
 
-  // Product max_bytes is on raw file bytes; sha256 is always of the full file.
-  const raw = asUint8(await fs.readBytes(path));
-  const sizeBytes = raw.byteLength;
-  const digest = crypto.sha256Hex(raw);
+  // Streaming digest of full file; content loaded only for the requested window.
+  const digestInfo = await fs.hashFile(path);
+  const sizeBytes = digestInfo.sizeBytes;
+  const digest = digestInfo.sha256Hex;
 
   if (encoding === 'base64') {
     const end = Math.min(maxBytes, sizeBytes);
-    const slice = raw.subarray(0, end);
+    const slice = asUint8(await fs.readRange(path, 0, end));
     return {
       path,
       content: crypto.base64Encode(slice),
@@ -149,6 +149,9 @@ export async function filesRead(input: {
   let truncated: boolean;
 
   if (input.startLine !== undefined || input.endLine !== undefined) {
+    // Line selection still needs a text window; cap to avoid whole multi-GB files.
+    const lineCap = Math.min(sizeBytes, 4 * 1024 * 1024);
+    const raw = asUint8(await fs.readRange(path, 0, lineCap));
     const fullText = utf8Decode(raw);
     const lines = fullText.split('\n');
     const from = Math.max(1, input.startLine ?? 1);
@@ -157,9 +160,10 @@ export async function filesRead(input: {
     endLine = to;
     const segment = lines.slice(from - 1, to).join('\n');
     content = truncateStringToUtf8Bytes(segment, maxBytes);
-    truncated = utf8ByteLengthOfString(segment) > maxBytes;
+    truncated = utf8ByteLengthOfString(segment) > maxBytes || sizeBytes > lineCap;
   } else {
-    const end = utf8PrefixEnd(raw, Math.min(maxBytes, sizeBytes));
+    const raw = asUint8(await fs.readRange(path, 0, maxBytes));
+    const end = utf8PrefixEnd(raw, Math.min(maxBytes, raw.byteLength));
     content = utf8Decode(raw.subarray(0, end));
     truncated = sizeBytes > end;
   }
@@ -213,7 +217,7 @@ export async function filesWrite(input: {
   return {
     path,
     operation: exists ? 'overwritten' : 'created',
-    size_bytes: input.content.length,
+    size_bytes: utf8ByteLengthOfString(input.content),
     sha256: crypto.sha256Hex(input.content),
   };
 }

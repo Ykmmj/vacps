@@ -24,34 +24,34 @@ export class TaskQueue {
     this.schedulers = schedulerStore;
   }
 
-  enqueue(task: TaskDispatch): { created: boolean } {
-    const created = this.store.createTask(task, 'queued');
+  async enqueue(task: TaskDispatch): Promise<{ created: boolean }> {
+    const created = await this.store.createTask(task, 'queued');
     return { created };
   }
 
-  getTask(taskId: string) {
-    return this.store.getTask(taskId);
+  async getTask(taskId: string) {
+    return await this.store.getTask(taskId);
   }
 
-  listLogs(taskId: string, opts?: { stream?: string; offset?: number; limit?: number }) {
-    return this.store.listLogs(taskId, opts);
+  async listLogs(taskId: string, opts?: { stream?: string; offset?: number; limit?: number }) {
+    return await this.store.listLogs(taskId, opts);
   }
 
-  findByIdempotencyKey(key: string) {
-    return this.store.findByIdempotencyKey(key);
+  async findByIdempotencyKey(key: string) {
+    return await this.store.findByIdempotencyKey(key);
   }
 
-  cancel(taskId: string): {
+  async cancel(taskId: string): Promise<{
     cancelled: boolean;
     status: string;
     already_terminal?: boolean;
     state?: string;
-  } {
-    const before = this.store.getTask(taskId);
+  }> {
+    const before = await this.store.getTask(taskId);
     if (!before) {
       return { cancelled: false, status: 'not_found', already_terminal: true };
     }
-    const ok = this.store.requestCancel(taskId);
+    const ok = await this.store.requestCancel(taskId);
     if (!ok) {
       return {
         cancelled: false,
@@ -60,8 +60,8 @@ export class TaskQueue {
         state: before.status,
       };
     }
-    void this.executor.cancelRunning(taskId);
-    const after = this.store.getTask(taskId);
+    void await this.executor.cancelRunning(taskId);
+    const after = await this.store.getTask(taskId);
     return {
       cancelled: true,
       status: after?.status ?? 'cancelled',
@@ -69,9 +69,9 @@ export class TaskQueue {
     };
   }
 
-  retry(taskId: string): { task_id: string; status: 'queued'; retry_of_task_id: string } {
+  async retry(taskId: string): Promise<{ task_id: string; status: 'queued'; retry_of_task_id: string }> {
     const newId = randomUuidV4();
-    const enqueued = this.store.enqueueRetryOf(taskId, newId);
+    const enqueued = await this.store.enqueueRetryOf(taskId, newId);
     if (!enqueued) {
       throw new Error('Task not found.');
     }
@@ -80,16 +80,16 @@ export class TaskQueue {
 
   /** Claim and run at most one queued task (single-flight). */
   async pumpOnce(): Promise<boolean> {
-    if (this.pumpBusy || this.store.hasRunning()) {
+    if (this.pumpBusy || await this.store.hasRunning()) {
       return false;
     }
     this.pumpBusy = true;
     try {
-      const claimed = this.store.claimNextQueued();
+      const claimed = await this.store.claimNextQueued();
       if (!claimed) return false;
       log.info(`queue claim task=${claimed.task.task_id} kind=${claimed.task.kind}`);
       await this.executor.execute(claimed.task);
-      const done = this.store.getTask(claimed.task.task_id);
+      const done = await this.store.getTask(claimed.task.task_id);
       log.info(`queue done task=${claimed.task.task_id} status=${done?.status ?? '?'}`);
       return true;
     } finally {
@@ -97,19 +97,19 @@ export class TaskQueue {
     }
   }
 
-  recoverInterruptedOnBoot(): number {
-    return this.store.recoverInterruptedOnBoot();
+  async recoverInterruptedOnBoot(): Promise<number> {
+    return await this.store.recoverInterruptedOnBoot();
   }
 
-  claimNonce(nonce: string): boolean {
-    return this.store.claimNonce(nonce);
+  async claimNonce(nonce: string): Promise<boolean> {
+    return await this.store.claimNonce(nonce);
   }
 
-  queueCounts() {
-    return this.store.queueCounts();
+  async queueCounts() {
+    return await this.store.queueCounts();
   }
 
-  upsertScheduler(input: {
+  async upsertScheduler(input: {
     id: string;
     cron: string;
     timezone: string;
@@ -118,7 +118,7 @@ export class TaskQueue {
     nextRunAt?: string | null;
     revision?: number;
     policy?: SchedulePolicy;
-  }): void {
+  }): Promise<void> {
     const wire: {
       id: string;
       cron: string;
@@ -141,11 +141,11 @@ export class TaskQueue {
     };
     if (input.revision !== undefined) wire.revision = input.revision;
     if (input.nextRunAt !== undefined) wire.nextRunAt = input.nextRunAt;
-    this.schedulers.upsertFromWire(wire);
+    await this.schedulers.upsertFromWire(wire);
   }
 
-  listSchedulers() {
-    return this.schedulers.list().map((s) => ({
+  async listSchedulers() {
+    return (await this.schedulers.list()).map((s) => ({
       id: s.id,
       cron: s.cron,
       timezone: s.timezone,
@@ -160,12 +160,12 @@ export class TaskQueue {
     }));
   }
 
-  deleteScheduler(id: string): void {
-    this.schedulers.remove(id);
+  async deleteScheduler(id: string): Promise<void> {
+    await this.schedulers.remove(id);
   }
 
   /** Manual one-shot (not an occurrence claim); random task_id. */
-  runScheduleNow(input: { id: string; task: CreateTaskInput }): string {
+  async runScheduleNow(input: { id: string; task: CreateTaskInput }): Promise<string> {
     const taskId = randomUuidV4();
     const dispatch = {
       ...input.task,
@@ -173,27 +173,27 @@ export class TaskQueue {
       source: 'schedule' as const,
       schedule_id: input.id,
     } as TaskDispatch;
-    this.store.createTask(dispatch, 'queued');
+    await this.store.createTask(dispatch, 'queued');
     return taskId;
   }
 
   /**
    * Successful claim payload for control-plane occurrence ack.
    */
-  fireDueSchedulers(nowMs: number = host.nowMs()): {
+  async fireDueSchedulers(nowMs: number = host.nowMs()): Promise<{
     tasksEnqueued: number;
     acks: ScheduleFireAck[];
-  } {
+  }> {
     let tasksEnqueued = 0;
     const acks: ScheduleFireAck[] = [];
-    for (const s of this.schedulers.listEnabled()) {
+    for (const s of await this.schedulers.listEnabled()) {
       // Legacy rows without absolute cursor: seed next from UTC minute match once.
       if (!s.nextRunAt) {
         const now = new Date(nowMs);
         if (!cronMatchesUtc(s.cron, now)) continue;
         const seeded = nextCronRunAtIso(s.cron, s.timezone, new Date(nowMs - 60_000));
         if (!seeded || Date.parse(seeded) > nowMs) continue;
-        this.schedulers.writeRow({
+        await this.schedulers.writeRow({
           id: s.id,
           cron: s.cron,
           timezone: s.timezone,
@@ -205,10 +205,10 @@ export class TaskQueue {
         });
       }
 
-      const current = this.schedulers.get(s.id);
+      const current = await this.schedulers.get(s.id);
       if (!current?.nextRunAt || !current.enabled) continue;
 
-      const result = this.schedulers.claimAndEnqueue(current, nowMs, (slot, schedule) => {
+      const result = await this.schedulers.claimAndEnqueue(current, nowMs, async (slot, schedule) => {
         const dispatch = {
           ...schedule.task,
           task_id: slot.occurrenceId,
@@ -216,7 +216,7 @@ export class TaskQueue {
           schedule_id: schedule.id,
           idempotency_key: slot.occurrenceId,
         } as TaskDispatch;
-        this.store.insertOccurrenceTask(dispatch, {
+        await this.store.insertOccurrenceTask(dispatch, {
           scheduleId: schedule.id,
           scheduleRevision: slot.revision,
           scheduledForMs: slot.scheduledForMs,

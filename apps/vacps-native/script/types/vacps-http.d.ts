@@ -14,7 +14,11 @@ declare module 'vacps:http' {
     isListening(): boolean;
   }
 
-  /** Factory: create an inbound server (default host/port from process config). */
+  /**
+   * Factory: create an inbound server.
+   * Defaults: host=127.0.0.1, port=8788 when options omitted.
+   * Agent bind policy lives in JS loadConfig (LISTEN_HOST/PORT); pass them explicitly.
+   */
   export function createServer(options?: ServerOptions): Server;
 
   // ── Outbound client (HTTP/HTTPS) ────────────────────────────────

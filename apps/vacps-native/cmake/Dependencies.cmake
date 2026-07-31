@@ -175,6 +175,25 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(ada)
 message(STATUS "Using Ada ${VACPS_ADA_VERSION}")
 
+# ── simdutf 9.0.0 (UTF-8/16 validation & transcoding for Encoding API) ──
+# https://github.com/simdutf/simdutf/releases/tag/v9.0.0
+set(VACPS_SIMDUTF_VERSION 9.0.0)
+set(VACPS_SIMDUTF_URL
+  "https://github.com/simdutf/simdutf/archive/refs/tags/v${VACPS_SIMDUTF_VERSION}.tar.gz")
+
+message(STATUS "Fetching simdutf ${VACPS_SIMDUTF_VERSION} ...")
+set(SIMDUTF_TESTS OFF CACHE BOOL "" FORCE)
+set(SIMDUTF_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(SIMDUTF_TOOLS OFF CACHE BOOL "" FORCE)
+set(SIMDUTF_ICONV OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  simdutf
+  URL ${VACPS_SIMDUTF_URL}
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(simdutf)
+message(STATUS "Using simdutf ${VACPS_SIMDUTF_VERSION}")
+
 # ── QuickJS (bellard official release; static, no quickjs-libc host yet) ──
 # Design §25.6 / §23: RAII host owns Runtime+Context; pure engine only for now.
 # Official release: https://bellard.org/quickjs/ (2026-06-04)

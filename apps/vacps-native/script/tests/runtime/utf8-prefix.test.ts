@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { utf8PrefixEnd } from '../../src/util/utf8';
+import {
+  utf8ByteLengthOfString,
+  utf8ByteSlice,
+  utf8Decode,
+  utf8Encode,
+  utf8PrefixEnd,
+} from '../../src/util/utf8';
 
 function enc(s: string): Uint8Array {
   const out: number[] = [];
@@ -66,5 +72,30 @@ describe('utf8PrefixEnd', () => {
   it('returns 0 for empty or zero limit', () => {
     expect(utf8PrefixEnd(new Uint8Array(), 10)).toBe(0);
     expect(utf8PrefixEnd(enc('hi'), 0)).toBe(0);
+  });
+});
+
+describe('utf8Encode / utf8ByteSlice (via TextEncoder/TextDecoder)', () => {
+  it('uses platform Encoding API under the hood', () => {
+    expect(typeof TextEncoder).toBe('function');
+    expect(typeof TextDecoder).toBe('function');
+  });
+
+  it('counts multi-byte strings by UTF-8 bytes not JS length', () => {
+    const s = '你好'; // 2 code units, 6 UTF-8 bytes
+    expect(s.length).toBe(2);
+    expect(utf8ByteLengthOfString(s)).toBe(6);
+    expect(utf8Encode(s).length).toBe(6);
+    expect(utf8Decode(utf8Encode(s))).toBe(s);
+  });
+
+  it('slices by byte offset without splitting multi-byte chars', () => {
+    const s = 'a你好b';
+    // a=1, 你=3, 好=3, b=1 → total 8
+    const mid = utf8ByteSlice(s, 1, 4); // only first CJK char
+    expect(mid.totalBytes).toBe(8);
+    expect(mid.content).toBe('你');
+    expect(mid.start).toBe(1);
+    expect(mid.end).toBe(4);
   });
 });

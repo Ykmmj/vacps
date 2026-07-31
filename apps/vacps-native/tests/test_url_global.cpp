@@ -1,4 +1,3 @@
-#include "app/config.hpp"
 #include "app/log.hpp"
 #include "quickjs/host.hpp"
 #include "quickjs/value.hpp"
@@ -20,9 +19,9 @@ class UrlGlobalTest : public ::testing::Test {
 
 TEST_F(UrlGlobalTest, ParsesAbsoluteHttpsAndRejectsGarbage) {
   asio::io_context ioc{1};
-  vacps::Config cfg{};
-  cfg.data_dir = "/tmp/vacps-url-test";
-  auto host_r = vacps::js::Host::create(cfg, ioc);
+  vacps::js::HostOptions host_opts{};
+  host_opts.data_dir = "/tmp/vacps-url-test";
+  auto host_r = vacps::js::Host::create(ioc, host_opts);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 
@@ -50,9 +49,9 @@ TEST_F(UrlGlobalTest, ParsesAbsoluteHttpsAndRejectsGarbage) {
 
 TEST_F(UrlGlobalTest, RelativeWithBase) {
   asio::io_context ioc{1};
-  vacps::Config cfg{};
-  cfg.data_dir = "/tmp/vacps-url-test2";
-  auto host_r = vacps::js::Host::create(cfg, ioc);
+  vacps::js::HostOptions host_opts{};
+  host_opts.data_dir = "/tmp/vacps-url-test2";
+  auto host_r = vacps::js::Host::create(ioc, host_opts);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 

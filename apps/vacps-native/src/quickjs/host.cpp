@@ -1,6 +1,6 @@
 #include "quickjs/host.hpp"
 
-#include "quickjs/cstring.hpp"
+#include "quickjs/js_bridge.hpp"
 #include "quickjs/modules.hpp"
 #include "app/log.hpp"
 #include "app/version.hpp"
@@ -32,28 +32,71 @@ Host::Host(
     Runtime runtime,
     Context context,
     asio::io_context& ioc,
-    Config cfg,
-    std::chrono::milliseconds js_time_budget,
+    HostOptions opts,
     vacps::fs::PathSandbox path_sandbox)
     : runtime_(std::move(runtime)),
       context_(std::move(context)),
       ioc_(&ioc),
       pool_(std::make_unique<asio::thread_pool>(2)),
+      db_pool_(std::make_unique<asio::thread_pool>(1)),
       processes_(std::make_unique<vacps::process::Registry>(ioc.get_executor())),
       use_stream_file_(vacps::fs::probe_io_uring()),
-      cfg_(std::move(cfg)),
+      data_dir_(std::move(opts.data_dir)),
+      ca_bundle_(std::move(opts.ca_bundle)),
       path_sandbox_(std::move(path_sandbox)),
-      js_time_budget_(js_time_budget) {}
+      js_time_budget_(opts.js_time_budget) {}
 
 Host::~Host() {
   cancel_host_async();
   if (processes_) {
     processes_->shutdown();
   }
+  if (db_pool_) {
+    db_pool_->stop();
+    db_pool_->join();
+  }
   if (pool_) {
     pool_->stop();
     pool_->join();
   }
+}
+
+void Host::async_op_begin() noexcept {
+  ++outstanding_async_;
+}
+
+void Host::async_op_end() noexcept {
+  if (outstanding_async_ > 0) {
+    --outstanding_async_;
+  }
+  if (outstanding_async_ == 0) {
+    notify_progress();
+  }
+}
+
+asio::awaitable<void> Host::wait_async_idle(std::chrono::milliseconds timeout) {
+  if (outstanding_async_ == 0) {
+    co_return;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (outstanding_async_ > 0) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      vacps::log::warn(
+          "wait_async_idle: {} op(s) still outstanding after {}ms",
+          outstanding_async_,
+          timeout.count());
+      co_return;
+    }
+    auto executor = co_await asio::this_coro::executor;
+    auto timer = std::make_shared<asio::steady_timer>(executor);
+    timer->expires_after(std::chrono::milliseconds(20));
+    progress_waiters_.push_back(timer);
+    auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
+    (void)ec;
+    progress_waiters_.remove(timer);
+  }
+  co_return;
 }
 
 void Host::cancel_host_async() noexcept {
@@ -186,12 +229,9 @@ asio::awaitable<VoidResult> Host::await_settled(Value& value) {
     }
     if (st == JS_PROMISE_REJECTED) {
       Value err_val{ctx, JS_PromiseResult(ctx, value.get())};
-      auto cs = CString::from_value(ctx, err_val.get());
-      if (cs.empty()) {
-        co_return std::unexpected(Error{"script promise rejected"});
-      }
+      const std::string detail = format_js_exception(ctx, err_val.get());
       co_return std::unexpected(
-          Error{std::format("script promise rejected: {}", cs.view())});
+          Error{std::format("script promise rejected: {}", detail)});
     }
     if (st == JS_PROMISE_FULFILLED) {
       value = Value{ctx, JS_PromiseResult(ctx, value.get())};
@@ -319,7 +359,6 @@ asio::awaitable<VoidResult> Host::shutdown_script() {
 }
 
 Result<std::shared_ptr<Host>> Host::create(
-    const Config& cfg,
     asio::io_context& ioc,
     HostOptions opts) {
   auto runtime = Runtime::create(opts.heap_limit_bytes, opts.stack_limit_bytes);
@@ -332,16 +371,13 @@ Result<std::shared_ptr<Host>> Host::create(
     return std::unexpected(std::move(context.error()));
   }
 
-  std::vector<std::string> roots = cfg.fs_allowed_roots;
-  roots.insert(roots.end(), opts.fs_extra_roots.begin(), opts.fs_extra_roots.end());
-  auto sandbox = vacps::fs::PathSandbox::create(cfg.data_dir, std::move(roots));
+  auto sandbox = vacps::fs::PathSandbox::create(opts.data_dir, opts.fs_extra_roots);
 
   auto host = std::shared_ptr<Host>(new Host(
       std::move(*runtime),
       std::move(*context),
       ioc,
-      cfg,
-      opts.js_time_budget,
+      std::move(opts),
       std::move(sandbox)));
 
   // Modules resolve Host via JS_GetContextOpaque.

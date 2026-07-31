@@ -3,8 +3,10 @@
 #include "fs/fs.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -246,6 +248,34 @@ bool is_kernel_filesystem(const std::filesystem::path& abs) noexcept {
     }
   }
   return false;
+}
+
+std::vector<std::string> fs_extra_roots_from_env() {
+  const char* raw = std::getenv("VACPS_FS_ALLOWED_ROOTS");
+  if (raw == nullptr || raw[0] == '\0') {
+    raw = std::getenv("FS_ALLOWED_ROOTS");
+  }
+  if (raw == nullptr || raw[0] == '\0') return {};
+  std::vector<std::string> out;
+  std::string_view sv{raw};
+  std::size_t start = 0;
+  while (start <= sv.size()) {
+    const auto pos = sv.find_first_of(":,\n", start);
+    const auto end = pos == std::string_view::npos ? sv.size() : pos;
+    auto part = sv.substr(start, end - start);
+    while (!part.empty() && (part.front() == ' ' || part.front() == '\t')) {
+      part.remove_prefix(1);
+    }
+    while (!part.empty() && (part.back() == ' ' || part.back() == '\t')) {
+      part.remove_suffix(1);
+    }
+    if (!part.empty() && part.front() == '/') {
+      out.emplace_back(part);
+    }
+    if (pos == std::string_view::npos) break;
+    start = pos + 1;
+  }
+  return out;
 }
 
 PathSandbox PathSandbox::create(

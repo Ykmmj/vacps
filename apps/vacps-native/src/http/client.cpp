@@ -1,6 +1,5 @@
 #include "http/client.hpp"
 
-#include "app/config.hpp"
 #include "app/log.hpp"
 
 #include <ada.h>
@@ -20,6 +19,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -180,11 +180,14 @@ Result<ParsedUrl> parse_url(std::string_view url) {
   if (port_sv.empty()) {
     out.port = (out.scheme == "https") ? "443" : "80";
   } else {
-    auto pr = vacps::parse_port(port_sv);
-    if (!pr) {
+    unsigned long n = 0;
+    const char* begin = port_sv.data();
+    const char* end = port_sv.data() + port_sv.size();
+    auto [ptr, ec] = std::from_chars(begin, end, n);
+    if (ec != std::errc{} || ptr != end || n == 0 || n > 65535) {
       return std::unexpected(Error{"http.request: invalid port"});
     }
-    out.port = std::to_string(*pr);
+    out.port = std::to_string(n);
   }
 
   // path + query only (fragment must not be sent).

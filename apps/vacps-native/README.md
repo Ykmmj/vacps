@@ -138,13 +138,14 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 Smoke after build:
 
 ```bash
-./apps/vacps-native/build/release/vacps-agent-linux-x86_64 \
-  --port 8788 --data-dir /tmp/vacps-data \
+VACPS_LISTEN_PORT=8788 ./apps/vacps-native/build/release/vacps-agent-linux-x86_64 \
+  --data-dir /tmp/vacps-data \
   --script apps/vacps-native/script/dist/vacps.mjs &
 curl -sS http://127.0.0.1:8788/health
 curl -sS http://127.0.0.1:8788/ready
 curl -sS http://127.0.0.1:8788/script/ping
 ```
+
 
 ## Layout
 

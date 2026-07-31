@@ -17,6 +17,24 @@ namespace vacps::crypto {
 [[nodiscard]] std::vector<std::uint8_t> sha256(std::string_view data);
 [[nodiscard]] std::vector<std::uint8_t> sha256(const std::vector<std::uint8_t>& data);
 
+/** Incremental SHA-256 (for streaming files / large buffers). */
+class Sha256 {
+ public:
+  Sha256();
+  Sha256(const Sha256&) = delete;
+  Sha256& operator=(const Sha256&) = delete;
+  Sha256(Sha256&&) noexcept;
+  Sha256& operator=(Sha256&&) noexcept;
+  ~Sha256();
+
+  void update(const std::uint8_t* data, std::size_t len);
+  void update(std::string_view data);
+  [[nodiscard]] std::vector<std::uint8_t> finalize();
+
+ private:
+  void* ctx_{nullptr};  // EVP_MD_CTX*
+};
+
 [[nodiscard]] std::string to_hex(const std::vector<std::uint8_t>& bytes);
 [[nodiscard]] Result<std::vector<std::uint8_t>> from_hex(std::string_view hex);
 

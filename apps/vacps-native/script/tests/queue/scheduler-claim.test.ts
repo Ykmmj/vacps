@@ -24,7 +24,7 @@ const task: CreateTaskInput = {
   },
 };
 
-function seed(
+async function seed(
   schedulers: SchedulerStore,
   opts: {
     id?: string;
@@ -35,9 +35,9 @@ function seed(
     enabled?: boolean;
     cron?: string;
   },
-) {
+): Promise<string> {
   const id = opts.id ?? '11111111-1111-4111-8111-111111111111';
-  schedulers.writeRow({
+  await schedulers.writeRow({
     id,
     cron: opts.cron ?? '0 * * * *',
     timezone: 'UTC',
@@ -55,51 +55,55 @@ function seed(
 }
 
 describe('claimAndEnqueue CAS + txn', () => {
-  it('claims once; second claim on same cursor misses', () => {
+  it('claims once; second claim on same cursor misses', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const tasks = new TaskStore(db);
-    const id = seed(schedulers, { nextRunAt: '2024-06-01T09:00:00.000Z' });
-    const s = schedulers.get(id)!;
+    const schedulers = await SchedulerStore.create(db);
+    const tasks = await TaskStore.create(db);
+    const id = await seed(schedulers, { nextRunAt: '2024-06-01T09:00:00.000Z' });
+    const s = (await schedulers.get(id))!;
     const nowMs = Date.parse('2024-06-01T09:00:30.000Z');
 
-    const insert = (slot: { occurrenceId: string; scheduledForMs: number; revision: number }) => {
+    const insert = async (slot: {
+      occurrenceId: string;
+      scheduledForMs: number;
+      revision: number;
+    }) => {
       const dispatch = {
         ...task,
         task_id: slot.occurrenceId,
         source: 'schedule',
         schedule_id: id,
       } as TaskDispatch;
-      tasks.insertOccurrenceTask(dispatch, {
+      await tasks.insertOccurrenceTask(dispatch, {
         scheduleId: id,
         scheduleRevision: slot.revision,
         scheduledForMs: slot.scheduledForMs,
       });
     };
 
-    const r1 = schedulers.claimAndEnqueue(s, nowMs, insert);
+    const r1 = await schedulers.claimAndEnqueue(s, nowMs, insert);
     expect(r1.claimed).toBe(true);
     expect(r1.slots).toHaveLength(1);
-    expect(tasks.getTask(r1.slots[0]!.occurrenceId)?.status).toBe('queued');
+    expect((await tasks.getTask(r1.slots[0]!.occurrenceId))?.status).toBe('queued');
 
-    const after = schedulers.get(id)!;
+    const after = (await schedulers.get(id))!;
     expect(after.nextRunAt).toBe('2024-06-01T10:00:00.000Z');
 
     // Re-read and try claim with stale cursor — CAS miss
-    const r2 = schedulers.claimAndEnqueue({ ...s, nextRunAt: s.nextRunAt }, nowMs, insert);
+    const r2 = await schedulers.claimAndEnqueue({ ...s, nextRunAt: s.nextRunAt }, nowMs, insert);
     expect(r2.claimed).toBe(false);
     expect(r2.reason).toBe('cas_miss');
 
     // Only one task
-    const rows = db.query('SELECT COUNT(*) AS c FROM tasks;');
+    const rows = await db.query('SELECT COUNT(*) AS c FROM tasks;');
     expect(Number(rows[0]!['c'])).toBe(1);
   });
 
-  it('same occurrence is idempotent (duplicate insert ok)', () => {
+  it('same occurrence is idempotent (duplicate insert ok)', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const tasks = new TaskStore(db);
-    const id = seed(schedulers, { nextRunAt: '2024-06-01T09:00:00.000Z' });
+    const schedulers = await SchedulerStore.create(db);
+    const tasks = await TaskStore.create(db);
+    const id = await seed(schedulers, { nextRunAt: '2024-06-01T09:00:00.000Z' });
     const ms = Date.parse('2024-06-01T09:00:00.000Z');
     const oid = occurrenceId(id, 1, ms);
     const dispatch = {
@@ -109,14 +113,14 @@ describe('claimAndEnqueue CAS + txn', () => {
       schedule_id: id,
     } as TaskDispatch;
     expect(
-      tasks.insertOccurrenceTask(dispatch, {
+      await tasks.insertOccurrenceTask(dispatch, {
         scheduleId: id,
         scheduleRevision: 1,
         scheduledForMs: ms,
       }),
     ).toBe(true);
     expect(
-      tasks.insertOccurrenceTask(dispatch, {
+      await tasks.insertOccurrenceTask(dispatch, {
         scheduleId: id,
         scheduleRevision: 1,
         scheduledForMs: ms,
@@ -124,31 +128,31 @@ describe('claimAndEnqueue CAS + txn', () => {
     ).toBe(false);
   });
 
-  it('insert failure rolls back cursor (simulated)', () => {
+  it('insert failure rolls back cursor (simulated)', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const id = seed(schedulers, { nextRunAt: '2024-06-01T09:00:00.000Z' });
-    const s = schedulers.get(id)!;
+    const schedulers = await SchedulerStore.create(db);
+    const id = await seed(schedulers, { nextRunAt: '2024-06-01T09:00:00.000Z' });
+    const s = (await schedulers.get(id))!;
     const nowMs = Date.parse('2024-06-01T09:05:00.000Z');
 
-    expect(() =>
-      schedulers.claimAndEnqueue(s, nowMs, () => {
+    await expect(
+      schedulers.claimAndEnqueue(s, nowMs, async () => {
         throw new Error('forced insert failure');
       }),
-    ).toThrow(/forced insert failure/);
+    ).rejects.toThrow(/forced insert failure/);
 
-    const after = schedulers.get(id)!;
+    const after = (await schedulers.get(id))!;
     expect(after.nextRunAt).toBe('2024-06-01T09:00:00.000Z');
   });
 
-  it('higher revision merge can move next earlier', () => {
+  it('higher revision merge can move next earlier', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const id = seed(schedulers, {
+    const schedulers = await SchedulerStore.create(db);
+    const id = await seed(schedulers, {
       nextRunAt: '2026-08-01T09:00:00.000Z',
       revision: 5,
     });
-    const ok = schedulers.upsertFromWire({
+    const ok = await schedulers.upsertFromWire({
       id,
       cron: '0 18 * * *',
       timezone: 'UTC',
@@ -159,18 +163,18 @@ describe('claimAndEnqueue CAS + txn', () => {
       nextRunAt: '2026-07-31T18:00:00.000Z',
     });
     expect(ok).toBe(true);
-    expect(schedulers.get(id)!.revision).toBe(6);
-    expect(schedulers.get(id)!.nextRunAt).toBe('2026-07-31T18:00:00.000Z');
+    expect((await schedulers.get(id))!.revision).toBe(6);
+    expect((await schedulers.get(id))!.nextRunAt).toBe('2026-07-31T18:00:00.000Z');
   });
 
-  it('same revision stale next does not rewind cursor', () => {
+  it('same revision stale next does not rewind cursor', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const id = seed(schedulers, {
+    const schedulers = await SchedulerStore.create(db);
+    const id = await seed(schedulers, {
       nextRunAt: '2026-08-01T09:00:00.000Z',
       revision: 5,
     });
-    schedulers.upsertFromWire({
+    await schedulers.upsertFromWire({
       id,
       cron: '0 9 * * *',
       timezone: 'UTC',
@@ -180,18 +184,18 @@ describe('claimAndEnqueue CAS + txn', () => {
       policy: DEFAULT_SCHEDULE_POLICY,
       nextRunAt: '2026-07-01T09:00:00.000Z',
     });
-    expect(schedulers.get(id)!.nextRunAt).toBe('2026-08-01T09:00:00.000Z');
+    expect((await schedulers.get(id))!.nextRunAt).toBe('2026-08-01T09:00:00.000Z');
   });
 
-  it('stale lower revision sync ignored', () => {
+  it('stale lower revision sync ignored', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const id = seed(schedulers, {
+    const schedulers = await SchedulerStore.create(db);
+    const id = await seed(schedulers, {
       nextRunAt: '2026-08-01T09:00:00.000Z',
       revision: 5,
       cron: '0 9 * * *',
     });
-    const ok = schedulers.upsertFromWire({
+    const ok = await schedulers.upsertFromWire({
       id,
       cron: '0 0 * * *',
       timezone: 'UTC',
@@ -202,19 +206,19 @@ describe('claimAndEnqueue CAS + txn', () => {
       nextRunAt: '2026-07-01T00:00:00.000Z',
     });
     expect(ok).toBe(false);
-    expect(schedulers.get(id)!.cron).toBe('0 9 * * *');
+    expect((await schedulers.get(id))!.cron).toBe('0 9 * * *');
   });
 
-  it('disabled schedule is not claimed; already queued tasks untouched', () => {
+  it('disabled schedule is not claimed; already queued tasks untouched', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const tasks = new TaskStore(db);
-    const id = seed(schedulers, {
+    const schedulers = await SchedulerStore.create(db);
+    const tasks = await TaskStore.create(db);
+    const id = await seed(schedulers, {
       nextRunAt: '2024-06-01T09:00:00.000Z',
       enabled: true,
     });
     // Pre-existing queued task
-    tasks.createTask(
+    await tasks.createTask(
       {
         ...task,
         task_id: 'manual-1',
@@ -224,7 +228,7 @@ describe('claimAndEnqueue CAS + txn', () => {
       'queued',
     );
 
-    schedulers.upsertFromWire({
+    await schedulers.upsertFromWire({
       id,
       cron: '0 * * * *',
       timezone: 'UTC',
@@ -235,23 +239,23 @@ describe('claimAndEnqueue CAS + txn', () => {
       nextRunAt: null,
     });
 
-    const s = schedulers.get(id)!;
-    const r = schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T10:00:00.000Z'), () => {
+    const s = (await schedulers.get(id))!;
+    const r = await schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T10:00:00.000Z'), async () => {
       throw new Error('should not insert');
     });
     expect(r.claimed).toBe(false);
     expect(r.reason).toBe('disabled');
-    expect(tasks.getTask('manual-1')?.status).toBe('queued');
+    expect((await tasks.getTask('manual-1'))?.status).toBe('queued');
   });
 
-  it('CAS compares raw next_run_at string (canonical writes)', () => {
+  it('CAS compares raw next_run_at string (canonical writes)', async () => {
     const db = openMemoryStore();
-    const schedulers = new SchedulerStore(db);
-    const id = seed(schedulers, { nextRunAt: '2024-06-01T09:00:00Z' }); // non-canonical input
-    const s = schedulers.get(id)!;
+    const schedulers = await SchedulerStore.create(db);
+    const id = await seed(schedulers, { nextRunAt: '2024-06-01T09:00:00Z' }); // non-canonical input
+    const s = (await schedulers.get(id))!;
     // writeRow canonicalizes
     expect(s.nextRunAt).toBe('2024-06-01T09:00:00.000Z');
-    const r = schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T09:01:00.000Z'), () => {
+    const r = await schedulers.claimAndEnqueue(s, Date.parse('2024-06-01T09:01:00.000Z'), async () => {
       /* no task */
     });
     expect(r.claimed).toBe(true);

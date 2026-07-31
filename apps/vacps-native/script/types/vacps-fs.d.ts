@@ -21,6 +21,17 @@ declare module 'vacps:fs' {
   export function writeText(path: string, data: string): Promise<void>;
   export function appendText(path: string, data: string): Promise<void>;
   export function readBytes(path: string): Promise<ArrayBuffer>;
+  /**
+   * Read at most `maxBytes` from `offset` without loading the whole file.
+   * Single-call cap is 16 MiB.
+   */
+  export function readRange(
+    path: string,
+    offset: number,
+    maxBytes: number,
+  ): Promise<ArrayBuffer>;
+  /** Streaming SHA-256 of the full file (does not return content). */
+  export function hashFile(path: string): Promise<{ sizeBytes: number; sha256Hex: string }>;
   export function writeBytes(path: string, data: ArrayBuffer | Uint8Array): Promise<void>;
 
   /** Metadata / dirs: always offloaded to Host thread_pool. */

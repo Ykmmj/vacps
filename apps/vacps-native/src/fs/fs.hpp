@@ -52,6 +52,22 @@ struct FileStat {
 
 [[nodiscard]] Result<std::string> read_text(const std::filesystem::path& path);
 [[nodiscard]] Result<std::vector<std::uint8_t>> read_bytes(const std::filesystem::path& path);
+
+/**
+ * Read at most `max_bytes` starting at `offset` (does not load the whole file).
+ * Short read at EOF is success with smaller vector.
+ */
+[[nodiscard]] Result<std::vector<std::uint8_t>> read_range(
+    const std::filesystem::path& path,
+    std::uint64_t offset,
+    std::size_t max_bytes);
+
+/** Streaming SHA-256 over the full file without buffering all content. */
+struct FileDigest {
+  std::uint64_t size_bytes{0};
+  std::string sha256_hex;
+};
+[[nodiscard]] Result<FileDigest> hash_file(const std::filesystem::path& path);
 [[nodiscard]] VoidResult write_text(const std::filesystem::path& path, std::string_view data);
 [[nodiscard]] VoidResult write_bytes(
     const std::filesystem::path& path,

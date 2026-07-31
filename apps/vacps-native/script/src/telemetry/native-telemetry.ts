@@ -42,7 +42,7 @@ export class NativeTelemetryCollector {
       this.diskMetrics(),
       this.networkMetrics(),
       this.systemInfo(),
-      Promise.resolve(this.queueMetrics()),
+      Promise.resolve(await this.queueMetrics()),
     ]);
 
     const metrics: BackendMetrics = {
@@ -68,7 +68,7 @@ export class NativeTelemetryCollector {
     };
   }
 
-  private queueMetrics(): BackendMetrics['queue'] {
+  private async queueMetrics(): Promise<BackendMetrics['queue']> {
     return this.store.queueCounts();
   }
 

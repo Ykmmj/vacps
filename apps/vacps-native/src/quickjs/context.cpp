@@ -1,6 +1,6 @@
 #include "quickjs/context.hpp"
 
-#include "quickjs/cstring.hpp"
+#include "quickjs/js_bridge.hpp"
 #include "quickjs/value.hpp"
 
 #include <string>
@@ -23,11 +23,7 @@ Error Context::take_exception_error() {
     return Error{"no js context"};
   }
   Value ex{ctx_, JS_GetException(ctx_)};
-  auto cs = CString::from_value(ctx_, ex.get());
-  if (cs.empty()) {
-    return Error{"js exception (unprintable)"};
-  }
-  return Error{cs.str()};
+  return Error{format_js_exception(ctx_, ex.get())};
 }
 
 Result<Value> Context::eval(

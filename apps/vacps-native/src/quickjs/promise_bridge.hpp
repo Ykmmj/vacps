@@ -18,6 +18,7 @@
 #include "app/error.hpp"
 #include "quickjs/convert.hpp"
 #include "quickjs/host.hpp"
+#include "quickjs/js_bridge.hpp"
 #include "quickjs/value.hpp"
 
 #include <boost/asio/awaitable.hpp>
@@ -67,11 +68,26 @@ class PromiseBridge {
 
   void reject(const Error& e) { reject_message(e.message); }
 
+  /** Reject with a JS Error object (name=Error, message=msg) so .stack / instanceof work. */
   void reject_message(std::string_view msg) {
     if (settled_ || ctx_ == nullptr) return;
+    Value err = make_js_error(ctx_, msg);
+    if (err.is_exception()) {
+      // Fallback to string if Error allocation fails.
+      settled_ = true;
+      Value m = converter<std::string>::to_js(ctx_, std::string{msg});
+      JSValueConst args[1] = {m.get()};
+      Value r{ctx_, JS_Call(ctx_, reject_.get(), JS_UNDEFINED, 1, args)};
+      swallow_call_exception(r);
+      return;
+    }
+    reject_value(std::move(err));
+  }
+
+  void reject_value(Value reason) {
+    if (settled_ || ctx_ == nullptr) return;
     settled_ = true;
-    Value m = converter<std::string>::to_js(ctx_, std::string{msg});
-    JSValueConst args[1] = {m.get()};
+    JSValueConst args[1] = {reason.get()};
     Value r{ctx_, JS_Call(ctx_, reject_.get(), JS_UNDEFINED, 1, args)};
     swallow_call_exception(r);
   }
@@ -118,6 +134,7 @@ JSValue spawn_js_promise(JSContext* ctx, Host* host, Work work) {
   Value reject{ctx, resolving[1]};
   auto host_sp = host->shared_from_this();
 
+  host->async_op_begin();
   // host_sp first in capture so it outlives resolve/reject Value free on abandon.
   boost::asio::co_spawn(
       host->ioc(),
@@ -127,10 +144,14 @@ JSValue spawn_js_promise(JSContext* ctx, Host* host, Work work) {
        reject = std::move(reject),
        work = std::move(work)]() mutable -> boost::asio::awaitable<void> {
         // Unconditional wake of await_settled — even if settle JS_Call fails.
+        // async_op_end pairs with async_op_begin in spawn_js_promise.
         struct NotifyGuard {
           std::shared_ptr<Host> host;
           ~NotifyGuard() {
-            if (host) host->notify_progress();
+            if (host) {
+              host->async_op_end();
+              host->notify_progress();
+            }
           }
         } notify_guard{host_sp};
 

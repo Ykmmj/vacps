@@ -15,20 +15,7 @@ import { createAgentSignatureHeaders } from '../security/request-signatures';
 export type RegistrationStatus = 'pending' | 'approved' | 'rejected' | 'unknown' | 'disabled';
 
 function bodyText(body: ArrayBuffer): string {
-  const u8 = new Uint8Array(body);
-  try {
-    const TD = (
-      globalThis as {
-        TextDecoder?: new (label?: string) => { decode(b: Uint8Array): string };
-      }
-    ).TextDecoder;
-    if (TD) return new TD('utf-8').decode(u8);
-  } catch {
-    /* fall through */
-  }
-  let s = '';
-  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]!);
-  return s;
+  return new TextDecoder('utf-8').decode(new Uint8Array(body));
 }
 
 /** POST /api/registrations — parity with apps/vacps registration module. */

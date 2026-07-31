@@ -35,7 +35,7 @@ import type { App } from './server/router';
 import { TaskStore } from './storage/task-store';
 import { NativeTelemetryCollector } from './telemetry/native-telemetry';
 
-type Store = ReturnType<typeof store.open>;
+type Store = Awaited<ReturnType<typeof store.open>>;
 type HttpServer = ReturnType<typeof http.createServer>;
 
 /**
@@ -67,20 +67,20 @@ export class Application {
       extraRoots: this.config.FS_ALLOWED_ROOTS,
     });
     const path = `${host.dataDir()}/agent.db`;
-    this.db = store.open(path);
-    this.store = new TaskStore(this.db);
+    this.db = await store.open(path);
+    this.store = await TaskStore.create(this.db);
     const executor = new ShellExecutor(this.store);
-    const schedulers = new SchedulerStore(this.db);
+    const schedulers = await SchedulerStore.create(this.db);
     this.queue = new TaskQueue(this.store, executor, schedulers);
     this.processes = new ProcessManager(this.config.BACKEND_ID);
     this.telemetry = new NativeTelemetryCollector(this.config, this.store);
 
-    const recovered = this.queue.recoverInterruptedOnBoot();
+    const recovered = await this.queue.recoverInterruptedOnBoot();
     if (recovered > 0) {
       log.warn(`crash recovery: marked ${recovered} running task(s) agent_restarted`);
     }
 
-    this.cpState = loadControlPlaneState(this.db);
+    this.cpState = await loadControlPlaneState(this.db);
     if (!this.cpState.telemetryIntervalSeconds) {
       this.cpState.telemetryIntervalSeconds = this.config.TELEMETRY_FALLBACK_INTERVAL_SECONDS;
     }
@@ -94,7 +94,11 @@ export class Application {
       isReady: () => this.ready,
     });
 
-    this.server = http.createServer();
+    // Bind address is agent policy (loadConfig / env) — C++ Server only gets options.
+    this.server = http.createServer({
+      host: this.config.LISTEN_HOST,
+      port: this.config.LISTEN_PORT,
+    });
     this.server.listen();
     this.ready = true;
 
@@ -106,7 +110,7 @@ export class Application {
       await this.runRegistration();
     } else {
       this.cpState = { ...this.cpState, registrationStatus: 'disabled' };
-      saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db, this.cpState);
     }
     this.nextTelemetryMs = host.nowMs() + 5_000;
   }
@@ -131,9 +135,9 @@ export class Application {
     try {
       const parsed = taskDispatchSchema.safeParse(JSON.parse(task.payload || '{}'));
       if (parsed.success) {
-        this.queue.enqueue(parsed.data);
+        await this.queue.enqueue(parsed.data);
         await this.queue.pumpOnce();
-        const done = this.queue.getTask(parsed.data.task_id);
+        const done = await this.queue.getTask(parsed.data.task_id);
         return {
           id: task.id,
           state:
@@ -166,7 +170,7 @@ export class Application {
       await this.runTelemetry();
     }
     // Absolute next_run_at claim → enqueue → best-effort CP occurrence ack → task pump
-    const fired = this.queue.fireDueSchedulers();
+    const fired = await this.queue.fireDueSchedulers();
     if (fired.acks.length > 0 && telemetryConfigured(this.config)) {
       for (const ack of fired.acks) {
         await reportScheduleOccurrenceAck(this.config, {
@@ -194,7 +198,7 @@ export class Application {
       this.server = undefined;
     }
     if (this.db) {
-      this.db.close();
+      await this.db.close();
       this.db = undefined;
     }
     this.store = undefined;
@@ -220,13 +224,13 @@ export class Application {
       };
       if (this.cpState.lastTelemetryAt) next.lastTelemetryAt = this.cpState.lastTelemetryAt;
       this.cpState = next;
-      saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db, this.cpState);
       this.nextRegistrationMs = host.nowMs() + this.config.REGISTRATION_INTERVAL_SECONDS * 1000;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log.warn(`registration failed: ${msg}`);
       this.cpState = { ...this.cpState, lastError: msg };
-      saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db, this.cpState);
       this.nextRegistrationMs =
         host.nowMs() + Math.min(this.config.REGISTRATION_INTERVAL_SECONDS, 60) * 1000;
     }
@@ -249,13 +253,13 @@ export class Application {
       if (this.cpState.lastRegistrationAt)
         next.lastRegistrationAt = this.cpState.lastRegistrationAt;
       this.cpState = next;
-      saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db, this.cpState);
       this.nextTelemetryMs = host.nowMs() + seconds * 1000;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log.warn(`telemetry failed: ${msg}`);
       this.cpState = { ...this.cpState, lastError: msg };
-      saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db, this.cpState);
       this.nextTelemetryMs = host.nowMs() + this.config.TELEMETRY_FALLBACK_INTERVAL_SECONDS * 1000;
     }
   }

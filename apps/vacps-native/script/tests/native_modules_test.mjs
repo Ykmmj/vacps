@@ -66,13 +66,6 @@ await test('host.dataDir', () => {
   assert(typeof d === 'string' && d.length > 0, 'dataDir set');
 });
 
-await test('host.listenHost/port', () => {
-  const h = host.listenHost();
-  const p = host.listenPort();
-  assert(typeof h === 'string' && h.length > 0, 'listenHost');
-  assert(typeof p === 'number' && p >= 1 && p <= 65535, 'listenPort in range');
-});
-
 await test('host.nowMs', () => {
   const t = host.nowMs();
   assert(typeof t === 'number' && t > 1_700_000_000_000, 'nowMs looks like unix ms');
@@ -95,32 +88,32 @@ await test('log levels + flush', () => {
 
 // ── vacps:store ───────────────────────────────────────────────────
 
-await test('store open/exec/run/query/close', () => {
+await test('store open/exec/run/query/close', async () => {
   const path = host.dataDir() + '/js_api_store.db';
-  const db = store.open(path);
+  const db = await store.open(path);
   assertEq(db.path(), path, 'path()');
-  db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, n REAL);');
-  const r = db.run('INSERT INTO t(name, n) VALUES(?, ?);', ['alice', 1.5]);
+  await db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, n REAL);');
+  const r = await db.run('INSERT INTO t(name, n) VALUES(?, ?);', ['alice', 1.5]);
   assert(r.changes === 1, 'changes=1');
   assert(typeof r.lastInsertRowid === 'number', 'lastInsertRowid');
-  const rows = db.query('SELECT id, name, n FROM t WHERE name = ?;', ['alice']);
+  const rows = await db.query('SELECT id, name, n FROM t WHERE name = ?;', ['alice']);
   assert(Array.isArray(rows) && rows.length === 1, 'one row');
   assertEq(rows[0].name, 'alice', 'name');
   assert(rows[0].n === 1.5 || rows[0].n === 1, 'n numeric');
-  db.close();
+  await db.close();
 });
 
-await test('store transaction rollback', () => {
-  const db = store.open(host.dataDir() + '/js_api_tx.db');
-  db.exec('CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT);');
-  db.run('INSERT INTO u(v) VALUES(?);', ['keep']);
-  db.begin();
-  db.run('INSERT INTO u(v) VALUES(?);', ['drop']);
-  db.rollback();
-  const rows = db.query('SELECT v FROM u;');
+await test('store transaction rollback', async () => {
+  const db = await store.open(host.dataDir() + '/js_api_tx.db');
+  await db.exec('CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT);');
+  await db.run('INSERT INTO u(v) VALUES(?);', ['keep']);
+  await db.begin();
+  await db.run('INSERT INTO u(v) VALUES(?);', ['drop']);
+  await db.rollback();
+  const rows = await db.query('SELECT v FROM u;');
   assertEq(rows.length, 1, 'only keep');
   assertEq(rows[0].v, 'keep', 'value');
-  db.close();
+  await db.close();
 });
 
 // ── vacps:fs ──────────────────────────────────────────────────────

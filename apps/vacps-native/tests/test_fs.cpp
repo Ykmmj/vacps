@@ -1,3 +1,4 @@
+#include "crypto/crypto.hpp"
 #include "fs/fs.hpp"
 
 #include <gtest/gtest.h>
@@ -69,6 +70,30 @@ TEST_F(FsTest, FileStatMetadata) {
   auto dst = vacps::fs::file_stat(root_);
   ASSERT_TRUE(dst) << dst.error().message;
   EXPECT_EQ(dst->type, "directory");
+}
+
+TEST_F(FsTest, ReadRangeAndHashFile) {
+  const auto f = root_ / "range.bin";
+  // 100 bytes: "0123456789" repeated 10 times
+  std::string payload;
+  for (int i = 0; i < 10; ++i) payload += "0123456789";
+  ASSERT_TRUE(vacps::fs::write_text(f, payload));
+
+  auto range = vacps::fs::read_range(f, 10, 5);
+  ASSERT_TRUE(range) << range.error().message;
+  ASSERT_EQ(range->size(), 5u);
+  EXPECT_EQ(std::string(range->begin(), range->end()), "01234");
+
+  auto past = vacps::fs::read_range(f, 1000, 10);
+  ASSERT_TRUE(past);
+  EXPECT_TRUE(past->empty());
+
+  auto dig = vacps::fs::hash_file(f);
+  ASSERT_TRUE(dig) << dig.error().message;
+  EXPECT_EQ(dig->size_bytes, 100u);
+  // sha256 of 100-byte payload
+  auto one_shot = vacps::crypto::sha256(payload);
+  EXPECT_EQ(dig->sha256_hex, vacps::crypto::to_hex(one_shot));
 }
 
 TEST_F(FsTest, WriteReadTextAndList) {

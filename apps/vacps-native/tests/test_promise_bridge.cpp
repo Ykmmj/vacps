@@ -1,4 +1,3 @@
-#include "app/config.hpp"
 #include "app/log.hpp"
 #include "quickjs/convert.hpp"
 #include "quickjs/host.hpp"
@@ -34,8 +33,7 @@ class PromiseBridgeTest : public ::testing::Test {
            std::to_string(::getpid()) /
            std::to_string(reinterpret_cast<std::uintptr_t>(this));
     fs::create_directories(dir_);
-    cfg_.data_dir = dir_.string();
-    cfg_.log_level = "off";
+    host_opts_.data_dir = dir_.string();
   }
 
   void TearDown() override {
@@ -43,13 +41,13 @@ class PromiseBridgeTest : public ::testing::Test {
     fs::remove_all(dir_, ec);
   }
 
-  vacps::Config cfg_{};
+  vacps::js::HostOptions host_opts_{};
   fs::path dir_;
 };
 
 TEST_F(PromiseBridgeTest, ResolveValueAndNotifyProgress) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
   auto* ctx = host->context().get();
@@ -103,7 +101,7 @@ TEST_F(PromiseBridgeTest, ResolveValueAndNotifyProgress) {
 
 TEST_F(PromiseBridgeTest, ExceptionRejectsPromise) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
   auto* ctx = host->context().get();
@@ -140,7 +138,7 @@ TEST_F(PromiseBridgeTest, ExceptionRejectsPromise) {
 
 TEST_F(PromiseBridgeTest, UnsettledWorkGetsDefensiveReject) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
   auto* ctx = host->context().get();
@@ -177,7 +175,7 @@ TEST_F(PromiseBridgeTest, UnsettledWorkGetsDefensiveReject) {
 
 TEST_F(PromiseBridgeTest, SettleOnceKeepsFirstResult) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
   auto* ctx = host->context().get();
@@ -225,7 +223,7 @@ TEST_F(PromiseBridgeTest, SettleOnceKeepsFirstResult) {
 
 TEST_F(PromiseBridgeTest, ExplicitRejectWithError) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
   auto* ctx = host->context().get();
@@ -263,7 +261,7 @@ TEST_F(PromiseBridgeTest, ExplicitRejectWithError) {
 
 TEST_F(PromiseBridgeTest, DrainJobsBudgetedCapsPerCall) {
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
   auto* ctx = host->context().get();
@@ -301,7 +299,7 @@ TEST_F(PromiseBridgeTest, DrainJobsBudgetedCapsPerCall) {
 TEST_F(PromiseBridgeTest, ProcessRunThroughBridgeStillWorks) {
   // Integration: real vacps:process path uses spawn_js_promise.
   asio::io_context ioc{1};
-  auto host_r = vacps::js::Host::create(cfg_, ioc);
+  auto host_r = vacps::js::Host::create(ioc, host_opts_);
   ASSERT_TRUE(host_r) << host_r.error().message;
   auto host = std::move(*host_r);
 

@@ -3,7 +3,7 @@
 #include "storage/db.hpp"
 #include "app/error.hpp"
 #include "quickjs/convert.hpp"
-#include "quickjs/host.hpp"
+#include "quickjs/cstring.hpp"
 #include "quickjs/value.hpp"
 
 #include <quickjs.h>
@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace vacps::js {
@@ -22,6 +23,84 @@ inline JSValue throw_msg(JSContext* ctx, const char* msg) {
 
 inline JSValue throw_error(JSContext* ctx, const Error& e) {
   return throw_msg(ctx, e.message.c_str());
+}
+
+/**
+ * Format a JS exception/rejection value for C++ Error::message.
+ * Prefer Error-like objects: name, message, and stack when present.
+ */
+inline std::string format_js_exception(JSContext* ctx, JSValueConst ex) {
+  if (ctx == nullptr) {
+    return "js exception (no context)";
+  }
+  std::string name;
+  std::string message;
+  std::string stack;
+  if (JS_IsObject(ex)) {
+    Value name_v = Value::get_property_str(ctx, ex, "name");
+    if (!name_v.is_nullish() && !name_v.is_exception()) {
+      auto cs = CString::from_value(ctx, name_v.get());
+      if (!cs.empty()) name = cs.str();
+    } else if (name_v.is_exception()) {
+      Value drop{ctx, JS_GetException(ctx)};
+      (void)drop;
+    }
+    Value msg_v = Value::get_property_str(ctx, ex, "message");
+    if (!msg_v.is_nullish() && !msg_v.is_exception()) {
+      auto cs = CString::from_value(ctx, msg_v.get());
+      if (!cs.empty()) message = cs.str();
+    } else if (msg_v.is_exception()) {
+      Value drop{ctx, JS_GetException(ctx)};
+      (void)drop;
+    }
+    Value stack_v = Value::get_property_str(ctx, ex, "stack");
+    if (!stack_v.is_nullish() && !stack_v.is_exception()) {
+      auto cs = CString::from_value(ctx, stack_v.get());
+      if (!cs.empty()) stack = cs.str();
+    } else if (stack_v.is_exception()) {
+      Value drop{ctx, JS_GetException(ctx)};
+      (void)drop;
+    }
+  }
+  if (message.empty()) {
+    auto cs = CString::from_value(ctx, ex);
+    if (!cs.empty()) {
+      message = cs.str();
+    }
+  }
+  if (message.empty()) {
+    message = "js exception (unprintable)";
+  }
+  std::string out;
+  if (!name.empty() && name != "Error") {
+    out = name + ": " + message;
+  } else {
+    out = std::move(message);
+  }
+  if (!stack.empty()) {
+    // QuickJS stack often already starts with "Error: msg\n    at ..."
+    if (stack.find(out) == 0) {
+      out = std::move(stack);
+    } else {
+      out.push_back('\n');
+      out += stack;
+    }
+  }
+  return out;
+}
+
+/** Build a JS Error object (name + message) for Promise rejections. */
+inline Value make_js_error(
+    JSContext* ctx,
+    std::string_view message,
+    std::string_view name = "Error") {
+  Value err{ctx, JS_NewError(ctx)};
+  if (err.is_exception()) {
+    return err;
+  }
+  err.set_property_str("message", Value::new_string(ctx, message));
+  err.set_property_str("name", Value::new_string(ctx, name));
+  return err;
 }
 
 /** Parse JS array of bind params → SqlValue list. */
