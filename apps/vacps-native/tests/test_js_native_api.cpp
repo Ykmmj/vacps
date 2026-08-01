@@ -76,6 +76,8 @@ TEST_F(JsNativeApiTest, AllNativeModules) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -87,7 +89,7 @@ TEST_F(JsNativeApiTest, AllNativeModules) {
       [rt, &ok, &err, &passed, &total, src, path = script_path.string()]()
           -> asio::awaitable<void> {
         auto* ctx = rt->context().get();
-        // Same as ScriptRuntime::load_and_initialize: COMPILE_ONLY → EvalFunction → namespace.
+        // Same as load_and_initialize (read + initialize_from_source): COMPILE_ONLY → EvalFunction → namespace.
         vacps::js::Value compiled{
             ctx,
             JS_Eval(

@@ -52,6 +52,8 @@ TEST_F(PromiseBridgeTest, ResolveValueAndNotifyProgress) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
   auto* ctx = rt->context().get();
 
   const auto gen0 = rt->progress_generation();
@@ -107,6 +109,8 @@ TEST_F(PromiseBridgeTest, ExceptionRejectsPromise) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
   auto* ctx = rt->context().get();
 
   bool rejected = false;
@@ -145,6 +149,8 @@ TEST_F(PromiseBridgeTest, UnsettledWorkGetsDefensiveReject) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
   auto* ctx = rt->context().get();
 
   bool rejected = false;
@@ -183,6 +189,8 @@ TEST_F(PromiseBridgeTest, SettleOnceKeepsFirstResult) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
   auto* ctx = rt->context().get();
 
   bool ok = false;
@@ -232,6 +240,8 @@ TEST_F(PromiseBridgeTest, ExplicitRejectWithError) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
   auto* ctx = rt->context().get();
 
   bool rejected = false;
@@ -270,6 +280,8 @@ TEST_F(PromiseBridgeTest, DrainJobsBudgetedCapsPerCall) {
   auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
+  ASSERT_TRUE(vacps::js::install_default_modules(**rt_r))
+      << "install_default_modules failed";
   auto host = std::move(*rt_r);
   auto* ctx = host->context().get();
   JSRuntime* qjs = host->runtime().get();
@@ -310,6 +322,8 @@ TEST_F(PromiseBridgeTest, ProcessRunThroughBridgeStillWorks) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -324,6 +338,66 @@ export default pr.exitCode;
       ioc,
       [rt, &ok, &err]() -> asio::awaitable<void> {
         auto mod = rt->eval_module(kMod, "<process-bridge>");
+        if (!mod) {
+          err = mod.error().message;
+          co_return;
+        }
+        auto settled = co_await rt->await_value(std::move(*mod));
+        if (!settled) {
+          err = settled.error().message;
+          co_return;
+        }
+        ok = true;
+        co_return;
+      },
+      asio::detached);
+
+  ioc.run();
+  ASSERT_TRUE(ok) << err;
+}
+
+TEST_F(PromiseBridgeTest, ProcessOptionsHonestyThrowsTypeError) {
+  // d.ts lists env / StdioMode; binding must not silently ignore unsupported values.
+  // - env → TypeError
+  // - stdin: "inherit" → TypeError
+  // - stdout / stderr non-pipe → TypeError
+  asio::io_context ioc{1};
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
+
+  bool ok = false;
+  std::string err;
+  static constexpr std::string_view kMod = R"js(
+import { Process } from "vacps:process";
+
+function mustThrow(fn, sub) {
+  let threw = false;
+  try { fn(); } catch (e) {
+    threw = true;
+    if (!String(e).includes(sub)) throw new Error("wrong error: " + e + " need " + sub);
+  }
+  if (!threw) throw new Error("expected throw containing " + sub);
+}
+
+mustThrow(() => new Process("/bin/true", [], { env: { A: "1" } }), "env");
+mustThrow(() => new Process("/bin/true", [], { stdin: "inherit" }), "inherit");
+mustThrow(() => new Process("/bin/true", [], { stdout: "inherit" }), "stdout");
+mustThrow(() => new Process("/bin/true", [], { stderr: "ignore" }), "stderr");
+// Supported values still construct.
+const p = new Process("/bin/true", [], { stdin: "ignore", stdout: "pipe" });
+if (!p) throw new Error("pipe construct failed");
+
+export default 1;
+)js";
+
+  asio::co_spawn(
+      ioc,
+      [rt, &ok, &err]() -> asio::awaitable<void> {
+        auto mod = rt->eval_module(kMod, "<process-opts-honesty>");
         if (!mod) {
           err = mod.error().message;
           co_return;

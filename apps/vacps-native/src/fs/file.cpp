@@ -10,6 +10,9 @@
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/redirect_error.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/error_code.hpp>
 #include <boost/system/system_error.hpp>
@@ -33,6 +36,23 @@ namespace {
 #if VACPS_FS_HAS_ASIO_FILE
 using AsioFile = asio::random_access_file;
 #endif
+
+/**
+ * Pick the base executor for this File's strand (lock wait queue).
+ * - Asio backend: ioc executor that owns random_access_file
+ * - Pool backend: host thread_pool (or system_executor when pool is null in tests)
+ */
+[[nodiscard]] asio::any_io_executor strand_base_executor(
+    asio::any_io_executor ex,
+    asio::thread_pool* pool) {
+  if (ex) {
+    return ex;
+  }
+  if (pool != nullptr) {
+    return pool->get_executor();
+  }
+  return asio::any_io_executor{asio::system_executor{}};
+}
 
 /**
  * Pool-backend open(2) bits. Flags values already match POSIX open flags on
@@ -95,7 +115,6 @@ struct File::AsioState {
 #endif
 };
 
-
 /** Pool-backend FD RAII — private to File (not a product surface). */
 struct File::PoolFd {
   explicit PoolFd(int fd) noexcept : fd_(fd) {}
@@ -132,28 +151,39 @@ File::File(
     PrivateTag,
     std::unique_ptr<PoolFd> fd,
     asio::thread_pool* pool,
+    asio::any_io_executor strand_ex,
     std::string display_path,
+    OpenMode open_mode,
     Flags flags)
     : use_asio_(false),
       pool_fd_(std::move(fd)),
       pool_(pool),
+      strand_(asio::make_strand(std::move(strand_ex))),
       display_path_(std::move(display_path)),
+      open_mode_(open_mode),
       flags_(flags) {}
 
 File::File(
     PrivateTag,
     std::unique_ptr<AsioState> asio_state,
     asio::thread_pool* pool,
+    asio::any_io_executor strand_ex,
     std::string display_path,
+    OpenMode open_mode,
     Flags flags)
     : use_asio_(true),
       asio_(std::move(asio_state)),
       pool_(pool),
+      strand_(asio::make_strand(std::move(strand_ex))),
       display_path_(std::move(display_path)),
+      open_mode_(open_mode),
       flags_(flags) {}
 
 File::~File() {
-  (void)close();
+  // Last shared_ptr is gone → no in-flight async op holds the File.
+  // Best-effort handle release without posting to strand (pool may be gone).
+  life_.store(Life::Closed, std::memory_order_release);
+  close_handles();
 }
 
 bool File::flags_append() const noexcept {
@@ -165,7 +195,39 @@ bool File::flags_append() const noexcept {
   return (static_cast<unsigned>(flags_) & append_bit) != 0;
 }
 
+Result<std::size_t> File::resolve_read_max(std::size_t max_bytes) {
+  if (max_bytes == (std::numeric_limits<std::size_t>::max)()) {
+    return kDefaultMaxReadBytes;
+  }
+  if (max_bytes > kHardMaxReadBytes) {
+    return std::unexpected(Error{std::format(
+        "read maxBytes exceeds hard limit ({} bytes / 64 MiB)",
+        kHardMaxReadBytes)});
+  }
+  return max_bytes;
+}
+
 Result<std::shared_ptr<File>> File::open(
+    FsExecutor& fs,
+    std::string_view path,
+    const OpenOptions& options,
+    const std::filesystem::path& relative_base) {
+  const std::filesystem::path& base =
+      relative_base.empty() ? fs.data_dir : relative_base;
+  return open_impl(
+      fs.ioc_executor, &fs.pool, fs.use_asio_file, path, options, base);
+}
+
+Result<std::shared_ptr<File>> File::open(
+    std::string_view path,
+    const OpenOptions& options,
+    const std::filesystem::path& relative_base) {
+  // Force pool backend (unit tests / sync helpers).
+  return open_impl(
+      asio::any_io_executor{}, nullptr, false, path, options, relative_base);
+}
+
+Result<std::shared_ptr<File>> File::open_impl(
     asio::any_io_executor ex,
     asio::thread_pool* pool_fallback,
     bool use_asio_file,
@@ -177,7 +239,11 @@ Result<std::shared_ptr<File>> File::open(
     return std::unexpected(std::move(abs.error()));
   }
 
-  if (flags_create(options.flags) && abs->has_parent_path()) {
+  // Domain: OpenMode → Asio Flags / POSIX open bits (not done in JS).
+  const Flags flags = flags_for_open_mode(options.mode);
+  const unsigned perms = effective_permissions(options);
+
+  if (open_mode_creates(options.mode) && abs->has_parent_path()) {
     std::error_code ec;
     std::filesystem::create_directories(abs->parent_path(), ec);
     // EEXIST is fine; other create_directories errors surface on open.
@@ -191,24 +257,27 @@ Result<std::shared_ptr<File>> File::open(
   // Never construct Asio file objects when use_asio_file is false (Docker
   // seccomp / no io_uring). open() path errors return immediately; only a
   // thrown system_error (late EPERM on io_uring) falls through to pool.
-  // Note: Asio open does not take OpenOptions::mode (Boost API).
+  // Note: Asio open does not take create permissions (Boost API).
 #if VACPS_FS_HAS_ASIO_FILE
   if (use_asio_file && ex) {
     try {
       auto state = std::make_unique<AsioState>(ex);
       boost::system::error_code ec;
-      state->file.open(abs->string(), options.flags, ec);
+      state->file.open(abs->string(), flags, ec);
       if (ec) {
         return std::unexpected(
             Error{std::format("open failed: {}", ec.message())});
       }
+      // Strand on the same ioc executor that owns the Asio file handle.
       // shared_ptr(new …): ctor is private; make_shared cannot access it.
       return std::shared_ptr<File>(new File(
           PrivateTag{},
           std::move(state),
           pool_fallback,
+          strand_base_executor(ex, pool_fallback),
           abs->string(),
-          options.flags));
+          options.mode,
+          flags));
     } catch (const boost::system::system_error&) {
       // Fall through to pool backend.
     }
@@ -220,72 +289,106 @@ Result<std::shared_ptr<File>> File::open(
 
   // ── Backend B: private FD + thread_pool offload ─────────────────
   // Always available on Linux; used when probe failed or Asio open threw.
-  // Applies OpenOptions::mode on create (unlike Asio open).
+  // Applies OpenOptions::permissions on create (unlike Asio open).
 #if defined(__linux__)
-  const int posix_flags = flags_to_posix(options.flags);
+  const int posix_flags = flags_to_posix(flags);
   const mode_t bits =
-      flags_create(options.flags) ? static_cast<mode_t>(options.mode) : static_cast<mode_t>(0);
+      open_mode_creates(options.mode) ? static_cast<mode_t>(perms) : static_cast<mode_t>(0);
   const int raw = ::open(abs->c_str(), posix_flags, bits);
   if (raw < 0) {
     return std::unexpected(
         Error{std::format("open failed: {}", std::strerror(errno))});
   }
+  // Strand on ioc executor when available (same as Asio path). Never put the
+  // exclusive-lock strand on fs_pool: co_await async_offload(pool) while the
+  // lock coroutine resumes on a pool strand can stall the only pool threads
+  // and hang Process/FS work that also needs the ioc (JsTasksTest.ExecAndFsRoutes).
   return std::shared_ptr<File>(new File(
       PrivateTag{},
       std::make_unique<PoolFd>(raw),
       pool_fallback,
+      strand_base_executor(ex, pool_fallback),
       abs->string(),
-      options.flags));
+      options.mode,
+      flags));
 #else
   (void)options;
   (void)pool_fallback;
+  (void)flags;
+  (void)perms;
   return std::unexpected(Error{"File::open requires Linux"});
 #endif
 }
 
 asio::awaitable<Result<std::shared_ptr<File>>> File::async_open(
-    AsyncOptions opts,
+    FsExecutor& fs,
     std::string path,
     OpenOptions options,
     std::filesystem::path relative_base) {
+  // Resolve default base once so pool offload captures a concrete path.
+  if (relative_base.empty() && !fs.data_dir.empty()) {
+    relative_base = fs.data_dir;
+  }
   // Asio backend must construct on the ioc executor (handle affinity).
-  if (opts.use_asio_file && opts.executor) {
-    co_return File::open(
-        opts.executor,
-        &opts.pool,
-        true,
-        path,
-        options,
-        relative_base);
+  if (fs.use_asio_file && fs.ioc_executor) {
+    co_return File::open(fs, path, options, relative_base);
   }
   // Pool backend: blocking open off the ioc.
   co_return co_await async_offload(
-      opts.pool,
+      fs.pool,
       [path = std::move(path),
        options,
        relative_base = std::move(relative_base),
-       pool = &opts.pool] {
-        return File::open(
-            asio::any_io_executor{}, pool, false, path, options, relative_base);
+       pool = &fs.pool] {
+        return File::open_impl(
+            asio::any_io_executor{},
+            pool,
+            false,
+            path,
+            options,
+            relative_base);
       });
 }
 
 VoidResult File::ensure_open() const {
-  if (closed()) {
+  if (life_.load(std::memory_order_acquire) != Life::Open) {
     return std::unexpected(Error{"file is closed"});
   }
   return {};
 }
 
 bool File::closed() const noexcept {
+  return life_.load(std::memory_order_acquire) == Life::Closed;
+}
+
+void File::close_handles() noexcept {
   if (use_asio_) {
 #if VACPS_FS_HAS_ASIO_FILE
-    return !asio_ || !asio_->file.is_open();
-#else
-    return true;
+    if (asio_ && asio_->file.is_open()) {
+      boost::system::error_code ec;
+      asio_->file.close(ec);
+      (void)ec;
+    }
 #endif
+    asio_.reset();
+    use_asio_ = false;
   }
-  return !pool_fd_ || !(*pool_fd_);
+  pool_fd_.reset();
+}
+
+VoidResult File::close_impl() {
+  // Serialize with pool I/O (mutex never held across co_await).
+  std::lock_guard lock(pool_mu_);
+  // Idempotent: already closed or another close owns the transition.
+  Life expected = Life::Open;
+  if (!life_.compare_exchange_strong(
+          expected, Life::Closing, std::memory_order_acq_rel, std::memory_order_acquire)) {
+    // Closing or Closed → treat as success (idempotent close).
+    return {};
+  }
+  close_handles();
+  life_.store(Life::Closed, std::memory_order_release);
+  return {};
 }
 
 Result<std::uint64_t> File::current_size() const {
@@ -303,6 +406,9 @@ Result<std::uint64_t> File::current_size() const {
   }
 #endif
 #if defined(__linux__)
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
+  }
   struct stat st{};
   if (::fstat(pool_fd_->get(), &st) != 0) {
     return std::unexpected(
@@ -317,8 +423,12 @@ Result<std::uint64_t> File::current_size() const {
 // ── Pool-backend sync I/O ─────────────────────────────────────────
 
 Result<std::vector<std::uint8_t>> File::pool_read(std::size_t max_bytes) {
+  std::lock_guard lock(pool_mu_);
   if (auto ok = ensure_open(); !ok) {
     return std::unexpected(std::move(ok.error()));
+  }
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
   }
   if (max_bytes == 0) {
     return std::vector<std::uint8_t>{};
@@ -346,8 +456,12 @@ Result<std::vector<std::uint8_t>> File::pool_read(std::size_t max_bytes) {
 Result<std::vector<std::uint8_t>> File::pool_read_at(
     std::uint64_t offset,
     std::size_t max_bytes) {
+  std::lock_guard lock(pool_mu_);
   if (auto ok = ensure_open(); !ok) {
     return std::unexpected(std::move(ok.error()));
+  }
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
   }
   if (max_bytes == 0) {
     return std::vector<std::uint8_t>{};
@@ -379,8 +493,12 @@ Result<std::vector<std::uint8_t>> File::pool_read_at(
 }
 
 Result<std::size_t> File::pool_write(std::span<const std::uint8_t> data) {
+  std::lock_guard lock(pool_mu_);
   if (auto ok = ensure_open(); !ok) {
     return std::unexpected(std::move(ok.error()));
+  }
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
   }
   std::size_t off = 0;
   while (off < data.size()) {
@@ -399,8 +517,12 @@ Result<std::size_t> File::pool_write(std::span<const std::uint8_t> data) {
 Result<std::size_t> File::pool_write_at(
     std::uint64_t offset,
     std::span<const std::uint8_t> data) {
+  std::lock_guard lock(pool_mu_);
   if (auto ok = ensure_open(); !ok) {
     return std::unexpected(std::move(ok.error()));
+  }
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
   }
   if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
     return std::unexpected(Error{"write_at offset out of range"});
@@ -423,21 +545,29 @@ Result<std::size_t> File::pool_write_at(
 }
 
 Result<std::vector<std::uint8_t>> File::read(std::size_t max_bytes) {
+  auto lim = resolve_read_max(max_bytes);
+  if (!lim) {
+    return std::unexpected(std::move(lim.error()));
+  }
   if (use_asio_) {
     return std::unexpected(
         Error{"File::read sync is pool-backend only; use async_read"});
   }
-  return pool_read(max_bytes);
+  return pool_read(*lim);
 }
 
 Result<std::vector<std::uint8_t>> File::read_at(
     std::uint64_t offset,
     std::size_t max_bytes) {
+  auto lim = resolve_read_max(max_bytes);
+  if (!lim) {
+    return std::unexpected(std::move(lim.error()));
+  }
   if (use_asio_) {
     return std::unexpected(
         Error{"File::read_at sync is pool-backend only; use async_read_at"});
   }
-  return pool_read_at(offset, max_bytes);
+  return pool_read_at(offset, *lim);
 }
 
 Result<std::size_t> File::write(std::span<const std::uint8_t> data) {
@@ -489,6 +619,9 @@ VoidResult File::truncate(std::uint64_t size) {
     return {};
   }
 #endif
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
+  }
   if (::ftruncate(pool_fd_->get(), static_cast<off_t>(size)) != 0) {
     return std::unexpected(
         Error{std::format("truncate failed: {}", std::strerror(errno))});
@@ -516,6 +649,9 @@ Result<FileStat> File::stat() {
   }
 #endif
 #if defined(__linux__)
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
+  }
   FileStat out = file_stat_from_fd(pool_fd_->get(), display_path_);
   if (out.type.empty()) {
     return std::unexpected(
@@ -541,6 +677,9 @@ VoidResult File::flush() {
     return {};
   }
 #endif
+  if (!pool_fd_ || !(*pool_fd_)) {
+    return std::unexpected(Error{"file is closed"});
+  }
   if (::fsync(pool_fd_->get()) != 0) {
     return std::unexpected(
         Error{std::format("fsync failed: {}", std::strerror(errno))});
@@ -549,23 +688,7 @@ VoidResult File::flush() {
 }
 
 VoidResult File::close() {
-  if (use_asio_) {
-#if VACPS_FS_HAS_ASIO_FILE
-    if (asio_ && asio_->file.is_open()) {
-      boost::system::error_code ec;
-      asio_->file.close(ec);
-      (void)ec;
-    }
-#endif
-    asio_.reset();
-    use_asio_ = false;
-    return {};
-  }
-  if (!pool_fd_) {
-    return {};
-  }
-  pool_fd_.reset();
-  return {};
+  return close_impl();
 }
 
 // ── Asio-backend async I/O ────────────────────────────────────────
@@ -678,31 +801,49 @@ asio::awaitable<Result<std::size_t>> File::asio_write_at(
 
 #endif
 
-// ── Public async dispatch ─────────────────────────────────────────
+// ── Public async dispatch (dual backend) ──────────────────────────
+//
+// Pool path: async_offload + pool_mu_ inside pool_* / close_impl (never hold
+// mutex across co_await). Asio path: ops co_await on ioc; life_ is atomic.
+// Do NOT use strand+max-timer exclusive locks — that hung JsTasksTest.ExecAndFsRoutes.
 
 asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read(
     std::size_t max_bytes) {
-  if (use_asio_) {
-    co_return co_await asio_read(max_bytes);
+  auto lim = resolve_read_max(max_bytes);
+  if (!lim) {
+    co_return std::unexpected(std::move(lim.error()));
   }
-  if (pool_ == nullptr) {
-    co_return read(max_bytes);
+  auto self = shared_from_this();
+  const std::size_t n = *lim;
+  if (self->use_asio_) {
+    co_return co_await self->asio_read(n);
   }
-  co_return co_await async_offload(
-      *pool_, [this, max_bytes] { return pool_read(max_bytes); });
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(*self->pool_, [self, n] {
+      return self->pool_read(n);
+    });
+  }
+  co_return self->pool_read(n);
 }
 
 asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read_at(
     std::uint64_t offset,
     std::size_t max_bytes) {
-  if (use_asio_) {
-    co_return co_await asio_read_at(offset, max_bytes);
+  auto lim = resolve_read_max(max_bytes);
+  if (!lim) {
+    co_return std::unexpected(std::move(lim.error()));
   }
-  if (pool_ == nullptr) {
-    co_return read_at(offset, max_bytes);
+  auto self = shared_from_this();
+  const std::size_t n = *lim;
+  if (self->use_asio_) {
+    co_return co_await self->asio_read_at(offset, n);
   }
-  co_return co_await async_offload(
-      *pool_, [this, offset, max_bytes] { return pool_read_at(offset, max_bytes); });
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(*self->pool_, [self, offset, n] {
+      return self->pool_read_at(offset, n);
+    });
+  }
+  co_return self->pool_read_at(offset, n);
 }
 
 asio::awaitable<Result<std::string>> File::async_read_text(std::size_t max_bytes) {
@@ -716,34 +857,37 @@ asio::awaitable<Result<std::string>> File::async_read_text(std::size_t max_bytes
 asio::awaitable<Result<std::size_t>> File::async_write(
     std::span<const std::uint8_t> data) {
   std::vector<std::uint8_t> owned(data.begin(), data.end());
-  if (use_asio_) {
-    co_return co_await asio_write(std::move(owned));
+  auto self = shared_from_this();
+  if (self->use_asio_) {
+    co_return co_await self->asio_write(std::move(owned));
   }
-  if (pool_ == nullptr) {
-    co_return pool_write(std::span<const std::uint8_t>(owned.data(), owned.size()));
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(*self->pool_, [self, owned = std::move(owned)] {
+      return self->pool_write(
+          std::span<const std::uint8_t>(owned.data(), owned.size()));
+    });
   }
-  co_return co_await async_offload(
-      *pool_, [this, owned = std::move(owned)] {
-        return pool_write(std::span<const std::uint8_t>(owned.data(), owned.size()));
-      });
+  co_return self->pool_write(
+      std::span<const std::uint8_t>(owned.data(), owned.size()));
 }
 
 asio::awaitable<Result<std::size_t>> File::async_write_at(
     std::uint64_t offset,
     std::span<const std::uint8_t> data) {
   std::vector<std::uint8_t> owned(data.begin(), data.end());
-  if (use_asio_) {
-    co_return co_await asio_write_at(offset, std::move(owned));
+  auto self = shared_from_this();
+  if (self->use_asio_) {
+    co_return co_await self->asio_write_at(offset, std::move(owned));
   }
-  if (pool_ == nullptr) {
-    co_return pool_write_at(
-        offset, std::span<const std::uint8_t>(owned.data(), owned.size()));
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(
+        *self->pool_, [self, offset, owned = std::move(owned)] {
+          return self->pool_write_at(
+              offset, std::span<const std::uint8_t>(owned.data(), owned.size()));
+        });
   }
-  co_return co_await async_offload(
-      *pool_, [this, offset, owned = std::move(owned)] {
-        return pool_write_at(
-            offset, std::span<const std::uint8_t>(owned.data(), owned.size()));
-      });
+  co_return self->pool_write_at(
+      offset, std::span<const std::uint8_t>(owned.data(), owned.size()));
 }
 
 asio::awaitable<Result<std::size_t>> File::async_write_text(std::string data) {
@@ -752,43 +896,51 @@ asio::awaitable<Result<std::size_t>> File::async_write_text(std::string data) {
 }
 
 asio::awaitable<VoidResult> File::async_truncate(std::uint64_t size) {
-  if (use_asio_) {
-    co_return truncate(size);
+  auto self = shared_from_this();
+  if (self->use_asio_) {
+    co_return self->truncate(size);
   }
-  if (pool_ == nullptr) {
-    co_return truncate(size);
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(*self->pool_, [self, size] {
+      return self->truncate(size);
+    });
   }
-  co_return co_await async_offload(*pool_, [this, size] { return truncate(size); });
+  co_return self->truncate(size);
 }
 
 asio::awaitable<Result<FileStat>> File::async_stat() {
-  if (use_asio_) {
-    co_return stat();
+  auto self = shared_from_this();
+  if (self->use_asio_) {
+    co_return self->stat();
   }
-  if (pool_ == nullptr) {
-    co_return stat();
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(*self->pool_, [self] { return self->stat(); });
   }
-  co_return co_await async_offload(*pool_, [this] { return stat(); });
+  co_return self->stat();
 }
 
 asio::awaitable<VoidResult> File::async_flush() {
-  if (use_asio_) {
-    co_return flush();
+  auto self = shared_from_this();
+  if (self->use_asio_) {
+    co_return self->flush();
   }
-  if (pool_ == nullptr) {
-    co_return flush();
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(*self->pool_, [self] { return self->flush(); });
   }
-  co_return co_await async_offload(*pool_, [this] { return flush(); });
+  co_return self->flush();
 }
 
 asio::awaitable<VoidResult> File::async_close() {
-  if (use_asio_) {
-    co_return close();
+  auto self = shared_from_this();
+  if (self->use_asio_) {
+    co_return self->close_impl();
   }
-  if (pool_ == nullptr) {
-    co_return close();
+  if (self->pool_ != nullptr) {
+    co_return co_await async_offload(*self->pool_, [self] {
+      return self->close_impl();
+    });
   }
-  co_return co_await async_offload(*pool_, [this] { return close(); });
+  co_return self->close_impl();
 }
 
 }  // namespace vacps::fs

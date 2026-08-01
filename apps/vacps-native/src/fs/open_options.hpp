@@ -1,19 +1,22 @@
 #pragma once
 
 /**
- * Open flags for vacps::fs::File — Boost.Asio file_base bitmask (Node-like
- * bitwise OR of integer constants), not string open modes.
+ * Open modes and options for vacps::fs::File.
  *
- * On Linux with BOOST_ASIO_HAS_FILE, Flags is asio::file_base::flags (numeric
- * values match POSIX open flags). Without Asio file support, a compatible
- * bitmask enum keeps the same public API shape.
+ * Primary public API is string OpenMode ("read" | "read-write" | …).
+ * Mapping OpenMode → Asio Flags / POSIX open bits happens inside File::open
+ * (domain), not in JS bindings.
  *
- * JS passes vacps:fs numeric constants (O_* exports); bindings use
- * flags_from_int. No path policy / allowlist here. System open/fcntl is
- * implementation detail of File, not this header.
+ * Flags (Asio file_base bitmask) remain an internal dual-backend detail.
  */
 
+#include "app/error.hpp"
+
 #include <boost/asio/detail/config.hpp>
+
+#include <cstdint>
+#include <optional>
+#include <string_view>
 
 #if defined(BOOST_ASIO_HAS_FILE)
 #include <boost/asio/file_base.hpp>
@@ -23,6 +26,54 @@ namespace vacps::fs {
 
 namespace asio = boost::asio;
 
+// ── Public open mode (JS string union) ────────────────────────────
+
+/**
+ * File open modes — primary C++ / JS API.
+ *
+ * Mapping (POSIX / Asio flags):
+ * - read         → O_RDONLY
+ * - read_write   → O_RDWR
+ * - write        → O_WRONLY | O_CREAT | O_TRUNC
+ * - write_new    → O_WRONLY | O_CREAT | O_EXCL
+ * - append       → O_WRONLY | O_CREAT | O_APPEND
+ * - append_read  → O_RDWR   | O_CREAT | O_APPEND
+ */
+enum class OpenMode {
+  read,
+  read_write,
+  write,
+  write_new,
+  append,
+  append_read,
+};
+
+struct OpenOptions {
+  OpenMode mode{OpenMode::read};
+  /**
+   * Permission bits when the mode creates the file (pool-backend open(2)).
+   * Default 0644 when unset. Asio random_access_file::open has no mode
+   * parameter — library default applies on that backend.
+   */
+  std::optional<std::uint32_t> permissions{};
+};
+
+/** Parse JS/API mode string → OpenMode ("read", "read-write", …). */
+[[nodiscard]] Result<OpenMode> open_mode_from_string(std::string_view s);
+
+/** Stable string form matching JS FileOpenMode. */
+[[nodiscard]] const char* open_mode_to_string(OpenMode mode) noexcept;
+
+/** Effective create mode bits (default 0644). */
+[[nodiscard]] inline unsigned effective_permissions(const OpenOptions& opts) noexcept {
+  return opts.permissions.value_or(0644u);
+}
+
+/** True when OpenMode implies O_CREAT. */
+[[nodiscard]] bool open_mode_creates(OpenMode mode) noexcept;
+
+// ── Internal Flags (dual-backend Asio / POSIX bitmask) ────────────
+
 #if defined(BOOST_ASIO_HAS_FILE)
 
 using Flags = asio::file_base::flags;
@@ -31,8 +82,7 @@ using Flags = asio::file_base::flags;
 
 /**
  * Compatible bitmask when Asio file support is not compiled in.
- * Numeric values match Linux open flags so flags_from_int / JS O_* stay stable.
- * No system headers in this public header.
+ * Numeric values match Linux open flags. Not part of the JS surface.
  */
 enum class Flags : int {
   read_only = 0,
@@ -58,31 +108,12 @@ inline Flags& operator|=(Flags& a, Flags b) noexcept {
 
 #endif
 
-struct OpenOptions {
-  /** e.g. Flags::write_only | Flags::create | Flags::truncate. */
-  Flags flags{
-#if defined(BOOST_ASIO_HAS_FILE)
-      asio::file_base::read_only
-#else
-      Flags::read_only
-#endif
-  };
-  /**
-   * Permission bits when create is set.
-   *
-   * Applied on the **pool** backend (`open(2)` third argument). The **Asio**
-   * backend (`random_access_file::open`) has no mode parameter in current
-   * Boost.Asio — it uses the library default for O_CREAT. That asymmetry is
-   * an Asio API limit under the intentional dual-backend design (see File),
-   * not a reason to drop either backend.
-   */
-  unsigned mode{0644};
-};
+/** Map OpenMode → Asio/POSIX Flags (domain mapping for File::open). */
+[[nodiscard]] Flags flags_for_open_mode(OpenMode mode) noexcept;
 
 /** True when flags include create. */
 [[nodiscard]] bool flags_create(Flags flags) noexcept;
 
-/** Cast a raw bitmask (e.g. from JS number) to Flags. */
 [[nodiscard]] inline Flags flags_from_int(int bits) noexcept {
   return static_cast<Flags>(bits);
 }

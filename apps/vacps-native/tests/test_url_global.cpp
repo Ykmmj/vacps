@@ -27,6 +27,8 @@ TEST_F(UrlGlobalTest, ParsesAbsoluteHttpsAndRejectsGarbage) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   // Valid absolute URL (managed-tunnel style hostname).
   auto ok = rt->eval(
@@ -60,6 +62,8 @@ TEST_F(UrlGlobalTest, RelativeWithBase) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   auto r = rt->eval(
       R"js(
@@ -82,6 +86,8 @@ TEST_F(UrlGlobalTest, LiveSearchParamsBidirectional) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   auto r = rt->eval(
       R"js(
@@ -134,5 +140,202 @@ TEST_F(UrlGlobalTest, LiveSearchParamsBidirectional) {
         'ok';
       )js",
       "url-live-search.js");
+  ASSERT_TRUE(r) << r.error().message;
+}
+
+TEST_F(UrlGlobalTest, UsernamePasswordGetters) {
+  asio::io_context ioc{1};
+  vacps::js::EngineOptions engine_opts{};
+  vacps::js::ScriptServicesOptions services_opts;
+  services_opts.data_dir = "/tmp/vacps-url-userpass";
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts);
+
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
+
+  auto r = rt->eval(
+      R"js(
+        const u = new URL('https://alice:s3cret@example.com:8443/p');
+        if (u.username !== 'alice') throw new Error('username ' + u.username);
+        if (u.password !== 's3cret') throw new Error('password ' + u.password);
+        if (u.port !== '8443') throw new Error('port ' + u.port);
+        const bare = new URL('https://example.com/');
+        if (bare.username !== '') throw new Error('empty user');
+        if (bare.password !== '') throw new Error('empty pass');
+        'ok';
+      )js",
+      "url-userpass.js");
+  ASSERT_TRUE(r) << r.error().message;
+}
+
+TEST_F(UrlGlobalTest, SearchParamsForEachAndIterators) {
+  asio::io_context ioc{1};
+  vacps::js::EngineOptions engine_opts{};
+  vacps::js::ScriptServicesOptions services_opts;
+  services_opts.data_dir = "/tmp/vacps-url-iter";
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts);
+
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
+
+  auto r = rt->eval(
+      R"js(
+        const sp = new URLSearchParams('a=1&b=2&a=3');
+        if (sp.size !== 3) throw new Error('size ' + sp.size);
+
+        // forEach(value, name, parent) WHATWG order
+        const seen = [];
+        sp.forEach(function (value, name, parent) {
+          if (parent !== sp) throw new Error('forEach parent');
+          seen.push(name + '=' + value);
+        });
+        if (seen.join(',') !== 'a=1,b=2,a=3') {
+          throw new Error('forEach ' + seen.join(','));
+        }
+
+        // keys / values / entries
+        const keys = [];
+        for (const k of sp.keys()) keys.push(k);
+        if (keys.join(',') !== 'a,b,a') throw new Error('keys ' + keys.join(','));
+
+        const vals = [];
+        for (const v of sp.values()) vals.push(v);
+        if (vals.join(',') !== '1,2,3') throw new Error('values ' + vals.join(','));
+
+        const entries = [];
+        for (const [k, v] of sp.entries()) entries.push(k + '=' + v);
+        if (entries.join(',') !== 'a=1,b=2,a=3') {
+          throw new Error('entries ' + entries.join(','));
+        }
+
+        // Symbol.iterator === entries semantics (for-of on sp)
+        const viaForOf = [];
+        for (const pair of sp) {
+          viaForOf.push(pair[0] + '=' + pair[1]);
+        }
+        if (viaForOf.join(',') !== 'a=1,b=2,a=3') {
+          throw new Error('for-of ' + viaForOf.join(','));
+        }
+
+        // Iterator protocol object shape
+        const it = sp.entries();
+        const first = it.next();
+        if (first.done !== false || first.value[0] !== 'a' || first.value[1] !== '1') {
+          throw new Error('next first ' + JSON.stringify(first));
+        }
+        it.next();
+        it.next();
+        const end = it.next();
+        if (end.done !== true) throw new Error('next end');
+
+        // Live: for-of after mutation on url.searchParams
+        const url = new URL('https://x.test/?x=1');
+        url.searchParams.append('y', '2');
+        const live = [];
+        for (const [k, v] of url.searchParams) live.push(k + '=' + v);
+        if (live.join(',') !== 'x=1,y=2') throw new Error('live for-of ' + live.join(','));
+        if (!url.search.includes('y=2')) throw new Error('live search ' + url.search);
+
+        'ok';
+      )js",
+      "url-iter.js");
+  ASSERT_TRUE(r) << r.error().message;
+}
+
+TEST_F(UrlGlobalTest, TextEncoderReturnsUint8Array) {
+  asio::io_context ioc{1};
+  vacps::js::EngineOptions engine_opts{};
+  vacps::js::ScriptServicesOptions services_opts;
+  services_opts.data_dir = "/tmp/vacps-text-encoder";
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts);
+
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
+
+  // encoding.d.ts: encode(input?: string): Uint8Array (not bare ArrayBuffer).
+  auto r = rt->eval(
+      R"js(
+        const enc = new TextEncoder();
+        if (enc.encoding !== 'utf-8') throw new Error('encoding ' + enc.encoding);
+        const u = enc.encode('hi');
+        if (!(u instanceof Uint8Array)) {
+          throw new Error('expected Uint8Array got ' + Object.prototype.toString.call(u));
+        }
+        if (u.length !== 2 || u[0] !== 0x68 || u[1] !== 0x69) {
+          throw new Error('bytes ' + Array.from(u));
+        }
+        const empty = enc.encode();
+        if (!(empty instanceof Uint8Array) || empty.length !== 0) {
+          throw new Error('empty encode');
+        }
+
+        // encodeInto: never split multi-byte; WHATWG {read, written}.
+        const dest = new Uint8Array(1);
+        dest[0] = 0xFF;
+        const partial = enc.encodeInto('é', dest);
+        if (partial.read !== 0 || partial.written !== 0 || dest[0] !== 0xFF) {
+          throw new Error('encodeInto partial ' + JSON.stringify(partial) + ' dest=' + dest[0]);
+        }
+        const dest2 = new Uint8Array(2);
+        const full = enc.encodeInto('é', dest2);
+        if (full.read !== 1 || full.written !== 2 || dest2[0] !== 0xC3 || dest2[1] !== 0xA9) {
+          throw new Error('encodeInto full ' + JSON.stringify(full) + ' ' + Array.from(dest2));
+        }
+        'ok';
+      )js",
+      "text-encoder.js");
+  ASSERT_TRUE(r) << r.error().message;
+}
+
+TEST_F(UrlGlobalTest, TextDecoderIgnoreBomTrueFalse) {
+  asio::io_context ioc{1};
+  vacps::js::EngineOptions engine_opts{};
+  vacps::js::ScriptServicesOptions services_opts;
+  services_opts.data_dir = "/tmp/vacps-text-decoder-bom";
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts);
+
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
+
+  // WHATWG: ignoreBOM=false (default) consumes leading BOM;
+  // ignoreBOM=true keeps U+FEFF as a character.
+  auto r = rt->eval(
+      R"js(
+        const bom = new Uint8Array([0xEF, 0xBB, 0xBF, 0x61]); // BOM + 'a'
+        const strip = new TextDecoder('utf-8', { ignoreBOM: false });
+        if (strip.ignoreBOM !== false) throw new Error('ignoreBOM prop false');
+        const s1 = strip.decode(bom);
+        if (s1 !== 'a') throw new Error('default strip got ' + JSON.stringify(s1));
+
+        const keep = new TextDecoder('utf-8', { ignoreBOM: true });
+        if (keep.ignoreBOM !== true) throw new Error('ignoreBOM prop true');
+        const s2 = keep.decode(bom);
+        if (s2.length !== 2 || s2.charCodeAt(0) !== 0xFEFF || s2.charAt(1) !== 'a') {
+          throw new Error('keep BOM got codes ' +
+            Array.from(s2).map(c => c.charCodeAt(0)).join(','));
+        }
+
+        // Streaming: partial BOM must not be committed until 3 bytes available.
+        const stream = new TextDecoder('utf-8');
+        const p1 = stream.decode(new Uint8Array([0xEF, 0xBB]), { stream: true });
+        if (p1 !== '') throw new Error('partial stream ' + JSON.stringify(p1));
+        const p2 = stream.decode(new Uint8Array([0xBF, 0x62])); // BOM complete + 'b'
+        if (p2 !== 'b') throw new Error('stream strip got ' + JSON.stringify(p2));
+
+        'ok';
+      )js",
+      "text-decoder-bom.js");
   ASSERT_TRUE(r) << r.error().message;
 }

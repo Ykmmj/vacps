@@ -3,15 +3,35 @@
  *
  * Surface: class Process + run(command, args?, options?).
  * JS Process object is the resource handle (no registry id API).
+ *
+ * ProcessOptions honesty (binding throws TypeError for unsupported values):
+ * - env: not implemented — omit; providing `env` throws.
+ * - stdin: 'pipe' | 'ignore' only; 'inherit' throws (no silent ignore).
+ * - stdout / stderr: always piped + captured; only 'pipe' (or omit) accepted;
+ *   'inherit' | 'ignore' throw.
  */
 declare module 'vacps:process' {
   export type StdioMode = 'pipe' | 'inherit' | 'ignore';
 
   export interface ProcessOptions {
     readonly cwd?: string;
+    /**
+     * Custom child environment is not supported. Providing this property
+     * throws TypeError at construct / run (see module header).
+     */
     readonly env?: Readonly<Record<string, string>>;
+    /**
+     * 'pipe' (default for Process handle) keeps stdin open for write();
+     * 'ignore' closes stdin after spawn. 'inherit' is unsupported → TypeError.
+     */
     readonly stdin?: StdioMode;
+    /**
+     * Always a capture pipe today. Only 'pipe' or omit; other modes → TypeError.
+     */
     readonly stdout?: StdioMode;
+    /**
+     * Always a capture pipe today. Only 'pipe' or omit; other modes → TypeError.
+     */
     readonly stderr?: StdioMode;
     /** Kill after this many ms (0 / omit = no timeout). */
     readonly timeoutMs?: number;

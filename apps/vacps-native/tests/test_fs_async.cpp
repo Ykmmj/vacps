@@ -1,4 +1,5 @@
 #include "fs/async.hpp"
+#include "fs/executor.hpp"
 #include "fs/file.hpp"
 #include "fs/open_options.hpp"
 
@@ -20,7 +21,7 @@ namespace asio = boost::asio;
 namespace fs = std::filesystem;
 using vacps::Result;
 using vacps::VoidResult;
-using vacps::fs::Flags;
+using vacps::fs::OpenMode;
 
 namespace {
 
@@ -41,16 +42,15 @@ auto sync_await(Awaitable aw) {
 }
 
 asio::awaitable<VoidResult> async_write_text_via_file(
-    vacps::fs::AsyncOptions opts,
+    vacps::fs::FsExecutor& fs,
     fs::path path,
     std::string data,
     bool append = false) {
-  vacps::fs::OpenOptions o;
-  o.flags = append
-                ? (Flags::write_only | Flags::create | Flags::append)
-                : (Flags::write_only | Flags::create | Flags::truncate);
+  vacps::fs::OpenOptions o{
+      .mode = append ? OpenMode::append : OpenMode::write,
+  };
   auto opened = co_await vacps::fs::File::async_open(
-      opts, path.string(), o, path.parent_path());
+      fs, path.string(), o, path.parent_path());
   if (!opened) co_return std::unexpected(std::move(opened.error()));
   auto n = co_await (*opened)->async_write_text(std::move(data));
   if (!n) co_return std::unexpected(std::move(n.error()));
@@ -58,12 +58,11 @@ asio::awaitable<VoidResult> async_write_text_via_file(
 }
 
 asio::awaitable<Result<std::string>> async_read_text_via_file(
-    vacps::fs::AsyncOptions opts,
+    vacps::fs::FsExecutor& fs,
     fs::path path) {
-  vacps::fs::OpenOptions o;
-  o.flags = Flags::read_only;
+  vacps::fs::OpenOptions o{.mode = OpenMode::read};
   auto opened = co_await vacps::fs::File::async_open(
-      opts, path.string(), o, path.parent_path());
+      fs, path.string(), o, path.parent_path());
   if (!opened) co_return std::unexpected(std::move(opened.error()));
   auto text = co_await (*opened)->async_read_text();
   if (!text) co_return std::unexpected(std::move(text.error()));
@@ -90,22 +89,33 @@ class FsAsyncTest : public ::testing::Test {
 
   vacps::fs::AsyncOptions opts() { return vacps::fs::AsyncOptions{pool_}; }
 
+  vacps::fs::FsExecutor fs_exec() {
+    return vacps::fs::FsExecutor{
+        asio::any_io_executor{},
+        pool_,
+        false,
+        root_,
+    };
+  }
+
   fs::path root_;
   asio::thread_pool pool_{2};
 };
 
 TEST_F(FsAsyncTest, WriteReadTextRoundTripPool) {
   const auto path = root_ / "a.txt";
+  auto fs = fs_exec();
   auto w = sync_await(
-      async_write_text_via_file(opts(), path, std::string{"hello-async"}));
+      async_write_text_via_file(fs, path, std::string{"hello-async"}));
   ASSERT_TRUE(w) << w.error().message;
 
-  auto r = sync_await(async_read_text_via_file(opts(), path));
+  auto r = sync_await(async_read_text_via_file(fs, path));
   ASSERT_TRUE(r) << r.error().message;
   EXPECT_EQ(*r, "hello-async");
 
   auto ex = sync_await(vacps::fs::async_exists(opts(), path));
-  EXPECT_TRUE(ex);
+  ASSERT_TRUE(ex) << ex.error().message;
+  EXPECT_TRUE(*ex);
 }
 
 TEST_F(FsAsyncTest, AppendListRemove) {
@@ -114,12 +124,13 @@ TEST_F(FsAsyncTest, AppendListRemove) {
   ASSERT_TRUE(m) << m.error().message;
 
   const auto path = dir / "b.txt";
+  auto fs = fs_exec();
   ASSERT_TRUE(sync_await(
-      async_write_text_via_file(opts(), path, std::string{"x"})));
+      async_write_text_via_file(fs, path, std::string{"x"})));
   ASSERT_TRUE(sync_await(
-      async_write_text_via_file(opts(), path, std::string{"y"}, true)));
+      async_write_text_via_file(fs, path, std::string{"y"}, true)));
 
-  auto text = sync_await(async_read_text_via_file(opts(), path));
+  auto text = sync_await(async_read_text_via_file(fs, path));
   ASSERT_TRUE(text);
   EXPECT_EQ(*text, "xy");
 
@@ -130,17 +141,50 @@ TEST_F(FsAsyncTest, AppendListRemove) {
   EXPECT_TRUE((*list)[0].is_file);
 
   ASSERT_TRUE(sync_await(vacps::fs::async_remove(opts(), path)));
-  EXPECT_FALSE(sync_await(vacps::fs::async_exists(opts(), path)));
+  auto gone = sync_await(vacps::fs::async_exists(opts(), path));
+  ASSERT_TRUE(gone) << gone.error().message;
+  EXPECT_FALSE(*gone);
 }
 
 TEST_F(FsAsyncTest, Rename) {
   const auto from = root_ / "old.txt";
   const auto to = root_ / "new.txt";
+  auto fs = fs_exec();
   ASSERT_TRUE(sync_await(
-      async_write_text_via_file(opts(), from, std::string{"z"})));
+      async_write_text_via_file(fs, from, std::string{"z"})));
   ASSERT_TRUE(sync_await(vacps::fs::async_rename(opts(), from, to)));
-  EXPECT_FALSE(sync_await(vacps::fs::async_exists(opts(), from)));
-  auto r = sync_await(async_read_text_via_file(opts(), to));
+  auto gone = sync_await(vacps::fs::async_exists(opts(), from));
+  ASSERT_TRUE(gone) << gone.error().message;
+  EXPECT_FALSE(*gone);
+  auto r = sync_await(async_read_text_via_file(fs, to));
   ASSERT_TRUE(r);
   EXPECT_EQ(*r, "z");
+}
+
+TEST_F(FsAsyncTest, RemoveRecursiveAndRenameReplace) {
+  const auto dir = root_ / "tree";
+  const auto nested = dir / "a";
+  ASSERT_TRUE(sync_await(vacps::fs::async_mkdir(
+      opts(), nested, vacps::fs::MkdirOptions{.recursive = true})));
+  const auto path = nested / "f.txt";
+  auto fs = fs_exec();
+  ASSERT_TRUE(sync_await(
+      async_write_text_via_file(fs, path, std::string{"x"})));
+
+  EXPECT_FALSE(sync_await(vacps::fs::async_remove(opts(), dir)));
+  ASSERT_TRUE(sync_await(vacps::fs::async_remove(
+      opts(), dir, vacps::fs::RemoveOptions{.recursive = true})));
+
+  const auto a = root_ / "a.txt";
+  const auto b = root_ / "b.txt";
+  ASSERT_TRUE(sync_await(
+      async_write_text_via_file(fs, a, std::string{"A"})));
+  ASSERT_TRUE(sync_await(
+      async_write_text_via_file(fs, b, std::string{"B"})));
+  EXPECT_FALSE(sync_await(vacps::fs::async_rename(opts(), a, b)));
+  ASSERT_TRUE(sync_await(vacps::fs::async_rename(
+      opts(), a, b, vacps::fs::RenameOptions{.replace = true})));
+  auto text = sync_await(async_read_text_via_file(fs, b));
+  ASSERT_TRUE(text);
+  EXPECT_EQ(*text, "A");
 }

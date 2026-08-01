@@ -2,8 +2,12 @@
 
 #include "app/log.hpp"
 
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include <chrono>
 #include <csignal>
@@ -78,37 +82,47 @@ bool ShutdownCoordinator::stopping() const noexcept {
 asio::awaitable<void> ShutdownCoordinator::run_graceful_(
     std::shared_ptr<vacps::js::ScriptRuntime> rt,
     std::shared_ptr<asio::steady_timer> tick_timer) {
-  // 1. stopping_ already marked in request_stop
-  // 2. cancel tick
+  // Host-only teardown (docs/NATIVE_RESOURCE_OWNERSHIP.md §九).
+  // Do NOT stopAll JS-created Servers/Processes here — JS owns them.
+
+  // 1. stopping_ already marked in request_stop. Soft-mark ScriptRuntime so
+  //    ScriptRequestHandler rejects new work (503) without cancelling waiters.
+  if (!rt->closed()) {
+    rt->mark_stopping();
+  }
+
+  // 2. stop host tick (no more periodic JS entry)
   tick_timer->cancel();
 
-  // 3. HTTP servers stop accept / 4. drain sessions — not yet centralized
-  // 5. stop processes
-  rt->services().shutdown_processes();
+  auto& services = rt->services();
 
-  // 6. wait submitted native operations
-  // Do NOT cancel_host_async before JS shutdown — that makes await_settled
-  // busy-spin and blocks pool completions needed by await db.close().
-  co_await rt->wait_async_idle(
-      std::chrono::duration_cast<std::chrono::milliseconds>(kGracefulAsyncIdle));
-
-  // 7. JS shutdown()  8. wait promises started by shutdown
-  if (auto sh = co_await rt->shutdown_script(); !sh) {
-    vacps::log::error("script shutdown: {}", sh.error().message);
-  }
-  co_await rt->wait_async_idle(
-      std::chrono::duration_cast<std::chrono::milliseconds>(kGracefulAsyncIdle));
-
-  // 9. drain QuickJS jobs (after cancel host async waiters)
-  rt->cancel_host_async();
-  if (auto drain = rt->drain_jobs(); !drain) {
-    vacps::log::debug("post-shutdown job drain: {}", drain.error().message);
+  // 3–4. JS shutdown() — business closes Server/Process/Store/… in its order.
+  // Do NOT cancel_host_async before this: await_settled must still complete
+  // native ops used by await server.close() / store.close().
+  if (!rt->closed()) {
+    if (auto sh = co_await rt->shutdown_script(); !sh) {
+      vacps::log::error("script shutdown: {}", sh.error().message);
+    }
+    co_await rt->wait_async_idle(
+        std::chrono::duration_cast<std::chrono::milliseconds>(kGracefulAsyncIdle));
   }
 
-  // 10–14. JS_Free* / remaining File/Store / executors: owned by ScriptServices + ScriptRuntime
-  // destructor and process teardown after ioc stops.
+  // 5. drain QuickJS jobs (after cancel host async waiters)
+  if (!rt->closed()) {
+    rt->cancel_host_async();
+    if (auto drain = rt->drain_jobs(); !drain) {
+      vacps::log::debug("post-shutdown job drain: {}", drain.error().message);
+    }
+  }
 
-  // 15. stop io_context
+  // 6–8. FreeContext / FreeRuntime — finalizers drop holders; C++ dtors
+  // force-clean any OS resources not closed by JS (no Host business stopAll).
+  rt->close();
+
+  // 9. executors after FreeContext (Process children cleaned by ~Process)
+  services.stop_executors();
+
+  // 10. stop io_context
   vacps::log::info("graceful shutdown complete; stopping io_context");
   ioc_.stop();
   co_return;

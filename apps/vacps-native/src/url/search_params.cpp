@@ -99,4 +99,15 @@ std::string SearchParams::to_string() const { return params_.to_string(); }
 
 std::size_t SearchParams::size() const noexcept { return params_.size(); }
 
+std::optional<std::pair<std::string, std::string>> SearchParams::at(
+    std::size_t index) const {
+  if (index >= params_.size()) {
+    return std::nullopt;
+  }
+  // Ada operator[] returns pair by value (owned strings).
+  auto pair = params_[index];
+  return std::pair<std::string, std::string>{std::move(pair.first),
+                                             std::move(pair.second)};
+}
+
 }  // namespace vacps::url

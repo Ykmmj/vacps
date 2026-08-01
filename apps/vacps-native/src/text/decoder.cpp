@@ -247,7 +247,12 @@ void peel_utf16_stream_remainder(
   }
 }
 
-/** Skip BOM via simdutf::BOM (no hardcoded byte signatures). */
+/**
+ * Skip leading BOM per WHATWG TextDecoder (call only when n >= BOM size):
+ * - ignoreBOM=false (default) → consume matching BOM
+ * - ignoreBOM=true → keep BOM as U+FEFF character
+ * Sets bom_seen on every completed check (match or not).
+ */
 std::size_t skip_bom_if(
     const std::uint8_t* p,
     std::size_t n,
@@ -258,7 +263,7 @@ std::size_t skip_bom_if(
     return 0;
   }
   bom_seen = true;
-  if (!ignore_bom || n == 0) {
+  if (ignore_bom || n == 0) {
     return 0;
   }
   const auto found = simdutf::BOM::check_bom(p, n);
@@ -266,6 +271,11 @@ std::size_t skip_bom_if(
     return simdutf::BOM::bom_byte_size(found);
   }
   return 0;
+}
+
+/** Bytes required to decide presence of a BOM for this encoding. */
+std::size_t bom_need_bytes(simdutf::encoding_type expected) {
+  return simdutf::BOM::bom_byte_size(expected);
 }
 
 /** U+FFFD as UTF-8 via simdutf (no hardcoded multi-byte sequence). */
@@ -342,6 +352,20 @@ Result<std::string> Decoder::decode(
 Result<std::string> Decoder::decode_utf8(
     std::span<const std::uint8_t> data,
     bool stream) {
+  // Streaming BOM: do not set bom_seen until enough bytes for a full check.
+  if (!bom_seen_) {
+    const std::size_t need = bom_need_bytes(simdutf::encoding_type::UTF8);
+    if (data.size() < need) {
+      if (stream) {
+        // Hold entire chunk; a later chunk may complete EF BB BF.
+        remainder_.assign(data.begin(), data.end());
+        return std::string{};
+      }
+      // Final flush: no room for a 3-byte BOM — decode as content.
+      bom_seen_ = true;
+    }
+  }
+
   const std::size_t start = skip_bom_if(
       data.data(),
       data.size(),
@@ -367,6 +391,18 @@ Result<std::string> Decoder::decode_utf16(
     bool little_endian) {
   const auto expected_bom = little_endian ? simdutf::encoding_type::UTF16_LE
                                           : simdutf::encoding_type::UTF16_BE;
+
+  if (!bom_seen_) {
+    const std::size_t need = bom_need_bytes(expected_bom);
+    if (data.size() < need) {
+      if (stream) {
+        remainder_.assign(data.begin(), data.end());
+        return std::string{};
+      }
+      bom_seen_ = true;
+    }
+  }
+
   const std::size_t start = skip_bom_if(
       data.data(),
       data.size(),

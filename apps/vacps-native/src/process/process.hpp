@@ -1,20 +1,24 @@
 #pragma once
 
 /**
- * vacps::process::Process — long-lived child handle (n1 §八).
+ * vacps::process::Process — JS-owned child handle.
  *
- * Construction stores argv/options only; spawn happens in start().
- * Wraps a Registry entry (JS never sees the registry id).
- * Product surface is this class; Registry is an internal detail owned by
- * ScriptServices.
+ * Owns child/pipes/timers/buffers directly (Process::State).
+ * ProcessRuntime supplies executor + shared ProcessBudget only.
+ * No global Registry / string id / TTL reclaim.
+ *
+ * Destructor policy: kill still-running process group (not detach).
  */
 
 #include "app/error.hpp"
-#include "process/registry.hpp"
+#include "process/budget.hpp"
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 
+#include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,116 +29,137 @@ namespace vacps::process {
 
 namespace asio = boost::asio;
 
-/** Result of Process::wait() / one-shot run convenience. */
+struct StartOptions {
+  std::string cwd;
+  /** nullopt / 0 = no timeout. */
+  std::chrono::milliseconds timeout{0};
+  bool close_stdin{true};
+  std::size_t hard_max_stdout{16 * 1024 * 1024};
+  std::size_t hard_max_stderr{16 * 1024 * 1024};
+};
+
+struct WriteOptions {
+  bool close_stdin{false};
+  std::chrono::milliseconds timeout{30'000};
+  std::size_t max_bytes{1 * 1024 * 1024};
+};
+
+enum class ProcessStatus : std::uint8_t {
+  Created = 0,
+  Starting,
+  Running,
+  Exited,
+  TimedOut,
+  Cancelled,
+  Closing,
+  Closed,
+};
+
+enum class ExitReason : std::uint8_t {
+  Exited = 0,
+  TimedOut,
+  Cancelled,
+  Signaled,
+};
+
+struct BufferStats {
+  std::size_t retained{0};
+  std::size_t produced{0};
+  bool truncated{false};
+};
+
+struct ReadResult {
+  std::string data;
+  bool eof{false};
+};
+
+/** Result of Process::wait() / one-shot run. */
 struct RunResult {
   std::int32_t exit_code{0};
-  /** True only when timeout timer aborted the wait — not from exit codes. */
+  ExitReason reason{ExitReason::Exited};
   bool timed_out{false};
   std::string stdout_str;
   std::string stderr_str;
-  /** Bytes observed on each pipe (includes discarded after cap). */
   std::size_t stdout_produced{0};
   std::size_t stderr_produced{0};
   bool stdout_truncated{false};
   bool stderr_truncated{false};
 };
 
-/**
- * Domain process handle.
- *
- * Threading: all methods (including close / destructor side-effects) must run
- * on the Registry's io_context (host single-threaded model).
- * Registry outlives Process (ScriptServices owns Registry).
- */
-class Process {
+class Process final : public std::enable_shared_from_this<Process> {
  public:
   /**
-   * @param registry  Non-owning; must outlive this Process.
-   * @param argv      Executable + args (argv[0] required non-empty at start()).
-   * @param opts      Spawn options (defaults match StartOptions; callers that
-   *                  need interactive stdin should set close_stdin = false).
+   * @param executor  Host io_context executor (spawn/pipes/timers).
+   * @param budget    Shared concurrent/buffer budget (required for start()).
+   * @param argv      Executable + args.
+   * @param opts      Spawn options.
    */
-  Process(Registry& registry, std::vector<std::string> argv, StartOptions opts = {});
+  Process(
+      asio::any_io_executor executor,
+      std::shared_ptr<ProcessBudget> budget,
+      std::vector<std::string> argv,
+      StartOptions opts = {});
 
   Process(const Process&) = delete;
   Process& operator=(const Process&) = delete;
   Process(Process&&) = delete;
   Process& operator=(Process&&) = delete;
 
-  /**
-   * Best-effort close of the registry entry if still open.
-   * Safe only while Registry is still alive.
-   */
+  /** Kill still-running child (process group); cancel timers; free buffers. */
   ~Process();
 
-  /** Asynchronous spawn via Registry. Rejects if already started or closed. */
   [[nodiscard]] asio::awaitable<VoidResult> start();
 
   /**
-   * Progressive read of one stream (default "stdout").
-   * Offsets are tracked on this Process; returns empty string when no new data
-   * (including after EOF).
-   *
-   * @param stream  "stdout" or "stderr"
-   * @param wait_ms 0 = non-blocking snapshot; >0 wait for data / finish
-   * @param max_bytes Cap on returned slice (default 64 KiB)
+   * Progressive read of one stream ("stdout" | "stderr").
+   * Cursor is owned by this Process.
+   * @param wait  0 = non-blocking; >0 wait for data or finish.
    */
-  [[nodiscard]] asio::awaitable<Result<std::string>> read(
+  [[nodiscard]] asio::awaitable<Result<ReadResult>> read(
       std::string_view stream = "stdout",
-      std::int32_t wait_ms = 60'000,
+      std::chrono::milliseconds wait = std::chrono::milliseconds{60'000},
       std::size_t max_bytes = 65'536);
 
-  /** Async stdin write. Owns `data` until complete. */
   [[nodiscard]] asio::awaitable<Result<std::size_t>> write(
       std::string data,
       WriteOptions opts = {});
 
-  /**
-   * Wait until the process is no longer running; returns full captured
-   * stdout/stderr (via Registry snapshot).
-   */
   [[nodiscard]] asio::awaitable<Result<RunResult>> wait();
 
   /**
-   * Send signal (SIGTERM | SIGINT | SIGKILL). Returns false if already exited.
-   * Sync: Registry::terminate is non-blocking.
+   * Signal process group. Returns false if already exited.
+   * Grace: escalate to SIGKILL after grace if not SIGKILL.
    */
   [[nodiscard]] Result<bool> terminate(
       std::string_view signal = "SIGTERM",
-      std::int32_t grace_ms = 3000);
+      std::chrono::milliseconds grace = std::chrono::milliseconds{3000});
 
   /**
-   * Drop registry entry and free buffers. Idempotent.
-   * Running children are killed first (Registry::close).
+   * Idempotent close: kill if running, free pipes/buffers, release process slot.
+   * Prefer awaitable form from JS; this sync path for tests/finalizer.
    */
   [[nodiscard]] VoidResult close();
 
-  /** nullopt until start() succeeds; nullopt again after close. */
+  /** Finalizer/dtor path: same as close(), never throws. */
+  void dispose() noexcept;
+
   [[nodiscard]] std::optional<std::int32_t> pid() const noexcept;
-
-  /** True while Registry reports status "running". False if not started/closed. */
-  [[nodiscard]] bool running() const;
-
-  [[nodiscard]] bool started() const noexcept {
-    return start_called_ && !id_.empty() && !closed_;
-  }
-  [[nodiscard]] bool closed() const noexcept { return closed_; }
+  [[nodiscard]] bool running() const noexcept;
+  [[nodiscard]] bool started() const noexcept;
+  [[nodiscard]] bool closed() const noexcept;
+  [[nodiscard]] ProcessStatus status() const noexcept;
 
   [[nodiscard]] const std::vector<std::string>& argv() const noexcept { return argv_; }
   [[nodiscard]] const StartOptions& options() const noexcept { return opts_; }
 
  private:
+  struct State;
+
   [[nodiscard]] VoidResult ensure_live(std::string_view op) const;
 
-  Registry* registry_;  // non-owning
   std::vector<std::string> argv_;
   StartOptions opts_{};
-  std::string id_;  // registry entry key; never exposed to JS
-  std::int32_t pid_{0};
-  bool start_called_{false};
-  bool closed_{false};
-  std::size_t stdout_offset_{0};
-  std::size_t stderr_offset_{0};
+  std::shared_ptr<State> state_;
 };
 
 }  // namespace vacps::process

@@ -124,7 +124,9 @@ run_docker run --rm \
     export no_proxy=\"\${no_proxy:-\${NO_PROXY:-}}\"
     echo \"proxy in container: http_proxy=\${http_proxy:-<empty>}\"
     cmake --preset $PRESET_NAME
-    cmake --build --preset $BUILD_PRESET
+    # Cap parallelism: full ninja -j$(nproc) can OOM/freeze WSL hosts.
+    export CMAKE_BUILD_PARALLEL_LEVEL=\"\${CMAKE_BUILD_PARALLEL_LEVEL:-2}\"
+    cmake --build --preset $BUILD_PRESET --parallel \"\$CMAKE_BUILD_PARALLEL_LEVEL\"
     BIN=build/${BUILD_PRESET}/vacps-agent-linux-x86_64
     ls -la \"\$BIN\"
     if command -v file >/dev/null 2>&1; then

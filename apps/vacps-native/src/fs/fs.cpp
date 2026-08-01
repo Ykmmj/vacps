@@ -20,6 +20,11 @@ bool contains_null(std::string_view s) {
   return s.find('\0') != std::string_view::npos;
 }
 
+/** ENOENT / ENOTDIR (and equivalents) → treat as "does not exist". */
+bool is_not_found(const std::error_code& ec) {
+  return ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory;
+}
+
 }  // namespace
 
 Result<std::filesystem::path> resolve_path(
@@ -49,35 +54,66 @@ Result<std::filesystem::path> resolve_path(
   return (root / input).lexically_normal();
 }
 
-VoidResult mkdir_p(const std::filesystem::path& path) {
+VoidResult mkdir(const std::filesystem::path& path, MkdirOptions opts) {
   std::error_code ec;
-  std::filesystem::create_directories(path, ec);
+  if (opts.recursive) {
+    std::filesystem::create_directories(path, ec);
+  } else {
+    std::filesystem::create_directory(path, ec);
+  }
   if (ec) {
     return io_error("mkdir", path, ec);
   }
   return {};
 }
 
-bool exists(const std::filesystem::path& path) {
+Result<bool> exists(const std::filesystem::path& path) {
   std::error_code ec;
-  return std::filesystem::exists(path, ec);
+  const bool present = std::filesystem::exists(path, ec);
+  if (ec) {
+    if (is_not_found(ec)) {
+      return false;
+    }
+    return std::unexpected(
+        Error{std::format("exists failed ({}): {}", path.string(), ec.message())});
+  }
+  return present;
 }
 
-VoidResult remove_path(const std::filesystem::path& path) {
+VoidResult remove_path(const std::filesystem::path& path, RemoveOptions opts) {
   std::error_code ec;
-  std::filesystem::remove_all(path, ec);
+  if (opts.recursive) {
+    std::filesystem::remove_all(path, ec);
+  } else {
+    // File or empty directory only; non-empty directory fails.
+    std::filesystem::remove(path, ec);
+  }
   if (ec) {
     return io_error("remove", path, ec);
   }
   return {};
 }
 
-VoidResult rename_path(const std::filesystem::path& from, const std::filesystem::path& to) {
+VoidResult rename_path(
+    const std::filesystem::path& from,
+    const std::filesystem::path& to,
+    RenameOptions opts) {
   std::error_code ec;
   if (to.has_parent_path()) {
     std::filesystem::create_directories(to.parent_path(), ec);
     if (ec) {
       return io_error("mkdir", to.parent_path(), ec);
+    }
+  }
+  if (!opts.replace) {
+    // Qualify: vacps::fs::exists vs std::filesystem::exists.
+    auto target = vacps::fs::exists(to);
+    if (!target) {
+      return std::unexpected(std::move(target.error()));
+    }
+    if (*target) {
+      return std::unexpected(
+          Error{std::format("rename failed ({}): target already exists", to.string())});
     }
   }
   std::filesystem::rename(from, to, ec);

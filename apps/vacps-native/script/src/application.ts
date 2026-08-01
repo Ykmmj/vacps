@@ -190,9 +190,15 @@ export class Application {
 
   async shutdown(): Promise<void> {
     log.info('application shutdown');
+    // Business close order (NATIVE_RESOURCE_OWNERSHIP): Server → processes → Store.
+    // Host does not stopAll these; only this export runs before FreeContext.
     if (this.server) {
       await this.server.close();
       this.server = undefined;
+    }
+    if (this.processes) {
+      await this.processes.closeAll();
+      this.processes = undefined;
     }
     if (this.db) {
       await this.db.close();
@@ -200,7 +206,6 @@ export class Application {
     }
     this.store = undefined;
     this.queue = undefined;
-    this.processes = undefined;
     this.telemetry = undefined;
     this.httpApp = undefined;
     this.ready = false;

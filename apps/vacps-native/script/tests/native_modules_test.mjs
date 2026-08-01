@@ -72,7 +72,12 @@ await test('host.nowMs', () => {
 });
 
 await test('host.platform', () => {
-  assertEq(host.platform(), 'linux-x86_64-musl', 'platform string');
+  const p = host.platform();
+  assert(typeof p === 'string' && p.length > 0, 'platform non-empty string');
+  assert(
+    /^(linux|darwin)-(x86_64|aarch64)-(musl|gnu|unknown)$/.test(p),
+    'platform format: ' + p,
+  );
 });
 
 // ── vacps:log ─────────────────────────────────────────────────────
@@ -133,7 +138,7 @@ await test('store transaction rollback on expectedChanges miss', async () => {
 // ── vacps:fs (File.open + namespace ops only) ──────────────────────
 
 async function readTextFile(path) {
-  const f = await fs.File.open(path, fs.O_RDONLY);
+  const f = await fs.File.open(path, 'read');
   try {
     return await f.readText();
   } finally {
@@ -142,7 +147,7 @@ async function readTextFile(path) {
 }
 
 async function writeTextFile(path, content) {
-  const f = await fs.File.open(path, fs.O_WRONLY | fs.O_CREAT | fs.O_TRUNC);
+  const f = await fs.File.open(path, 'write');
   try {
     await f.writeText(content);
   } finally {
@@ -151,7 +156,7 @@ async function writeTextFile(path, content) {
 }
 
 async function appendTextFile(path, content) {
-  const f = await fs.File.open(path, fs.O_WRONLY | fs.O_CREAT | fs.O_APPEND);
+  const f = await fs.File.open(path, 'append');
   try {
     await f.writeText(content);
   } finally {
@@ -160,7 +165,7 @@ async function appendTextFile(path, content) {
 }
 
 async function readBytesFile(path) {
-  const f = await fs.File.open(path, fs.O_RDONLY);
+  const f = await fs.File.open(path, 'read');
   try {
     return await f.read();
   } finally {
@@ -169,7 +174,7 @@ async function readBytesFile(path) {
 }
 
 async function writeBytesFile(path, data) {
-  const f = await fs.File.open(path, fs.O_WRONLY | fs.O_CREAT | fs.O_TRUNC);
+  const f = await fs.File.open(path, 'write');
   try {
     await f.write(data);
   } finally {
@@ -178,7 +183,7 @@ async function writeBytesFile(path, data) {
 }
 
 await test('fs File write/read/append/exists/readDirectory/rename/remove', async () => {
-  await fs.mkdir('js_api/fs');
+  await fs.mkdir('js_api/fs', { recursive: true });
   await writeTextFile('js_api/fs/a.txt', 'hello');
   assertEq(await readTextFile('js_api/fs/a.txt'), 'hello', 'readText');
   await appendTextFile('js_api/fs/a.txt', '-world');
@@ -203,6 +208,33 @@ await test('fs File write/read/append/exists/readDirectory/rename/remove', async
 
   await fs.remove('js_api/fs/c.txt');
   assert(!(await fs.exists('js_api/fs/c.txt')), 'removed');
+
+  // remove default is non-recursive; recursive clears a tree.
+  await fs.mkdir('js_api/fs/tree');
+  await writeTextFile('js_api/fs/tree/x.txt', 't');
+  let removeTreeFailed = false;
+  try {
+    await fs.remove('js_api/fs/tree');
+  } catch {
+    removeTreeFailed = true;
+  }
+  assert(removeTreeFailed, 'remove non-empty dir without recursive fails');
+  await fs.remove('js_api/fs/tree', { recursive: true });
+  assert(!(await fs.exists('js_api/fs/tree')), 'recursive remove');
+
+  // rename replace: default fails when target exists; replace:true overwrites.
+  await writeTextFile('js_api/fs/r1.txt', 'one');
+  await writeTextFile('js_api/fs/r2.txt', 'two');
+  let renameFail = false;
+  try {
+    await fs.rename('js_api/fs/r1.txt', 'js_api/fs/r2.txt');
+  } catch {
+    renameFail = true;
+  }
+  assert(renameFail, 'rename without replace fails when target exists');
+  await fs.rename('js_api/fs/r1.txt', 'js_api/fs/r2.txt', { replace: true });
+  assertEq(await readTextFile('js_api/fs/r2.txt'), 'one', 'rename replace');
+  await fs.remove('js_api/fs/r2.txt');
 });
 
 // Path allowlist is JS path-guard.ts at tool boundaries — not C++ vacps:fs.

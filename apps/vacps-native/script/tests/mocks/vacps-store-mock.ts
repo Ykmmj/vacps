@@ -19,6 +19,7 @@ export interface TransactionStep {
   readonly sql: string;
   readonly params?: readonly SqlParam[];
   readonly type?: 'run' | 'query';
+  /** Run steps only; invalid with type: 'query'. */
   readonly expectedChanges?: ExpectedChanges;
 }
 

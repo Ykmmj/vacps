@@ -1,10 +1,6 @@
 import * as crypto from 'vacps:crypto';
 import {
   File,
-  O_RDONLY,
-  O_WRONLY,
-  O_CREAT,
-  O_TRUNC,
   exists,
   mkdir,
   readDirectory,
@@ -81,7 +77,7 @@ function asUint8(buf: ArrayBuffer | Uint8Array): Uint8Array {
 // ── Product-local File helpers (open → read/write → close) ─
 
 async function readTextFile(path: string): Promise<string> {
-  const f = await File.open(path, O_RDONLY);
+  const f = await File.open(path, 'read');
   try {
     return await f.readText();
   } finally {
@@ -90,7 +86,7 @@ async function readTextFile(path: string): Promise<string> {
 }
 
 async function writeTextFile(path: string, content: string): Promise<void> {
-  const f = await File.open(path, O_WRONLY | O_CREAT | O_TRUNC);
+  const f = await File.open(path, 'write');
   try {
     await f.writeText(content);
   } finally {
@@ -99,7 +95,7 @@ async function writeTextFile(path: string, content: string): Promise<void> {
 }
 
 async function readBytesFile(path: string): Promise<Uint8Array> {
-  const f = await File.open(path, O_RDONLY);
+  const f = await File.open(path, 'read');
   try {
     return await f.read();
   } finally {
@@ -108,7 +104,7 @@ async function readBytesFile(path: string): Promise<Uint8Array> {
 }
 
 async function readRangeFile(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
-  const f = await File.open(path, O_RDONLY);
+  const f = await File.open(path, 'read');
   try {
     return await f.readAt(offset, maxBytes);
   } finally {
@@ -117,7 +113,7 @@ async function readRangeFile(path: string, offset: number, maxBytes: number): Pr
 }
 
 async function hashFileBytes(path: string): Promise<{ sizeBytes: number; sha256Hex: string }> {
-  const f = await File.open(path, O_RDONLY);
+  const f = await File.open(path, 'read');
   try {
     const bytes = await f.read();
     return { sizeBytes: bytes.byteLength, sha256Hex: crypto.sha256Hex(bytes) };
@@ -272,7 +268,7 @@ export async function filesWrite(input: {
   if (input.createParentDirectories !== false) {
     const parent = dirname(path);
     if (parent && parent !== '/') {
-      await mkdir(parent);
+      await mkdir(parent, { recursive: true });
     }
   }
   await writeTextFile(path, input.content);
@@ -318,7 +314,7 @@ export async function filesList(input: {
 
 export async function filesMkdir(input: { path: string; recursive?: boolean }) {
   const path = assertSafeAbsolutePath(input.path);
-  await mkdir(path);
+  await mkdir(path, { recursive: input.recursive === true });
   return { path, operation: 'created', type: 'directory' };
 }
 
@@ -389,7 +385,7 @@ export async function filesDelete(input: {
     }
   }
 
-  await remove(path);
+  await remove(path, { recursive: input.recursive === true });
   return { path, operation: 'deleted', dry_run: false, type };
 }
 
@@ -424,12 +420,12 @@ export async function filesMove(input: {
   }
   const parent = dirname(to);
   if (parent && parent !== '/') {
-    await mkdir(parent);
+    await mkdir(parent, { recursive: true });
   }
   if (overwrite && (await exists(to))) {
-    await remove(to);
+    await remove(to, { recursive: true });
   }
-  await rename(from, to);
+  await rename(from, to, { replace: overwrite });
   return { from, to, operation: 'moved' };
 }
 
@@ -703,7 +699,7 @@ export async function applyPatch(input: {
           throw runtimeError(`Cannot add existing file ${op.path}`, 'file_exists', 409);
         }
         if (!input.dryRun) {
-          await mkdir(dirname(op.absolute));
+          await mkdir(dirname(op.absolute), { recursive: true });
           await writeTextFile(op.absolute, op.content ?? '');
           backups.set(op.absolute, null);
         }

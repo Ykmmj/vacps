@@ -65,11 +65,12 @@ export function openMemoryStore(): Store {
         const out: TransactionResult[] = [];
         for (const step of steps) {
           if (step.type === 'query') {
-            const rows = db.prepare(step.sql).all(...((step.params ?? []) as SqlParam[]));
             if (step.expectedChanges) {
-              // Node sqlite does not expose changes() after SELECT; treat as 0.
-              checkExpectedChanges(step.expectedChanges, 0);
+              throw new Error(
+                'store.transaction: expectedChanges is only valid for run steps, not query',
+              );
             }
+            const rows = db.prepare(step.sql).all(...((step.params ?? []) as SqlParam[]));
             out.push(rows as Array<Record<string, unknown>>);
           } else {
             const info = db.prepare(step.sql).run(...((step.params ?? []) as SqlParam[]));

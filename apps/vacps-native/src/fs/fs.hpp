@@ -30,6 +30,21 @@ struct FileStat {
   bool is_symlink{false};
 };
 
+struct MkdirOptions {
+  /** false (default): create last component only; true: create_directories. */
+  bool recursive{false};
+};
+
+struct RemoveOptions {
+  /** false (default): file or empty dir only; true: remove_all. */
+  bool recursive{false};
+};
+
+struct RenameOptions {
+  /** false (default): fail if target exists; true: allow replace. */
+  bool replace{false};
+};
+
 /**
  * Pure path resolution (no product policy / no allowlist).
  *
@@ -52,12 +67,30 @@ struct FileStat {
 }
 
 // Namespace / path ops (content I/O is File).
-[[nodiscard]] VoidResult mkdir_p(const std::filesystem::path& path);
-[[nodiscard]] bool exists(const std::filesystem::path& path);
-[[nodiscard]] VoidResult remove_path(const std::filesystem::path& path);
+[[nodiscard]] VoidResult mkdir(
+    const std::filesystem::path& path,
+    MkdirOptions opts = {});
+
+/** Convenience: mkdir with recursive=true (create_directories). */
+[[nodiscard]] inline VoidResult mkdir_p(const std::filesystem::path& path) {
+  return mkdir(path, MkdirOptions{.recursive = true});
+}
+
+/**
+ * true if path exists; false for ENOENT / ENOTDIR;
+ * error for permission and other failures.
+ */
+[[nodiscard]] Result<bool> exists(const std::filesystem::path& path);
+
+[[nodiscard]] VoidResult remove_path(
+    const std::filesystem::path& path,
+    RemoveOptions opts = {});
+
 [[nodiscard]] VoidResult rename_path(
     const std::filesystem::path& from,
-    const std::filesystem::path& to);
+    const std::filesystem::path& to,
+    RenameOptions opts = {});
+
 [[nodiscard]] Result<std::vector<DirEntry>> list_dir(const std::filesystem::path& path);
 [[nodiscard]] Result<FileStat> file_stat(const std::filesystem::path& path);
 

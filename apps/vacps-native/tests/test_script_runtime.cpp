@@ -1,13 +1,20 @@
 #include "app/log.hpp"
 #include "bootstrap/environment.hpp"
+#include "http/request_handler.hpp"
 #include "http/script_dispatch.hpp"
+#include "http/server.hpp"
+#include "http/session.hpp"
 #include "quickjs/raii/convert.hpp"
+#include "quickjs/script_request_handler.hpp"
 #include "quickjs/script_runtime.hpp"
 #include "quickjs/js_bridge.hpp"
 
+#include <boost/asio/buffer.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/system/error_code.hpp>
 
 #include <gtest/gtest.h>
 
@@ -15,6 +22,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unistd.h>
 
@@ -23,7 +32,7 @@ namespace asio = boost::asio;
 
 namespace {
 
-// Integration check for vacps:* modules — in tests only, not ScriptRuntime::create.
+// Integration check for vacps:* modules (requires install_default_modules after create).
 constexpr std::string_view kModuleSmoke = R"js(
 import * as log from "vacps:log";
 import * as store from "vacps:store";
@@ -41,12 +50,12 @@ await db.close();
 
 await fs.mkdir("infra");
 {
-  const w = await fs.File.open("infra/smoke.txt", fs.O_WRONLY | fs.O_CREAT | fs.O_TRUNC);
+  const w = await fs.File.open("infra/smoke.txt", "write");
   await w.writeText("ok");
   await w.close();
 }
 {
-  const r = await fs.File.open("infra/smoke.txt", fs.O_RDONLY);
+  const r = await fs.File.open("infra/smoke.txt", "read");
   if ((await r.readText()) !== "ok") throw new Error("fs smoke failed");
   await r.close();
 }
@@ -145,6 +154,8 @@ TEST_F(ScriptRuntimeTest, EvalBasic) {
   auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
   auto rt = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt) << rt.error().message;
+  ASSERT_TRUE(vacps::js::install_default_modules(**rt))
+      << "install_default_modules failed";
   auto value = (*rt)->eval("(() => 40 + 2)()", "<test>");
   ASSERT_TRUE(value) << value.error().message;
   auto number =
@@ -159,6 +170,8 @@ TEST_F(ScriptRuntimeTest, NativeModulesSmoke) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -190,6 +203,8 @@ TEST_F(ScriptRuntimeTest, LoadAndHandleHttpHeaders) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -199,7 +214,7 @@ TEST_F(ScriptRuntimeTest, LoadAndHandleHttpHeaders) {
   asio::co_spawn(
       ioc,
       [rt, &ok, &err, &ping, &not_found, path = script_path_]() -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(path);
+        auto init = co_await vacps::js::load_and_initialize(*rt, path);
         if (!init) {
           err = init.error().message;
           co_return;
@@ -262,6 +277,8 @@ TEST_F(ScriptRuntimeTest, HandleRequestInvalidStatusAndNonObject) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   std::string err_status;
   std::string err_obj;
@@ -270,7 +287,7 @@ TEST_F(ScriptRuntimeTest, HandleRequestInvalidStatusAndNonObject) {
   asio::co_spawn(
       ioc,
       [rt, &ok, &err_status, &err_obj, path = script_path_]() -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(path);
+        auto init = co_await vacps::js::load_and_initialize(*rt, path);
         if (!init) {
           err_status = init.error().message;
           co_return;
@@ -321,12 +338,14 @@ TEST_F(ScriptRuntimeTest, EmptyScriptFails) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r);
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
   bool saw_err = false;
   std::string msg;
   asio::co_spawn(
       ioc,
       [rt, empty_path, &saw_err, &msg]() -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(empty_path);
+        auto init = co_await vacps::js::load_and_initialize(*rt, empty_path);
         if (!init) {
           saw_err = true;
           msg = init.error().message;
@@ -345,11 +364,13 @@ TEST_F(ScriptRuntimeTest, MissingScriptFails) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r);
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
   bool saw_err = false;
   asio::co_spawn(
       ioc,
       [rt, &saw_err, path = (dir_ / "nope.mjs").string()]() -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(path);
+        auto init = co_await vacps::js::load_and_initialize(*rt, path);
         if (!init) saw_err = true;
         co_return;
       },
@@ -363,6 +384,8 @@ TEST_F(ScriptRuntimeTest, TypedArrayViewUsesOffsetAndLength) {
   auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
+  ASSERT_TRUE(vacps::js::install_default_modules(**rt_r))
+      << "install_default_modules failed";
   auto* ctx = (*rt_r)->context().get();
 
   // new Uint8Array([0,1,2,3,4,5]).subarray(2,5) → [2,3,4]
@@ -386,6 +409,8 @@ TEST_F(ScriptRuntimeTest, InterruptBusyLoopWithinBudget) {
   auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, opts, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
+  ASSERT_TRUE(vacps::js::install_default_modules(**rt_r))
+      << "install_default_modules failed";
 
   const auto t0 = std::chrono::steady_clock::now();
   auto value = (*rt_r)->eval("while (true) {}", "<busy>");
@@ -407,6 +432,8 @@ TEST_F(ScriptRuntimeTest, InterruptBudgetZeroAllowsShortWork) {
   auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, opts, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
+  ASSERT_TRUE(vacps::js::install_default_modules(**rt_r))
+      << "install_default_modules failed";
   auto value = (*rt_r)->eval("(() => 1 + 1)()", "<ok>");
   ASSERT_TRUE(value) << value.error().message;
 }
@@ -420,6 +447,8 @@ TEST_F(ScriptRuntimeTest, InterruptPromiseMicrotaskBusyLoop) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, opts, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool saw_err = false;
   std::string msg;
@@ -453,5 +482,135 @@ TEST_F(ScriptRuntimeTest, InterruptPromiseMicrotaskBusyLoop) {
       msg.find("time budget") != std::string::npos)
       << msg;
   EXPECT_LT(elapsed, 3s) << "promise busy interrupt took too long";
+}
+
+/**
+ * P0 cycle break: ScriptRequestHandler holds weak_ptr<ScriptRuntime>.
+ * After the runtime is destroyed, handle() must not crash — returns the
+ * "business script not ready" error (session maps it to HTTP 503).
+ */
+TEST_F(ScriptRuntimeTest, ScriptRequestHandlerSurvivesRuntimeReset) {
+  asio::io_context ioc{1};
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt) << rt.error().message;
+  ASSERT_TRUE(vacps::js::install_default_modules(**rt))
+      << "install_default_modules failed";
+
+  auto handler = std::make_shared<vacps::js::ScriptRequestHandler>(
+      std::weak_ptr<vacps::js::ScriptRuntime>(*rt));
+  // Drop the only strong ref; handler must not keep runtime alive (cycle broken).
+  rt->reset();
+  ASSERT_EQ(rt->use_count(), 0);
+
+  std::optional<vacps::Result<vacps::http::HttpResponse>> out;
+  asio::co_spawn(
+      ioc,
+      [handler, &out]() -> asio::awaitable<void> {
+        vacps::http::HttpRequest req;
+        req.method = "GET";
+        req.path = "/ping";
+        out = co_await handler->handle(std::move(req));
+        co_return;
+      },
+      asio::detached);
+  ioc.run();
+
+  ASSERT_TRUE(out.has_value());
+  ASSERT_FALSE(*out) << "expected failure after runtime reset";
+  EXPECT_EQ(out->error().message, "business script not ready");
+}
+
+/**
+ * While ScriptRuntime::closing(), ScriptRequestHandler refuses dispatch (503 path).
+ */
+TEST_F(ScriptRuntimeTest, ScriptRequestHandlerClosingReturnsUnavailable) {
+  asio::io_context ioc{1};
+  auto services = vacps::js::ScriptServices::create(ioc, services_opts_);
+  auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
+  ASSERT_TRUE(rt_r) << rt_r.error().message;
+  auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
+
+  auto handler = std::make_shared<vacps::js::ScriptRequestHandler>(
+      std::weak_ptr<vacps::js::ScriptRuntime>(rt));
+  // cancel_host_async marks closing without tearing down the context.
+  rt->cancel_host_async();
+  ASSERT_TRUE(rt->closing());
+
+  std::optional<vacps::Result<vacps::http::HttpResponse>> out;
+  asio::co_spawn(
+      ioc,
+      [handler, &out]() -> asio::awaitable<void> {
+        vacps::http::HttpRequest req;
+        req.method = "GET";
+        req.path = "/ping";
+        out = co_await handler->handle(std::move(req));
+        co_return;
+      },
+      asio::detached);
+  ioc.run();
+
+  ASSERT_TRUE(out.has_value());
+  ASSERT_FALSE(*out);
+  EXPECT_EQ(out->error().message, "business script not ready");
+}
+
+namespace {
+
+struct NoopHttpHandler final : vacps::http::IRequestHandler {
+  asio::awaitable<vacps::Result<vacps::http::HttpResponse>> handle(
+      vacps::http::HttpRequest) override {
+    vacps::http::HttpResponse res;
+    res.status = 200;
+    res.body = "ok";
+    co_return res;
+  }
+};
+
+}  // namespace
+
+/**
+ * Server::close() stops accepting and cancels active sessions (Session::cancel).
+ * Peer socket is closed so the client side is no longer connected.
+ */
+TEST_F(ScriptRuntimeTest, HttpServerCloseCancelsSessions) {
+  vacps::log::init("off");
+  asio::io_context ioc{1};
+
+  auto handler = std::make_shared<NoopHttpHandler>();
+  // Ephemeral port: bind on 0 then read actual port is not exposed; use fixed test port.
+  // Prefer local connect-pair without Server::start so we only exercise close/cancel.
+  vacps::http::ListenEndpoint ep{"127.0.0.1", 19877};
+  auto server =
+      std::make_shared<vacps::http::Server>(ioc, std::move(ep), handler);
+
+  using tcp = boost::asio::ip::tcp;
+  tcp::acceptor linker{ioc, tcp::endpoint{boost::asio::ip::make_address("127.0.0.1"), 0}};
+  const auto link_port = linker.local_endpoint().port();
+  tcp::socket client{ioc};
+  client.connect(
+      tcp::endpoint{boost::asio::ip::make_address("127.0.0.1"), link_port});
+  tcp::socket peer = linker.accept();
+  ASSERT_TRUE(peer.is_open());
+  ASSERT_TRUE(client.is_open());
+
+  auto session = std::make_shared<vacps::http::Session>(
+      std::move(peer), handler, std::weak_ptr<vacps::http::Server>(server));
+  server->session_started(session);
+  EXPECT_EQ(server->active_sessions(), 1u);
+
+  // close(): acceptor.close (if open) + cancel_all_sessions() → Session::cancel.
+  server->close();
+  EXPECT_FALSE(server->is_open());
+
+  // Session::cancel closed the peer socket. Client read should see EOF / reset
+  // (more reliable than write, which can buffer before erroring).
+  char buf[4];
+  boost::system::error_code rec;
+  const auto n = client.read_some(boost::asio::buffer(buf), rec);
+  EXPECT_TRUE(rec || n == 0) << "expected EOF/error after session cancel, got n="
+                             << n << " ec=" << rec.message();
 }
 

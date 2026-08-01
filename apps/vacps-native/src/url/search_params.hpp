@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace vacps::url {
@@ -15,7 +16,8 @@ class Url;
 /**
  * WHATWG URLSearchParams domain object (Ada `url_search_params`).
  *
- * Standalone query bag: append / set / get / getAll / has / remove / toString.
+ * Standalone query bag: append / set / get / getAll / has / remove / toString
+ * plus index access for JS entries/keys/values/forEach iterators.
  *
  * Live view: when attached to a `Url` (via `Url::search_params()`), every
  * mutation re-serializes into the owning URL with `Url::set_search` semantics
@@ -68,6 +70,13 @@ class SearchParams final {
   [[nodiscard]] std::string to_string() const;
 
   [[nodiscard]] std::size_t size() const noexcept;
+
+  /**
+   * Key/value pair at `index` in list order (owned strings), or nullopt.
+   * Used by JS entries/keys/values iterators and forEach.
+   */
+  [[nodiscard]] std::optional<std::pair<std::string, std::string>> at(
+      std::size_t index) const;
 
   [[nodiscard]] Url* owner() const noexcept { return owner_; }
 

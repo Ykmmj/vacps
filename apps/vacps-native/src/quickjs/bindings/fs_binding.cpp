@@ -6,6 +6,7 @@
 #include "fs/fs.hpp"
 #include "fs/open_options.hpp"
 #include "quickjs/class_binding.hpp"
+#include "quickjs/module_bindings.hpp"
 #include "quickjs/script_runtime.hpp"
 #include "quickjs/js_bridge.hpp"
 #include "quickjs/promise_bridge.hpp"
@@ -21,8 +22,6 @@
 #include <vector>
 
 #include <quickjs.h>
-
-#include <fcntl.h>
 
 namespace vacps::js {
 namespace {
@@ -43,22 +42,78 @@ Result<std::string> parse_user_path(JSContext* ctx, JSValueConst path_v) {
   return *p;
 }
 
+/** Read optional boolean property; leave `out` unchanged when missing/nullish. */
+VoidResult read_bool_prop(
+    JSContext* ctx,
+    JSValueConst obj,
+    const char* key,
+    bool& out) {
+  Value v = Value::get_property_str(ctx, obj, key);
+  if (v.is_nullish()) return {};
+  auto b = converter<bool>::from_js(ctx, v.get());
+  if (!b) return std::unexpected(std::move(b.error()));
+  out = *b;
+  return {};
+}
+
+Result<vacps::fs::MkdirOptions> parse_mkdir_options(JSContext* ctx, int argc, JSValueConst* argv) {
+  vacps::fs::MkdirOptions opts;
+  if (argc < 2 || is_nullish(argv[1])) return opts;
+  if (!is_object(argv[1]) || is_null(argv[1])) {
+    return std::unexpected(Error{"fs.mkdir: options must be an object"});
+  }
+  auto r = read_bool_prop(ctx, argv[1], "recursive", opts.recursive);
+  if (!r) return std::unexpected(std::move(r.error()));
+  return opts;
+}
+
+Result<vacps::fs::RemoveOptions> parse_remove_options(
+    JSContext* ctx,
+    int argc,
+    JSValueConst* argv) {
+  vacps::fs::RemoveOptions opts;
+  if (argc < 2 || is_nullish(argv[1])) return opts;
+  if (!is_object(argv[1]) || is_null(argv[1])) {
+    return std::unexpected(Error{"fs.remove: options must be an object"});
+  }
+  auto r = read_bool_prop(ctx, argv[1], "recursive", opts.recursive);
+  if (!r) return std::unexpected(std::move(r.error()));
+  return opts;
+}
+
+Result<vacps::fs::RenameOptions> parse_rename_options(
+    JSContext* ctx,
+    int argc,
+    JSValueConst* argv) {
+  vacps::fs::RenameOptions opts;
+  if (argc < 3 || is_nullish(argv[2])) return opts;
+  if (!is_object(argv[2]) || is_null(argv[2])) {
+    return std::unexpected(Error{"fs.rename: options must be an object"});
+  }
+  auto r = read_bool_prop(ctx, argv[2], "replace", opts.replace);
+  if (!r) return std::unexpected(std::move(r.error()));
+  return opts;
+}
+
 JSValue js_fs_mkdir(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = script_runtime_from(ctx);
   if (!host) return throw_msg(ctx, "fs: runtime not wired");
-  if (argc < 1) return JS_ThrowTypeError(ctx, "fs.mkdir(path)");
+  if (argc < 1) return JS_ThrowTypeError(ctx, "fs.mkdir(path, options?)");
   auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
+  auto opts = parse_mkdir_options(ctx, argc, argv);
+  if (!opts) return throw_error(ctx, opts.error());
   return spawn_js_promise(
       ctx,
       host,
-      [host, path = std::move(*path)](
+      [host, path = std::move(*path), opts = *opts](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_offload(host->services().pool, [host, path = std::move(path)]() {
-          auto abs = resolve_under_data(host, path);
-          if (!abs) return VoidResult{std::unexpected(std::move(abs.error()))};
-          return vacps::fs::mkdir_p(*abs);
-        });
+        auto r = co_await vacps::fs::async_offload(
+            host->services().fs_pool, [host, path = std::move(path), opts]() {
+              auto abs = resolve_under_data(host, path);
+              if (!abs) return VoidResult{std::unexpected(std::move(abs.error()))};
+              return vacps::fs::mkdir(*abs, opts);
+            });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -79,12 +134,17 @@ JSValue js_fs_exists(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        const bool ok = co_await vacps::fs::async_offload(host->services().pool, [host, path = std::move(path)]() {
-          auto abs = resolve_under_data(host, path);
-          if (!abs) return false;
-          return vacps::fs::exists(*abs);
-        });
-        bridge.resolve(converter<bool>::to_js(c, ok));
+        auto r = co_await vacps::fs::async_offload(
+            host->services().fs_pool, [host, path = std::move(path)]() -> Result<bool> {
+              auto abs = resolve_under_data(host, path);
+              if (!abs) return std::unexpected(std::move(abs.error()));
+              return vacps::fs::exists(*abs);
+            });
+        if (!r) {
+          bridge.reject(r.error());
+        } else {
+          bridge.resolve(converter<bool>::to_js(c, *r));
+        }
         co_return;
       });
 }
@@ -92,19 +152,22 @@ JSValue js_fs_exists(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 JSValue js_fs_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = script_runtime_from(ctx);
   if (!host) return throw_msg(ctx, "fs: runtime not wired");
-  if (argc < 1) return JS_ThrowTypeError(ctx, "fs.remove(path)");
+  if (argc < 1) return JS_ThrowTypeError(ctx, "fs.remove(path, options?)");
   auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
+  auto opts = parse_remove_options(ctx, argc, argv);
+  if (!opts) return throw_error(ctx, opts.error());
   return spawn_js_promise(
       ctx,
       host,
-      [host, path = std::move(*path)](
+      [host, path = std::move(*path), opts = *opts](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_offload(host->services().pool, [host, path = std::move(path)]() {
-          auto abs = resolve_under_data(host, path);
-          if (!abs) return VoidResult{std::unexpected(std::move(abs.error()))};
-          return vacps::fs::remove_path(*abs);
-        });
+        auto r = co_await vacps::fs::async_offload(
+            host->services().fs_pool, [host, path = std::move(path), opts]() {
+              auto abs = resolve_under_data(host, path);
+              if (!abs) return VoidResult{std::unexpected(std::move(abs.error()))};
+              return vacps::fs::remove_path(*abs, opts);
+            });
         if (!r) {
           bridge.reject(r.error());
         } else {
@@ -117,23 +180,26 @@ JSValue js_fs_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
 JSValue js_fs_rename(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = script_runtime_from(ctx);
   if (!host) return throw_msg(ctx, "fs: runtime not wired");
-  if (argc < 2) return JS_ThrowTypeError(ctx, "fs.rename(from, to)");
+  if (argc < 2) return JS_ThrowTypeError(ctx, "fs.rename(from, to, options?)");
   auto from = parse_user_path(ctx, argv[0]);
   if (!from) return throw_error(ctx, from.error());
   auto to = parse_user_path(ctx, argv[1]);
   if (!to) return throw_error(ctx, to.error());
+  auto opts = parse_rename_options(ctx, argc, argv);
+  if (!opts) return throw_error(ctx, opts.error());
   return spawn_js_promise(
       ctx,
       host,
-      [host, from = std::move(*from), to = std::move(*to)](
+      [host, from = std::move(*from), to = std::move(*to), opts = *opts](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_offload(
-            host->services().pool, [host, from = std::move(from), to = std::move(to)]() {
+            host->services().fs_pool,
+            [host, from = std::move(from), to = std::move(to), opts]() {
               auto a = resolve_under_data(host, from);
               if (!a) return VoidResult{std::unexpected(std::move(a.error()))};
               auto b = resolve_under_data(host, to);
               if (!b) return VoidResult{std::unexpected(std::move(b.error()))};
-              return vacps::fs::rename_path(*a, *b);
+              return vacps::fs::rename_path(*a, *b, opts);
             });
         if (!r) {
           bridge.reject(r.error());
@@ -155,7 +221,7 @@ JSValue js_fs_read_directory(JSContext* ctx, JSValueConst, int argc, JSValueCons
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto entries = co_await vacps::fs::async_offload(host->services().pool, [host, path = std::move(path)]() {
+        auto entries = co_await vacps::fs::async_offload(host->services().fs_pool, [host, path = std::move(path)]() {
           auto abs = resolve_under_data(host, path);
           if (!abs) {
             return Result<std::vector<vacps::fs::DirEntry>>{
@@ -194,7 +260,7 @@ JSValue js_fs_stat(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
       host,
       [host, path = std::move(*path)](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto st = co_await vacps::fs::async_offload(host->services().pool, [host, path = std::move(path)]() {
+        auto st = co_await vacps::fs::async_offload(host->services().fs_pool, [host, path = std::move(path)]() {
           auto abs = resolve_under_data(host, path);
           if (!abs) {
             return Result<vacps::fs::FileStat>{std::unexpected(std::move(abs.error()))};
@@ -236,60 +302,61 @@ std::shared_ptr<vacps::fs::File> file_from_this(JSContext* ctx, JSValueConst thi
   return f;
 }
 
-/** Parse Node-like open args: (path, flags, mode?) or (path, { flags, mode? }).
- *  Numeric flags are cast to vacps::fs::Flags (Asio file_base values on Linux). */
+/**
+ * Parse File.open args: (path, modeString) or (path, { mode, permissions? }).
+ * OpenMode → Asio/POSIX bits is mapped inside File::open (not here).
+ */
 Result<vacps::fs::OpenOptions> open_options_from_js(
     JSContext* ctx,
     int argc,
     JSValueConst* argv) {
   vacps::fs::OpenOptions opts;
   if (argc < 2) {
-    return std::unexpected(Error{"File.open(path, flags, mode?)"});
+    return std::unexpected(Error{"File.open(path, options)"});
   }
-  if (is_number(argv[1])) {
-    auto flags = converter<std::int32_t>::from_js(ctx, argv[1]);
-    if (!flags) return std::unexpected(std::move(flags.error()));
-    opts.flags = vacps::fs::flags_from_int(*flags);
-    if (argc >= 3 && !is_nullish(argv[2])) {
-      auto mode = converter<std::int32_t>::from_js(ctx, argv[2]);
-      if (!mode) return std::unexpected(std::move(mode.error()));
-      if (*mode < 0) {
-        return std::unexpected(Error{"File.open: mode must be >= 0"});
-      }
-      opts.mode = static_cast<unsigned>(*mode);
-    }
+  // Bare mode string: File.open(path, "read")
+  if (is_string(argv[1])) {
+    auto mode_s = converter<std::string>::from_js(ctx, argv[1]);
+    if (!mode_s) return std::unexpected(std::move(mode_s.error()));
+    auto mode = vacps::fs::open_mode_from_string(*mode_s);
+    if (!mode) return std::unexpected(std::move(mode.error()));
+    opts.mode = *mode;
     return opts;
   }
   if (!is_object(argv[1]) || is_null(argv[1])) {
-    return std::unexpected(Error{"File.open: flags number or options object required"});
+    return std::unexpected(
+        Error{"File.open: mode string or options object required"});
   }
-  Value flags_v = Value::get_property_str(ctx, argv[1], "flags");
-  if (flags_v.is_nullish()) {
-    return std::unexpected(Error{"File.open: options.flags required"});
-  }
-  auto flags = converter<std::int32_t>::from_js(ctx, flags_v.get());
-  if (!flags) return std::unexpected(std::move(flags.error()));
-  opts.flags = vacps::fs::flags_from_int(*flags);
   Value mode_v = Value::get_property_str(ctx, argv[1], "mode");
-  if (!mode_v.is_nullish()) {
-    auto mode = converter<std::int32_t>::from_js(ctx, mode_v.get());
-    if (!mode) return std::unexpected(std::move(mode.error()));
-    if (*mode < 0) {
-      return std::unexpected(Error{"File.open: mode must be >= 0"});
+  if (mode_v.is_nullish()) {
+    return std::unexpected(Error{"File.open: options.mode required"});
+  }
+  auto mode_s = converter<std::string>::from_js(ctx, mode_v.get());
+  if (!mode_s) return std::unexpected(std::move(mode_s.error()));
+  auto mode = vacps::fs::open_mode_from_string(*mode_s);
+  if (!mode) return std::unexpected(std::move(mode.error()));
+  opts.mode = *mode;
+  Value perms_v = Value::get_property_str(ctx, argv[1], "permissions");
+  if (!perms_v.is_nullish()) {
+    auto perms = converter<std::int32_t>::from_js(ctx, perms_v.get());
+    if (!perms) return std::unexpected(std::move(perms.error()));
+    if (*perms < 0) {
+      return std::unexpected(Error{"File.open: permissions must be >= 0"});
     }
-    opts.mode = static_cast<unsigned>(*mode);
+    opts.permissions = static_cast<std::uint32_t>(*perms);
   }
   return opts;
 }
 
 JSValue js_file_ctor(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  return JS_ThrowTypeError(ctx, "File is not constructible; use File.open(path, flags, mode?)");
+  return JS_ThrowTypeError(
+      ctx, "File is not constructible; use File.open(path, options)");
 }
 
 JSValue js_file_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   auto* host = script_runtime_from(ctx);
   if (!host) return throw_msg(ctx, "fs: runtime not wired");
-  if (argc < 2) return JS_ThrowTypeError(ctx, "File.open(path, flags, mode?)");
+  if (argc < 2) return JS_ThrowTypeError(ctx, "File.open(path, options)");
   auto path = parse_user_path(ctx, argv[0]);
   if (!path) return throw_error(ctx, path.error());
   auto opts = open_options_from_js(ctx, argc, argv);
@@ -299,14 +366,9 @@ JSValue js_file_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv)
       host,
       [host, path = std::move(*path), opts = *opts](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
+        auto fs_ex = host->services().fs();
         auto opened = co_await vacps::fs::File::async_open(
-            vacps::fs::AsyncOptions{
-                host->services().pool,
-                host->ioc().get_executor(),
-                host->services().use_asio_file},
-            std::move(path),
-            opts,
-            host->services().data_dir);
+            fs_ex, std::move(path), opts, host->services().data_dir);
         if (!opened) {
           bridge.reject(opened.error());
         } else {
@@ -322,11 +384,11 @@ JSValue js_file_get_path(JSContext* ctx, JSValueConst this_val) {
   return converter<std::string>::to_js(ctx, f->display_path()).release();
 }
 
-JSValue js_file_get_flags(JSContext* ctx, JSValueConst this_val) {
+JSValue js_file_get_mode(JSContext* ctx, JSValueConst this_val) {
   auto f = file_from_this(ctx, this_val);
   if (!f) return JS_EXCEPTION;
-  return converter<std::int32_t>::to_js(
-             ctx, vacps::fs::flags_to_int(f->flags()))
+  return converter<std::string>::to_js(
+             ctx, std::string{vacps::fs::open_mode_to_string(f->open_mode())})
       .release();
 }
 
@@ -341,6 +403,7 @@ JSValue js_file_read(JSContext* ctx, JSValueConst this_val, int argc, JSValueCon
   if (!host) return throw_msg(ctx, "fs: runtime not wired");
   auto f = file_from_this(ctx, this_val);
   if (!f) return JS_EXCEPTION;
+  // Omitted maxBytes → C++ default (16 MiB); hard reject above 64 MiB inside File.
   std::size_t max_bytes = std::numeric_limits<std::size_t>::max();
   if (argc >= 1 && !is_nullish(argv[0])) {
     auto n = converter<std::int64_t>::from_js(ctx, argv[0]);
@@ -352,8 +415,12 @@ JSValue js_file_read(JSContext* ctx, JSValueConst this_val, int argc, JSValueCon
       ctx, host,
       [f, max_bytes](JSContext* c, PromiseBridge& bridge) -> boost::asio::awaitable<void> {
         auto data = co_await f->async_read(max_bytes);
-        if (!data) bridge.reject(data.error());
-        else bridge.resolve(bytes_to_js(c, *data));
+        if (!data) {
+          bridge.reject(data.error());
+        } else {
+          // d.ts: Promise<Uint8Array>
+          bridge.resolve(to_uint8_array(c, *data));
+        }
         co_return;
       });
 }
@@ -376,8 +443,12 @@ JSValue js_file_read_at(JSContext* ctx, JSValueConst this_val, int argc, JSValue
        max_bytes = static_cast<std::size_t>(*maxb)](
           JSContext* c, PromiseBridge& bridge) -> boost::asio::awaitable<void> {
         auto data = co_await f->async_read_at(offset, max_bytes);
-        if (!data) bridge.reject(data.error());
-        else bridge.resolve(bytes_to_js(c, *data));
+        if (!data) {
+          bridge.reject(data.error());
+        } else {
+          // d.ts: Promise<Uint8Array>
+          bridge.resolve(to_uint8_array(c, *data));
+        }
         co_return;
       });
 }
@@ -387,6 +458,7 @@ JSValue js_file_read_text(JSContext* ctx, JSValueConst this_val, int argc, JSVal
   if (!host) return throw_msg(ctx, "fs: runtime not wired");
   auto f = file_from_this(ctx, this_val);
   if (!f) return JS_EXCEPTION;
+  // Omitted maxBytes → C++ default (16 MiB); hard reject above 64 MiB inside File.
   std::size_t max_bytes = std::numeric_limits<std::size_t>::max();
   if (argc >= 1 && is_object(argv[0]) && !is_null(argv[0])) {
     Value mb = Value::get_property_str(ctx, argv[0], "maxBytes");
@@ -559,7 +631,7 @@ JSValue js_file_close(JSContext* ctx, JSValueConst this_val, int, JSValueConst*)
 
 const JSCFunctionListEntry k_file_proto[] = {
     JS_CGETSET_DEF("path", js_file_get_path, nullptr),
-    JS_CGETSET_DEF("flags", js_file_get_flags, nullptr),
+    JS_CGETSET_DEF("mode", js_file_get_mode, nullptr),
     JS_CGETSET_DEF("closed", js_file_get_closed, nullptr),
     JS_CFUNC_DEF("read", 1, js_file_read),
     JS_CFUNC_DEF("readAt", 2, js_file_read_at),
@@ -590,36 +662,12 @@ JSValue make_file_constructor(JSContext* ctx) {
 }
 
 const JSCFunctionListEntry k_fs_exports[] = {
-    JS_CFUNC_DEF("mkdir", 1, js_fs_mkdir),
+    JS_CFUNC_DEF("mkdir", 2, js_fs_mkdir),
     JS_CFUNC_DEF("exists", 1, js_fs_exists),
     JS_CFUNC_DEF("stat", 1, js_fs_stat),
-    JS_CFUNC_DEF("remove", 1, js_fs_remove),
-    JS_CFUNC_DEF("rename", 2, js_fs_rename),
+    JS_CFUNC_DEF("remove", 2, js_fs_remove),
+    JS_CFUNC_DEF("rename", 3, js_fs_rename),
     JS_CFUNC_DEF("readDirectory", 1, js_fs_read_directory),
-    // Numeric open flags (Asio file_base values / POSIX-compatible on Linux).
-    JS_PROP_INT32_DEF(
-        "O_RDONLY", vacps::fs::flags_to_int(vacps::fs::Flags::read_only),
-        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
-    JS_PROP_INT32_DEF(
-        "O_WRONLY", vacps::fs::flags_to_int(vacps::fs::Flags::write_only),
-        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
-    JS_PROP_INT32_DEF(
-        "O_RDWR", vacps::fs::flags_to_int(vacps::fs::Flags::read_write),
-        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
-    JS_PROP_INT32_DEF(
-        "O_CREAT", vacps::fs::flags_to_int(vacps::fs::Flags::create),
-        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
-    JS_PROP_INT32_DEF(
-        "O_TRUNC", vacps::fs::flags_to_int(vacps::fs::Flags::truncate),
-        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
-    JS_PROP_INT32_DEF(
-        "O_APPEND", vacps::fs::flags_to_int(vacps::fs::Flags::append),
-        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
-    JS_PROP_INT32_DEF(
-        "O_EXCL", vacps::fs::flags_to_int(vacps::fs::Flags::exclusive),
-        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
-    // Host always sets CLOEXEC on the pool path; export for Node-style OR masks.
-    JS_PROP_INT32_DEF("O_CLOEXEC", O_CLOEXEC, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
 };
 
 int js_fs_init(JSContext* ctx, JSModuleDef* m) {
@@ -637,7 +685,10 @@ int js_fs_init(JSContext* ctx, JSModuleDef* m) {
 
 }  // namespace
 
-JSModuleDef* init_module_fs(JSContext* ctx, const char* name, void* /*binding*/) {
+JSModuleDef* init_module_fs(JSContext* ctx, const char* name, void* binding) {
+  // binding: FsBindingContext* (data_dir / pool / use_asio_file). Call sites
+  // still use script_runtime_from for Promise bridge; binding is composition.
+  [[maybe_unused]] auto* fs_ctx = static_cast<FsBindingContext*>(binding);
   JSModuleDef* m = JS_NewCModule(ctx, name, js_fs_init);
   if (!m) return nullptr;
   JS_AddModuleExportList(ctx, m, k_fs_exports, VACPS_COUNTOF(k_fs_exports));

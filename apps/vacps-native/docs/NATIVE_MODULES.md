@@ -4,17 +4,36 @@ C++ 只提供**能力/工厂**（类型级 API），**不**预创建业务实例
 业务路由（含 `/health`、`/ready`）全部在 script；C++ HTTP 仅传输。  
 模块名固定：`import * as x from "vacps:…"`.
 
-## Global: `URL`（Ada 4.x）
+## Global: `URL` / `URLSearchParams`（Ada 4.x，子集）
 
-ScriptRuntime 启动时安装 `globalThis.URL`（[Ada](https://github.com/ada-url/ada) v4 WHATWG 解析）。  
-供 Zod `z.url()` 等依赖浏览器/Node URL API 的代码使用。
+ScriptRuntime 启动时安装 `globalThis.URL` 与 `globalThis.URLSearchParams`（[Ada](https://github.com/ada-url/ada) v4 WHATWG）。  
+供 Zod `z.url()` 等依赖浏览器/Node URL API 的代码使用。TS 声明见 `script/types/url.d.ts`（只声明已实现面）。
 
-| API                                                                                                | 说明                            |
-| -------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `new URL(input, [base])`                                                                           | 非法 → `TypeError: Invalid URL` |
-| `url.href` / `protocol` / `hostname` / `host` / `pathname` / `search` / `hash` / `port` / `origin` | getters                         |
-| `URL.canParse(input, [base])`                                                                      | static boolean                  |
-| `toString()` / `toJSON()`                                                                          | → href                          |
+### `URL`
+
+| API | 说明 |
+| --- | --- |
+| `new URL(input, [base])` | 非法 → `TypeError: Invalid URL` |
+| `href` / `origin` / `protocol` / `username` / `password` / `host` / `hostname` / `port` / `pathname` / `search` / `hash` | **getters**（Ada） |
+| `search` **setter** | 更新 Ada 并 re-parse 到 live `searchParams` |
+| `searchParams` | **live** 同一对象（`url.searchParams === url.searchParams`）；mutation 回写 `search`/`href` |
+| `URL.canParse(input, [base])` | static boolean |
+| `toString()` / `toJSON()` | → href |
+
+**未实现 / 有意省略：** 除 `search` 外的 component **setters**（`href`/`protocol`/`username`/`password`/… 只读）；`URL.parse` static。
+
+### `URLSearchParams`
+
+| API | 说明 |
+| --- | --- |
+| `new URLSearchParams([init])` | `init` 仅 **string**（可带 `?`）；省略/null/undefined → 空。**不支持** record/sequence init |
+| `append` / `set` / `get` / `getAll` / `has` / `delete` / `sort` / `toString` | 标准语义；`has`/`delete` 可选第二参数 value |
+| `size` | getter |
+| `entries` / `keys` / `values` | 返回 iterator（`next()` → `{value, done}`） |
+| `forEach(cb, thisArg?)` | `cb(value, name, searchParams)` |
+| `Symbol.iterator` | 同 `entries`（`for (const [k,v] of sp)`） |
+
+Live 约束：`url.searchParams` 不是一次性副本；`sp.set` ↔ `url.search` 双向。
 
 ## `vacps:log`
 

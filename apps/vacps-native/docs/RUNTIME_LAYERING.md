@@ -10,7 +10,9 @@
 | QuickJS | ScriptRuntime、PromiseBridge、ModuleCatalog、GlobalApiInstaller、各类 Binding |
 | JS 运行时创建 | `fs::File`、`storage::Store`、`http::Server`、`process::Process`、URL / Text\* |
 
-共享环境：`ApplicationRuntime` 持有 `ScriptServices`（`data_dir` / `ca_bundle` / `environment` / `thread_pool` / `process::Registry` / `use_asio_file`）；`ScriptRuntime` 只持 engine + `shared_ptr<ScriptServices>`，经 `services()` 暴露给 bindings。
+共享环境：`ApplicationRuntime` 持有 `ScriptServices`（`data_dir` / `ca_bundle` / `environment` / `fs_pool` / `db_pool` / `process::ProcessRuntime` / `use_asio_file`）；`ScriptRuntime` 持 engine + `shared_ptr<ScriptServices>` + **instance** `ModuleCatalog` / `ModuleBindings`（非 process-static）。`ModuleDescriptor.binding` 指向 thin context（`FsBindingContext*` 等，非 owning）；纯模块 log/crypto 为 `nullptr`。Promise bridge 仍经 `script_runtime_from` / `services()`。
+
+**资源所有权**见 [`NATIVE_RESOURCE_OWNERSHIP.md`](./NATIVE_RESOURCE_OWNERSHIP.md) 与 [`PROCESS_RUNTIME.md`](./PROCESS_RUNTIME.md)：JS 拥有 File/Store/Server/Process；Host **不**维护业务对象 registry / stopAll。关机：`mark_stopping` → 停 tick → **JS `shutdown()`** → drain → `ScriptRuntime::close` → stop executors → `ioc.stop`。`ProcessRuntime` 仅 executor+budget，进程状态在每个 `process::Process` 内。
 
 ## Filesystem：C++ 纯 I/O
 
@@ -52,7 +54,7 @@ const server = new Server(options);
 const process = new Process(command, args?, options?);
 ```
 
-JS 对象即资源句柄；不靠全局 ID registry（除非未来有跨对象寻址需求）。
+JS 对象即资源句柄；**禁止** Host 侧业务对象 registry（见所有权规范）。Process 内部可用 backend id，不暴露给 JS 作为全局资源表。
 
 ## 产品 surface（vacps:fs 已定稿）
 

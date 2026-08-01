@@ -1,4 +1,5 @@
 #include "storage/database.hpp"
+#include "storage/store.hpp"
 #include "app/log.hpp"
 
 #include <gtest/gtest.h>
@@ -7,9 +8,12 @@
 #include <filesystem>
 #include <string>
 #include <unistd.h>
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace fs = std::filesystem;
+namespace storage = vacps::storage;
 
 class DbTest : public ::testing::Test {
  protected:
@@ -93,4 +97,146 @@ TEST_F(DbTest, TransactionRollback) {
   ASSERT_TRUE(q);
   ASSERT_EQ(q->rows.size(), 1u);
   EXPECT_EQ(std::get<std::int64_t>(q->rows[0][0]), 0);
+}
+
+// ── Store domain: expectedChanges + finalizer-safe close ───────────────────
+
+TEST_F(DbTest, StoreTransactionExpectedChangesOnRun) {
+  auto opened = storage::Store::open(db_path_);
+  ASSERT_TRUE(opened) << opened.error().message;
+  auto store = std::move(*opened);
+
+  ASSERT_TRUE(store->exec("CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER);"))
+      << "create";
+
+  storage::ExpectedChanges exactly_one;
+  exactly_one.kind = storage::ExpectedChanges::Kind::Exactly;
+  exactly_one.n = 1;
+
+  std::vector<storage::TransactionStep> steps;
+  {
+    storage::TransactionStep s;
+    s.sql = "INSERT INTO t(v) VALUES(?)";
+    s.params = {storage::sql_int(7)};
+    s.type = storage::StepType::Run;
+    s.expected_changes = exactly_one;
+    steps.push_back(std::move(s));
+  }
+  {
+    storage::TransactionStep s;
+    s.sql = "SELECT v FROM t WHERE v = ?";
+    s.params = {storage::sql_int(7)};
+    s.type = storage::StepType::Query;
+    // no expected_changes — query steps must not check changes()
+    steps.push_back(std::move(s));
+  }
+
+  auto r = store->transaction(steps);
+  ASSERT_TRUE(r) << r.error().message;
+  ASSERT_EQ(r->size(), 2u);
+  ASSERT_TRUE(std::holds_alternative<storage::RunResult>((*r)[0]));
+  EXPECT_EQ(std::get<storage::RunResult>((*r)[0]).changes, 1);
+  ASSERT_TRUE(std::holds_alternative<storage::QueryResult>((*r)[1]));
+  EXPECT_EQ(std::get<storage::QueryResult>((*r)[1]).rows.size(), 1u);
+}
+
+TEST_F(DbTest, StoreTransactionExpectedChangesMismatchRollsBack) {
+  auto opened = storage::Store::open(db_path_);
+  ASSERT_TRUE(opened) << opened.error().message;
+  auto store = std::move(*opened);
+
+  ASSERT_TRUE(store->exec("CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER);"));
+
+  storage::ExpectedChanges exactly_two;
+  exactly_two.kind = storage::ExpectedChanges::Kind::Exactly;
+  exactly_two.n = 2;  // INSERT will change 1 row → mismatch
+
+  std::vector<storage::TransactionStep> steps;
+  {
+    storage::TransactionStep s;
+    s.sql = "INSERT INTO t(v) VALUES(1)";
+    s.type = storage::StepType::Run;
+    s.expected_changes = exactly_two;
+    steps.push_back(std::move(s));
+  }
+
+  auto r = store->transaction(steps);
+  ASSERT_FALSE(r);
+  EXPECT_NE(r.error().message.find("expectedChanges"), std::string::npos);
+
+  auto q = store->query("SELECT COUNT(*) AS c FROM t");
+  ASSERT_TRUE(q) << q.error().message;
+  ASSERT_EQ(q->rows.size(), 1u);
+  EXPECT_EQ(std::get<std::int64_t>(q->rows[0][0]), 0);
+}
+
+TEST_F(DbTest, StoreTransactionQueryStepDoesNotCheckExpectedChanges) {
+  // Domain skips expected_changes on Query (never compares against sqlite changes()).
+  // JS binding / memory-store reject query + expectedChanges with a clear error
+  // before work runs; C++ domain still ignores the field if present.
+  auto opened = storage::Store::open(db_path_);
+  ASSERT_TRUE(opened) << opened.error().message;
+  auto store = std::move(*opened);
+
+  ASSERT_TRUE(store->exec("CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER);"));
+  ASSERT_TRUE(store->run("INSERT INTO t(v) VALUES(1)"));
+
+  // Value that would always fail if incorrectly checked against changes().
+  storage::ExpectedChanges exactly_999;
+  exactly_999.kind = storage::ExpectedChanges::Kind::Exactly;
+  exactly_999.n = 999;
+
+  std::vector<storage::TransactionStep> steps;
+  {
+    storage::TransactionStep s;
+    s.sql = "SELECT v FROM t";
+    s.type = storage::StepType::Query;
+    s.expected_changes = exactly_999;
+    steps.push_back(std::move(s));
+  }
+
+  auto r = store->transaction(steps);
+  ASSERT_TRUE(r) << r.error().message;
+  ASSERT_EQ(r->size(), 1u);
+  ASSERT_TRUE(std::holds_alternative<storage::QueryResult>((*r)[0]));
+  EXPECT_EQ(std::get<storage::QueryResult>((*r)[0]).rows.size(), 1u);
+}
+
+TEST_F(DbTest, StoreQueryMaxBytesDuringMaterialize) {
+  auto opened = storage::Store::open(db_path_);
+  ASSERT_TRUE(opened) << opened.error().message;
+  auto store = std::move(*opened);
+
+  ASSERT_TRUE(store->exec("CREATE TABLE t(id INTEGER PRIMARY KEY, blob TEXT);"));
+  // One row with a large text cell — max_bytes should trip during materialize.
+  const std::string payload(1000, 'x');
+  ASSERT_TRUE(store->run(
+      "INSERT INTO t(blob) VALUES(?)", {storage::sql_text(payload)}));
+
+  auto ok = store->query("SELECT blob FROM t", {}, 100, /*max_bytes=*/10'000);
+  ASSERT_TRUE(ok) << ok.error().message;
+
+  auto too_small = store->query("SELECT blob FROM t", {}, 100, /*max_bytes=*/50);
+  ASSERT_FALSE(too_small);
+  EXPECT_NE(too_small.error().message.find("max_bytes"), std::string::npos);
+}
+
+TEST_F(DbTest, StoreCloseIsIdempotentWithoutRuntime) {
+  // Documents that finalizer path needs no ScriptRuntime: close is mutex-safe
+  // and may run on any thread (including GC finalizer) via store->close() only.
+  auto opened = storage::Store::open(db_path_);
+  ASSERT_TRUE(opened) << opened.error().message;
+  auto store = std::move(*opened);
+
+  ASSERT_TRUE(store->exec("CREATE TABLE t(x INTEGER);"));
+  EXPECT_FALSE(store->closed());
+
+  ASSERT_TRUE(store->close());
+  EXPECT_TRUE(store->closed());
+  ASSERT_TRUE(store->close());  // idempotent
+  EXPECT_TRUE(store->closed());
+
+  auto r = store->run("INSERT INTO t(x) VALUES(1)");
+  ASSERT_FALSE(r);
+  EXPECT_NE(r.error().message.find("closed"), std::string::npos);
 }

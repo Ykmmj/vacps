@@ -1,7 +1,7 @@
 #include "storage/store.hpp"
 
+#include <filesystem>
 #include <format>
-#include <type_traits>
 #include <utility>
 
 namespace vacps::storage {
@@ -13,6 +13,25 @@ VoidResult unexpected_closed() {
 
 OpenMode resolve_open_mode(const OpenOptions& options) {
   return options.mode.value_or(OpenMode::ReadWriteCreate);
+}
+
+/** Ensure parent dirs exist when the open may create the DB file. */
+VoidResult ensure_parent_dirs(const std::string& path, OpenMode mode) {
+  if (mode != OpenMode::ReadWriteCreate) {
+    return {};
+  }
+  namespace fs = std::filesystem;
+  const fs::path p(path);
+  if (!p.has_parent_path()) {
+    return {};
+  }
+  std::error_code ec;
+  fs::create_directories(p.parent_path(), ec);
+  if (ec) {
+    return std::unexpected(Error{std::format(
+        "create data dir failed: {} ({})", ec.message(), p.parent_path().string())});
+  }
+  return {};
 }
 
 }  // namespace
@@ -27,6 +46,9 @@ Store::~Store() {
 
 Result<std::shared_ptr<Store>> Store::open(std::string path, OpenOptions options) {
   const OpenMode mode = resolve_open_mode(options);
+  if (auto dirs = ensure_parent_dirs(path, mode); !dirs) {
+    return std::unexpected(std::move(dirs.error()));
+  }
   auto db = Database::open(path, mode);
   if (!db) {
     return std::unexpected(std::move(db.error()));
@@ -72,46 +94,6 @@ VoidResult Store::check_expected_changes(const ExpectedChanges& exp, std::int64_
   return {};
 }
 
-std::size_t Store::estimate_query_bytes(const QueryResult& qr) {
-  std::size_t n = 0;
-  for (const auto& col : qr.columns) {
-    n += col.size();
-  }
-  for (const auto& row : qr.rows) {
-    for (const auto& cell : row) {
-      std::visit(
-          [&](const auto& v) {
-            using T = std::decay_t<decltype(v)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-              // null
-            } else if constexpr (std::is_same_v<T, std::int64_t> || std::is_same_v<T, double>) {
-              n += 8;
-            } else if constexpr (std::is_same_v<T, std::string>) {
-              n += v.size();
-            } else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>>) {
-              n += v.size();
-            }
-          },
-          cell);
-    }
-  }
-  return n;
-}
-
-VoidResult Store::check_max_bytes(
-    const QueryResult& qr,
-    std::optional<std::size_t> max_bytes) {
-  if (!max_bytes) {
-    return {};
-  }
-  const auto used = estimate_query_bytes(qr);
-  if (used > *max_bytes) {
-    return std::unexpected(Error{std::format(
-        "sqlite query exceeded max_bytes={} (approx {})", *max_bytes, used)});
-  }
-  return {};
-}
-
 VoidResult Store::exec(std::string_view sql) {
   std::lock_guard lock(mutex_);
   if (auto o = ensure_open(); !o) {
@@ -140,14 +122,8 @@ Result<QueryResult> Store::query(
   if (auto o = ensure_open(); !o) {
     return std::unexpected(std::move(o.error()));
   }
-  auto qr = db_->query(sql, params, max_rows);
-  if (!qr) {
-    return std::unexpected(std::move(qr.error()));
-  }
-  if (auto b = check_max_bytes(*qr, max_bytes); !b) {
-    return std::unexpected(std::move(b.error()));
-  }
-  return qr;
+  // max_bytes enforced inside Database::query while materializing rows.
+  return db_->query(sql, params, max_rows, max_bytes);
 }
 
 Result<std::vector<TransactionResult>> Store::transaction(
@@ -159,7 +135,7 @@ Result<std::vector<TransactionResult>> Store::transaction(
 
   // Entire unit under mutex_ so no other Store method interleaves this connection.
   // with_transaction: BEGIN IMMEDIATE … COMMIT; any step error → ROLLBACK.
-  // expectedChanges is checked after EACH step; mismatch aborts before later steps.
+  // expectedChanges is checked after EACH Run step; Query steps ignore it.
   return db_->with_transaction([&](Database& self) -> Result<std::vector<TransactionResult>> {
     std::vector<TransactionResult> out;
     out.reserve(steps.size());
@@ -167,14 +143,11 @@ Result<std::vector<TransactionResult>> Store::transaction(
     for (const auto& step : steps) {
       switch (step.type) {
         case StepType::Query: {
+          // expected_changes is not meaningful for SELECT / result sets —
+          // do not check against sqlite3_changes (binding rejects the combo for JS).
           auto qr = self.query(step.sql, step.params, step.max_rows);
           if (!qr) {
             return std::unexpected(std::move(qr.error()));
-          }
-          if (step.expected_changes) {
-            if (auto c = check_expected_changes(*step.expected_changes, self.changes()); !c) {
-              return std::unexpected(std::move(c.error()));
-            }
           }
           out.emplace_back(std::move(*qr));
           break;

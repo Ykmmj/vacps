@@ -1,23 +1,28 @@
 #pragma once
 
 /**
- * Process-level graceful shutdown (temp/n1.md §十七).
+ * Process-level graceful shutdown (see docs/NATIVE_RESOURCE_OWNERSHIP.md).
  *
  * Single owner of SIGINT/SIGTERM and the ordered teardown sequence.
- * HTTP Server must not own signal_set, call ioc.stop(), or run JS shutdown.
+ * HTTP Server / Process domain objects are JS-owned — Host does not enumerate
+ * them or call stopAll before JS shutdown().
  *
- * Sequence (as far as current APIs allow):
- *   1. mark stopping
- *   2. cancel tick timer
- *   3. processes.shutdown
- *   4. wait_async_idle
- *   5. shutdown_script
- *   6. wait_async_idle
- *   7. cancel_host_async / drain_jobs
- *   8. ioc.stop
+ * Sequence:
+ *   1. mark Host stopping (ScriptRuntime::mark_stopping → 503 / reject new work)
+ *   2. cancel tick timer (stop periodic JS entry)
+ *   3. JS shutdown() export (business closes Server/Process/Store/…)
+ *   4. wait promises / async idle from that shutdown
+ *   5. cancel_host_async + drain QuickJS jobs
+ *   6. ScriptRuntime::close() (free JS values, FreeContext, FreeRuntime;
+ *      finalizers release holders → C++ dtors force-clean OS resources)
+ *   7. stop pool/executors (+ process backend teardown as infrastructure)
+ *   8. ioc.stop()
  *
- * HTTP server accept/session drain, JS value free, and executor stop are
- * not yet centralized (no global server registry; ApplicationRuntime owns this).
+ * On JS shutdown failure/timeout: log, still FreeContext (no second Host
+ * business-resource stopAll). See ownership doc §十.
+ *
+ * All exit paths (signal, ApplicationRuntime::stop, init failure after runtime
+ * create) should call request_stop — not raw ioc.stop() alone.
  */
 
 #include "quickjs/script_runtime.hpp"

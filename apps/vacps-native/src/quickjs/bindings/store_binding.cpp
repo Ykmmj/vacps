@@ -8,6 +8,8 @@
 
 #include "quickjs/bindings/modules_init.hpp"
 #include "quickjs/bindings/common.hpp"
+#include "quickjs/bindings/store_js_convert.hpp"
+#include "quickjs/module_bindings.hpp"
 
 #include "fs/async.hpp"
 #include "quickjs/script_runtime.hpp"
@@ -25,7 +27,6 @@
 #include <variant>
 #include <vector>
 
-#include <boost/asio/post.hpp>
 #include <quickjs.h>
 
 namespace vacps::js {
@@ -43,12 +44,14 @@ using vacps::storage::TransactionStep;
 /**
  * Opaque for JS Store instances.
  * shared_ptr keeps storage::Store alive across async offload + GC finalizer.
- * host is only used to defer sqlite close onto the offload pool when the JS
- * object is GC'd while the connection is still open.
+ *
+ * Intentionally no ScriptRuntime*: the finalizer must not touch the host
+ * (shared_from_this / pool). Store::close() is mutex-safe and may run on the
+ * GC/finalizer thread; open/async paths obtain ScriptRuntime only for the
+ * promise bridge via script_runtime_from(ctx).
  */
 struct StoreHandle {
   std::shared_ptr<Store> store;
-  ScriptRuntime* host{nullptr};
 };
 
 JSClassID g_store_class_id = 0;
@@ -58,15 +61,10 @@ void store_finalizer(JSRuntime* /*rt*/, JSValue val) {
   if (h == nullptr) {
     return;
   }
-  if (h->store && !h->store->closed() && h->host != nullptr) {
-    auto store = h->store;
-    try {
-      auto sp = h->host->shared_from_this();
-      boost::asio::post(sp->services().pool, [store]() { (void)store->close(); });
-    } catch (...) {
-      // ScriptRuntime already tearing down — close on this thread.
-      (void)store->close();
-    }
+  // Sync close on the finalizer thread — no ScriptRuntime required.
+  // Store::close is idempotent and serialized with other Store methods via mutex_.
+  if (h->store) {
+    (void)h->store->close();
   }
   delete h;
 }
@@ -95,9 +93,9 @@ StoreHandle* store_handle_from_this(JSContext* ctx, JSValueConst this_val) {
   return h;
 }
 
-JSValue make_store_object(JSContext* ctx, ScriptRuntime* host, std::shared_ptr<Store> store) {
+JSValue make_store_object(JSContext* ctx, std::shared_ptr<Store> store) {
   ensure_store_class(ctx);
-  auto* handle = new StoreHandle{std::move(store), host};
+  auto* handle = new StoreHandle{std::move(store)};
   Value obj{ctx, JS_NewObjectClass(ctx, static_cast<int>(g_store_class_id))};
   if (obj.is_exception()) {
     delete handle;
@@ -273,7 +271,7 @@ JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
       [path = std::move(*path), options = std::move(options), host](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto opened = co_await vacps::fs::async_offload(
-            host->services().pool,
+            host->services().db_pool,
             [path = std::move(path), options = std::move(options)]() mutable
                 -> Result<std::shared_ptr<Store>> {
               return Store::open(std::move(path), std::move(options));
@@ -282,7 +280,7 @@ JSValue js_store_open(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
           bridge.reject(opened.error());
           co_return;
         }
-        Value obj{c, make_store_object(c, host, std::move(*opened))};
+        Value obj{c, make_store_object(c, std::move(*opened))};
         if (obj.is_exception()) {
           bridge.reject_message("Store.open: failed to allocate Store object");
           co_return;
@@ -307,7 +305,7 @@ JSValue js_store_exec(JSContext* ctx, JSValueConst this_val, int argc, JSValueCo
       host,
       [store, sql = std::move(*sql), host](JSContext*, PromiseBridge& bridge) mutable
           -> boost::asio::awaitable<void> {
-        auto r = co_await vacps::fs::async_offload(host->services().pool, [store, sql]() -> VoidResult {
+        auto r = co_await vacps::fs::async_offload(host->services().db_pool, [store, sql]() -> VoidResult {
           return store->exec(sql);
         });
         if (!r) {
@@ -341,7 +339,7 @@ JSValue js_store_run(JSContext* ctx, JSValueConst this_val, int argc, JSValueCon
       [store, sql = std::move(*sql), params = std::move(params), host](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_offload(
-            host->services().pool,
+            host->services().db_pool,
             [store, sql, params]() -> Result<RunResult> {
               return store->run(sql, params);
             });
@@ -396,7 +394,7 @@ JSValue js_store_query(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
       [store, sql = std::move(*sql), params = std::move(params), qopts, host](
           JSContext* c, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
         auto qr = co_await vacps::fs::async_offload(
-            host->services().pool,
+            host->services().db_pool,
             [store, sql, params, qopts]() -> Result<QueryResult> {
               return store->query(sql, params, qopts.max_rows, qopts.max_bytes);
             });
@@ -413,7 +411,8 @@ JSValue js_store_query(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
  * store.transaction(steps) → Promise<(RunResult|Row[])[]>
  * steps: Array<{ sql, params?, type?: "run"|"query", expectedChanges? }>
  * Entire unit: one offload job + Store mutex + BEGIN IMMEDIATE … COMMIT.
- * expectedChanges checked after each step; mismatch → ROLLBACK before later steps.
+ * expectedChanges is only valid on run steps (checked after each run);
+ * query + expectedChanges is rejected at the binding.
  */
 JSValue js_store_transaction(
     JSContext* ctx,
@@ -471,6 +470,12 @@ JSValue js_store_transaction(
     Value exp_v = Value::get_property_str(ctx, el.get(), "expectedChanges");
     auto exp = expected_changes_from_js(ctx, exp_v.get());
     if (!exp) return throw_error(ctx, exp.error());
+    if (exp->has_value() && step.type == StepType::Query) {
+      return throw_error(
+          ctx,
+          Error{
+              "store.transaction: expectedChanges is only valid for run steps, not query"});
+    }
     step.expected_changes = std::move(*exp);
 
     steps.push_back(std::move(step));
@@ -483,7 +488,7 @@ JSValue js_store_transaction(
       [store, steps = std::move(steps), host](JSContext* c, PromiseBridge& bridge) mutable
           -> boost::asio::awaitable<void> {
         auto r = co_await vacps::fs::async_offload(
-            host->services().pool,
+            host->services().db_pool,
             [store, steps = std::move(steps)]() mutable
                 -> Result<std::vector<TransactionResult>> {
               return store->transaction(steps);
@@ -525,7 +530,7 @@ JSValue js_store_close(JSContext* ctx, JSValueConst this_val, int, JSValueConst*
       ctx,
       host,
       [store, host](JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        co_await vacps::fs::async_offload(host->services().pool, [store]() {
+        co_await vacps::fs::async_offload(host->services().db_pool, [store]() {
           (void)store->close();
           return true;
         });
@@ -571,7 +576,9 @@ int js_store_init(JSContext* ctx, JSModuleDef* m) {
 
 }  // namespace
 
-JSModuleDef* init_module_store(JSContext* ctx, const char* name, void* /*binding*/) {
+JSModuleDef* init_module_store(JSContext* ctx, const char* name, void* binding) {
+  // binding: StoreBindingContext* (pool for SQL offload).
+  [[maybe_unused]] auto* store_ctx = static_cast<StoreBindingContext*>(binding);
   JSModuleDef* m = JS_NewCModule(ctx, name, js_store_init);
   if (!m) return nullptr;
   JS_AddModuleExport(ctx, m, "Store");

@@ -51,10 +51,11 @@ class ApplicationRuntime {
   ApplicationRuntime& operator=(ApplicationRuntime&&) = delete;
 
   /**
-   * Create ScriptServices + ScriptRuntime, arm signals, co_spawn
-   * load_and_initialize then TickLoop.
-   * Sync failures (e.g. QuickJS create) return Error; script init failure is
-   * reported via run()'s exit code after ioc.stop().
+   * Create ScriptServices + ScriptRuntime, install_modules (bindings), arm
+   * signals, read script file, co_spawn initialize_from_source then TickLoop.
+   * Sync failures (e.g. QuickJS create / module install / script read) return
+   * Error; script init failure uses the same ShutdownCoordinator path as SIGINT
+   * (exit code via run()).
    */
   [[nodiscard]] VoidResult start(std::string_view script_path);
 

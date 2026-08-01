@@ -1,10 +1,10 @@
 import * as crypto from 'vacps:crypto';
 import * as host from 'vacps:host';
-import { Process, type ProcessResult } from 'vacps:process';
+import * as log from 'vacps:log';
+import { Process, run, type ProcessResult } from 'vacps:process';
 
 import { resolveExecutable } from '../util/resolve-executable';
 import { randomUuidV4 } from '../util/uuid';
-import { utf8Decode } from '../util/utf8';
 import { assertSafeAbsolutePath } from './path-guard';
 
 export type ProcessStatus = 'running' | 'exited' | 'signaled' | 'timed_out' | 'cancelled';
@@ -151,6 +151,12 @@ export class ProcessManager {
 
   constructor(private readonly backendId: string) {}
 
+  /**
+   * Fire-and-wait exec. Uses vacps:process `run()` (start+wait+close in one native
+   * coroutine) so the JS event loop cannot park forever between Process.start and
+   * Process.wait — that split path was hanging JsTasksTest.ExecAndFsRoutes.
+   * Long-lived processes still use start() / Process handles.
+   */
   async exec(input: ExecInput): Promise<ProcessSnapshot> {
     const toolName = input.toolName ?? (input.command ? 'shell.exec' : 'command.exec');
     const requestHash = canonicalRequestHash(this.backendId, toolName, input);
@@ -176,11 +182,37 @@ export class ProcessManager {
       }
     }
 
-    const started = await this.start(input);
-    const snap = await this.waitUntilDone(started.process_id, {
-      stdoutMax: input.stdoutMaxBytes ?? 16_384,
-      stderrMax: input.stderrMaxBytes ?? 16_384,
+    const { command, args, cwd, timeoutMs, stdoutMax, stderrMax, hardMaxStdout, hardMaxStderr } =
+      await this.buildExecArgs(input);
+
+    log.info(`ProcessManager.exec run ${command} timeoutMs=${timeoutMs}`);
+    const startedMs = host.nowMs();
+    const result = await run(command, args, {
+      cwd,
+      timeoutMs,
+      maxStdoutBytes: hardMaxStdout,
+      maxStderrBytes: hardMaxStderr,
     });
+    log.info(`ProcessManager.exec done exit=${result.exitCode} timedOut=${result.timedOut}`);
+    const finishedMs = host.nowMs();
+    const id = randomUuidV4();
+    const timedOut = result.timedOut === true;
+    const snap: ProcessSnapshot = {
+      process_id: id,
+      backend_id: this.backendId,
+      status: timedOut ? 'timed_out' : 'exited',
+      exit_code: timedOut ? null : result.exitCode,
+      signal: timedOut ? 'SIGKILL' : null,
+      timed_out: timedOut,
+      started_at: new Date(startedMs).toISOString(),
+      finished_at: new Date(finishedMs).toISOString(),
+      duration_ms: finishedMs - startedMs,
+      stdin_available: false,
+      tty: input.tty === true,
+      output_cursor: null,
+      stdout: preview(result.stdout ?? '', stdoutMax),
+      stderr: preview(result.stderr ?? '', stderrMax),
+    };
 
     if (input.idempotencyKey) {
       this.idempotency.set(`${toolName}\0${input.idempotencyKey}`, {
@@ -197,6 +229,81 @@ export class ProcessManager {
       };
     }
     return snap;
+  }
+
+  private async buildExecArgs(input: ExecInput): Promise<{
+    command: string;
+    args: string[];
+    cwd: string;
+    timeoutMs: number;
+    stdoutMax: number;
+    stderrMax: number;
+    hardMaxStdout: number;
+    hardMaxStderr: number;
+  }> {
+    if (input.program && input.command) {
+      throw Object.assign(new Error('Provide either program or command, not both.'), {
+        code: 'validation_error',
+        statusCode: 400,
+      });
+    }
+    if (!input.program && !input.command) {
+      throw Object.assign(new Error('program or command is required.'), {
+        code: 'validation_error',
+        statusCode: 400,
+      });
+    }
+
+    const timeoutMs = clamp(input.timeoutMs ?? 3_600_000, 1, 3_600_000);
+    const cwd = input.workingDirectory ? assertSafeAbsolutePath(input.workingDirectory) : '/tmp';
+    const stdoutMax = clamp(input.stdoutMaxBytes ?? 16_384, 0, 1_048_576);
+    const stderrMax = clamp(input.stderrMaxBytes ?? 16_384, 0, 1_048_576);
+
+    let argv: string[];
+    if (input.command) {
+      const shell = input.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
+      const loadUserEnvironment =
+        input.loadUserEnvironment !== undefined ? input.loadUserEnvironment : true;
+      if (shell === '/bin/sh' && loadUserEnvironment) {
+        throw Object.assign(
+          new Error(
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or set load_user_environment=false.',
+          ),
+          { code: 'validation_error', statusCode: 400 },
+        );
+      }
+      const shellArgs =
+        shell === '/bin/sh'
+          ? ['-c', input.command]
+          : loadUserEnvironment
+            ? ['-lc', input.command]
+            : ['--noprofile', '--norc', '-c', input.command];
+      argv = [await resolveExecutable(shell), ...shellArgs];
+    } else {
+      argv = [await resolveExecutable(input.program!), ...(input.arguments ?? [])];
+    }
+
+    const hardMaxStdout = clamp(
+      input.hardMaxStdout ?? input.stdoutHardMaxBytes ?? 16 * 1024 * 1024,
+      0,
+      64 * 1024 * 1024,
+    );
+    const hardMaxStderr = clamp(
+      input.hardMaxStderr ?? input.stderrHardMaxBytes ?? 16 * 1024 * 1024,
+      0,
+      64 * 1024 * 1024,
+    );
+
+    return {
+      command: argv[0]!,
+      args: argv.slice(1),
+      cwd,
+      timeoutMs,
+      stdoutMax,
+      stderrMax,
+      hardMaxStdout,
+      hardMaxStderr,
+    };
   }
 
   async start(input: ExecInput): Promise<ProcessSnapshot> {
@@ -417,6 +524,26 @@ export class ProcessManager {
     return { closed: true };
   }
 
+  /**
+   * Application shutdown: terminate then close every tracked Process.
+   * Host does not enumerate processes — JS owns this set.
+   */
+  async closeAll(): Promise<void> {
+    const ids = [...this.tracked.keys()];
+    for (const id of ids) {
+      try {
+        await this.terminate(id, 'sigterm');
+      } catch {
+        /* best-effort */
+      }
+      try {
+        await this.close(id);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
   async terminate(
     processId: string,
     signal: 'sigterm' | 'sigint' | 'sigkill' = 'sigterm',
@@ -513,37 +640,20 @@ export class ProcessManager {
   }
 
   /**
-   * Progressive drain of stdout/stderr via Process.read, then Process.wait for exit metadata.
-   * Notifies readWait long-pollers when data arrives or the process finishes.
+   * Wait for exit via Process.wait() (full captured buffers).
+   * Avoid concurrent Process.read pumps: dual long-wait reads on the same
+   * registry entry can stall the single-threaded ioc until wait_ms (or forever
+   * if pipe EOF lags child exit). Progressive readWait still works off stdoutAcc
+   * once wait completes; long-lived streaming can be revisited with short waits.
    */
   private async pumpOutputs(t: Tracked): Promise<void> {
     const p = t.proc;
-    const pumpStream = async (stream: 'stdout' | 'stderr') => {
-      for (;;) {
-        let chunk: Uint8Array;
-        try {
-          chunk = await p.read(stream);
-        } catch {
-          break;
-        }
-        if (chunk.byteLength === 0) break;
-        const text = utf8Decode(chunk);
-        if (stream === 'stdout') t.stdoutAcc += text;
-        else t.stderrAcc += text;
-        notifyWaiters(t);
-      }
-    };
-
     try {
-      await Promise.all([pumpStream('stdout'), pumpStream('stderr')]);
-      try {
-        t.result = await p.wait();
-        // wait() returns full buffers; fill acc if pump got nothing (race/edge).
-        if (!t.stdoutAcc && t.result.stdout) t.stdoutAcc = t.result.stdout;
-        if (!t.stderrAcc && t.result.stderr) t.stderrAcc = t.result.stderr;
-      } catch {
-        /* closed mid-wait */
-      }
+      t.result = await p.wait();
+      if (t.result.stdout) t.stdoutAcc = t.result.stdout;
+      if (t.result.stderr) t.stderrAcc = t.result.stderr;
+    } catch {
+      /* closed mid-wait */
     } finally {
       t.done = true;
       t.finishedMs = host.nowMs();

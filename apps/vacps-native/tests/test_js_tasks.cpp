@@ -60,6 +60,8 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -70,7 +72,7 @@ TEST_F(JsTasksTest, EnqueueCommandAndCompleteViaPump) {
       ioc,
       [rt, &ok, &err, &get_status, &get_body, script = business_script().string()]()
           -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(script);
+        auto init = co_await vacps::js::load_and_initialize(*rt, script);
         if (!init) {
           err = init.error().message;
           co_return;
@@ -199,6 +201,8 @@ TEST_F(JsTasksTest, RetryAndCrashRecovery) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -206,7 +210,7 @@ TEST_F(JsTasksTest, RetryAndCrashRecovery) {
   asio::co_spawn(
       ioc,
       [rt, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(script);
+        auto init = co_await vacps::js::load_and_initialize(*rt, script);
         if (!init) {
           err = init.error().message;
           co_return;
@@ -269,6 +273,8 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -278,7 +284,7 @@ TEST_F(JsTasksTest, ExecAndFsRoutes) {
       ioc,
       [rt, &ok, &err, script = business_script().string(), file_path]()
           -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(script);
+        auto init = co_await vacps::js::load_and_initialize(*rt, script);
         if (!init) {
           err = init.error().message;
           co_return;
@@ -362,6 +368,8 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -369,7 +377,7 @@ TEST_F(JsTasksTest, MetricsAndScheduler) {
   asio::co_spawn(
       ioc,
       [rt, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(script);
+        auto init = co_await vacps::js::load_and_initialize(*rt, script);
         if (!init) {
           err = init.error().message;
           co_return;
@@ -496,6 +504,8 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -506,7 +516,7 @@ TEST_F(JsTasksTest, FsGlobEditPatch) {
       ioc,
       [rt, &ok, &err, script = business_script().string(), work, file_path]()
           -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(script);
+        auto init = co_await vacps::js::load_and_initialize(*rt, script);
         if (!init) {
           err = init.error().message;
           co_return;
@@ -633,6 +643,8 @@ TEST_F(JsTasksTest, ProcessStartReadTerminate) {
   auto rt_r = vacps::js::ScriptRuntime::create(ioc, engine_opts_, services);
   ASSERT_TRUE(rt_r) << rt_r.error().message;
   auto rt = std::move(*rt_r);
+  ASSERT_TRUE(vacps::js::install_default_modules(*rt))
+      << "install_default_modules failed";
 
   bool ok = false;
   std::string err;
@@ -640,7 +652,7 @@ TEST_F(JsTasksTest, ProcessStartReadTerminate) {
   asio::co_spawn(
       ioc,
       [rt, &ok, &err, script = business_script().string()]() -> asio::awaitable<void> {
-        auto init = co_await rt->load_and_initialize(script);
+        auto init = co_await vacps::js::load_and_initialize(*rt, script);
         if (!init) {
           err = init.error().message;
           co_return;

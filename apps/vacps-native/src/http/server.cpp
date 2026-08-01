@@ -21,6 +21,10 @@ Server::Server(
       handler_(std::move(handler)),
       acceptor_(asio::make_strand(ioc)) {}
 
+Server::~Server() {
+  close();
+}
+
 VoidResult Server::start() {
   beast::error_code ec;
   tcp::endpoint ep(asio::ip::make_address(listen_.host, ec), listen_.port);
@@ -61,7 +65,10 @@ VoidResult Server::start() {
 
 void Server::close() noexcept {
   beast::error_code ignored;
+  // 1. Stop accepting new connections (accept_loop co_returns on closed acceptor).
   acceptor_.close(ignored);
+  // 2. Cancel/drain in-flight sessions (best-effort socket cancel + clear tracking).
+  cancel_all_sessions();
 }
 
 void Server::session_started(std::shared_ptr<Session> session) noexcept {

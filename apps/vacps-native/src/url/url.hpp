@@ -82,7 +82,9 @@ class Url final {
   /** Serialized origin (Ada allocates). */
   [[nodiscard]] std::string origin() const;
 
+  /** Ada username component (empty if none). JS getter only — no domain setter yet. */
   [[nodiscard]] std::string_view username() const noexcept;
+  /** Ada password component (empty if none). JS getter only — no domain setter yet. */
   [[nodiscard]] std::string_view password() const noexcept;
 
   [[nodiscard]] ada::url_aggregator& raw() noexcept { return url_; }

@@ -1,7 +1,6 @@
 #include "quickjs/script_runtime.hpp"
 
 #include "quickjs/js_bridge.hpp"
-#include "quickjs/module_catalog.hpp"
 #include "app/log.hpp"
 #include "app/version.hpp"
 
@@ -12,20 +11,18 @@
 
 #include <fstream>
 #include <format>
+#include <iterator>
 #include <utility>
 
 namespace vacps::js {
-namespace {
 
-Result<std::string> read_file(std::string_view path) {
+Result<std::string> read_script_file(std::string_view path) {
   std::ifstream in{std::string{path}, std::ios::binary};
   if (!in) {
     return std::unexpected(Error{std::format("cannot read script: {}", path)});
   }
   return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
-
-}  // namespace
 
 ScriptRuntime::ScriptRuntime(
     Runtime runtime,
@@ -40,8 +37,26 @@ ScriptRuntime::ScriptRuntime(
       js_time_budget_(engine.js_time_budget) {}
 
 ScriptRuntime::~ScriptRuntime() {
-  cancel_host_async();
+  close();
   // pool / Registry / paths: owned by ScriptServices (composition root).
+}
+
+void ScriptRuntime::close() noexcept {
+  if (closed_) {
+    return;
+  }
+  closed_ = true;
+  shutting_down_ = true;
+  cancel_host_async();
+  script_initialized_ = false;
+  // Free long-lived JS values while context is still alive.
+  script_ns_.reset();
+  if (context_.ok()) {
+    JS_SetContextOpaque(context_.get(), nullptr);
+  }
+  // JS_FreeContext (finalizers release native handles) then JS_FreeRuntime.
+  context_.reset();
+  runtime_.reset();
 }
 
 void ScriptRuntime::async_op_begin() noexcept {
@@ -105,16 +120,26 @@ void ScriptRuntime::notify_progress() {
 }
 
 asio::awaitable<void> ScriptRuntime::wait_progress() {
-  // Always park on a timer — never busy-return. cancel_host_async() cancels waiters.
+  // Park until notify_progress / cancel_host_async, with a short fallback so a
+  // lost wake (race between settle and waiter registration) cannot stall forever.
+  // notify_progress still cancels early for low latency.
   const auto gen = progress_generation_;
   auto executor = co_await asio::this_coro::executor;
+  if (progress_generation_ != gen) {
+    co_return;
+  }
   auto timer = std::make_shared<asio::steady_timer>(executor);
-  timer->expires_at(asio::steady_timer::time_point::max());
+  timer->expires_after(std::chrono::milliseconds(25));
   progress_waiters_.push_back(timer);
+  // Re-check after enqueuing: another thread (or earlier post) may have notified.
+  if (progress_generation_ != gen) {
+    progress_waiters_.remove(timer);
+    timer->cancel();
+    co_return;
+  }
   auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
   (void)ec;
   progress_waiters_.remove(timer);
-  (void)gen;
   co_return;
 }
 
@@ -129,6 +154,9 @@ Result<Value> ScriptRuntime::eval(
     std::string_view source,
     std::string_view filename,
     int flags) {
+  if (closed_ || !ok()) {
+    return std::unexpected(Error{"ScriptRuntime closed"});
+  }
   InterruptScope guard{runtime_, js_time_budget_};
   auto value = context_.eval(source, filename, flags);
   if (!value) {
@@ -207,6 +235,9 @@ asio::awaitable<Result<Value>> ScriptRuntime::invoke_export(
     const char* name,
     int argc,
     JSValueConst* argv) {
+  if (closed_) {
+    co_return std::unexpected(Error{"ScriptRuntime closed"});
+  }
   auto* ctx = context_.get();
   if (ctx == nullptr) {
     co_return std::unexpected(Error{"no context"});
@@ -236,21 +267,21 @@ asio::awaitable<Result<Value>> ScriptRuntime::invoke_export(
   co_return out;
 }
 
-asio::awaitable<VoidResult> ScriptRuntime::load_and_initialize(std::string_view script_path) {
+asio::awaitable<VoidResult> ScriptRuntime::initialize_from_source(
+    std::string_view source,
+    std::string_view filename) {
+  if (closed_) {
+    co_return std::unexpected(Error{"ScriptRuntime closed"});
+  }
   auto* ctx = context_.get();
   if (ctx == nullptr) {
     co_return std::unexpected(Error{"no js context"});
   }
-
-  auto src = read_file(script_path);
-  if (!src) {
-    co_return std::unexpected(std::move(src.error()));
-  }
-  if (src->empty()) {
+  if (source.empty()) {
     co_return std::unexpected(Error{"script file is empty"});
   }
 
-  const std::string filename{script_path};
+  const std::string filename_owned{filename};
   JSModuleDef* mod = nullptr;
   Value pending;
   {
@@ -260,9 +291,9 @@ asio::awaitable<VoidResult> ScriptRuntime::load_and_initialize(std::string_view 
         ctx,
         JS_Eval(
             ctx,
-            src->data(),
-            src->size(),
-            filename.c_str(),
+            source.data(),
+            source.size(),
+            filename_owned.c_str(),
             JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY)};
     if (compiled.is_exception()) {
       co_return std::unexpected(Error{
@@ -294,14 +325,27 @@ asio::awaitable<VoidResult> ScriptRuntime::load_and_initialize(std::string_view 
         Error{std::format("initialize() failed: {}", init.error().message)});
   }
   script_initialized_ = true;
-  log::info("business script ready ({})", script_path);
+  log::info("business script ready ({})", filename);
   co_return VoidResult{};
 }
 
+asio::awaitable<VoidResult> load_and_initialize(
+    ScriptRuntime& rt,
+    std::string_view script_path) {
+  auto src = read_script_file(script_path);
+  if (!src) {
+    co_return std::unexpected(std::move(src.error()));
+  }
+  co_return co_await rt.initialize_from_source(*src, script_path);
+}
+
 asio::awaitable<VoidResult> ScriptRuntime::shutdown_script() {
-  if (!script_initialized_) {
+  if (closed_ || !script_initialized_) {
     co_return VoidResult{};
   }
+  // Mark closing so inbound HTTP handlers stop dispatching into JS during teardown.
+  // cancel_host_async() also sets this; idempotent.
+  shutting_down_ = true;
   // Leave progress waiters live so await db.close() / other Promises can settle.
   auto sh = co_await invoke_export("shutdown", 0, nullptr);
   script_initialized_ = false;
@@ -338,12 +382,9 @@ Result<std::shared_ptr<ScriptRuntime>> ScriptRuntime::create(
       std::move(engine),
       std::move(services)));
 
-  // Modules resolve ScriptRuntime via context opaque.
+  // Modules resolve ScriptRuntime via context opaque (Promise bridge / services()).
+  // vacps:* loaders / globals: install_default_modules() in bindings, after create.
   JS_SetContextOpaque(host->context().get(), host.get());
-
-  if (auto mods = install_modules(host->runtime().get(), host->context().get()); !mods) {
-    return std::unexpected(std::move(mods.error()));
-  }
 
   log::info(
       "quickjs script runtime ready (js_time_budget_ms={})",

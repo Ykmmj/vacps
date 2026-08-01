@@ -12,15 +12,23 @@
 
 namespace vacps::js {
 
+/**
+ * Adapts IRequestHandler → ScriptRuntime without owning the runtime.
+ *
+ * Holds weak_ptr to break the reference cycle:
+ *   JS Server → shared_ptr<http::Server> → shared_ptr<IRequestHandler>
+ *   → ScriptRequestHandler → (was shared_ptr) ScriptRuntime → JSContext → JS Server
+ */
 class ScriptRequestHandler final : public vacps::http::IRequestHandler {
  public:
-  explicit ScriptRequestHandler(std::shared_ptr<ScriptRuntime> host);
+  /** Stores a non-owning weak reference; construction from shared_ptr is fine. */
+  explicit ScriptRequestHandler(std::weak_ptr<ScriptRuntime> host);
 
   [[nodiscard]] asio::awaitable<vacps::Result<vacps::http::HttpResponse>> handle(
       vacps::http::HttpRequest req) override;
 
  private:
-  std::shared_ptr<ScriptRuntime> host_;
+  std::weak_ptr<ScriptRuntime> host_;
 };
 
 }  // namespace vacps::js

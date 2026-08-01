@@ -1,5 +1,6 @@
 #include "quickjs/bindings/modules_init.hpp"
 #include "quickjs/bindings/common.hpp"
+#include "quickjs/module_bindings.hpp"
 
 #include "process/process.hpp"
 #include "quickjs/script_runtime.hpp"
@@ -9,6 +10,7 @@
 
 #include <boost/asio/post.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -32,22 +34,21 @@ JSClassID g_process_class_id = 0;
 void process_finalizer(JSRuntime* /*rt*/, JSValue val) {
   auto* h = static_cast<ProcessHandle*>(JS_GetOpaque(val, g_process_class_id));
   if (h != nullptr && h->proc) {
+    // Finalizer: dispose only (no JS, no Promise). Prefer post to ioc when alive.
     auto proc = h->proc;
-    if (!proc->closed() && proc->started()) {
+    if (!proc->closed()) {
       if (auto rt = h->runtime.lock()) {
         try {
           auto sp = rt->shared_from_this();
           boost::asio::post(sp->ioc(), [sp, proc]() {
-            (void)sp;  // keep ScriptRuntime (and Registry) alive for close
-            (void)proc->close();
+            (void)sp;
+            proc->dispose();
           });
         } catch (...) {
-          // ScriptRuntime already tearing down — best-effort sync close.
-          try {
-            (void)proc->close();
-          } catch (...) {
-          }
+          proc->dispose();
         }
+      } else {
+        proc->dispose();
       }
     }
   }
@@ -91,26 +92,6 @@ void define_getter(
   JS_FreeAtom(ctx, atom);
 }
 
-/** ArrayBuffer → Uint8Array for Process.read (matches d.ts). */
-JSValue bytes_to_uint8array(JSContext* ctx, const char* data, std::size_t len) {
-  JSValue ab = JS_NewArrayBufferCopy(
-      ctx, reinterpret_cast<const uint8_t*>(data), len);
-  if (JS_IsException(ab)) return ab;
-
-  JSValue global = JS_GetGlobalObject(ctx);
-  JSValue ctor = JS_GetPropertyStr(ctx, global, "Uint8Array");
-  JS_FreeValue(ctx, global);
-  if (JS_IsException(ctor)) {
-    JS_FreeValue(ctx, ab);
-    return ctor;
-  }
-  JSValueConst args[1] = {ab};
-  JSValue ua = JS_CallConstructor(ctx, ctor, 1, args);
-  JS_FreeValue(ctx, ctor);
-  JS_FreeValue(ctx, ab);
-  return ua;
-}
-
 Value process_result_to_js(
     JSContext* c,
     std::int32_t exit_code,
@@ -152,48 +133,121 @@ Value run_result_to_js(JSContext* c, const vacps::process::RunResult& r) {
       r.stderr_truncated);
 }
 
-/** Parse ProcessOptions into StartOptions. */
-void parse_start_options_fields(
+/**
+ * Parse ProcessOptions into StartOptions.
+ * Throws TypeError (returns false) for unsupported option values — never silent
+ * ignore of env / stdin inherit / non-pipe stdout|stderr (d.ts honesty).
+ */
+bool parse_start_options_fields(
     JSContext* ctx,
     JSValueConst opts_v,
     vacps::process::StartOptions& opts) {
+  // env: not implemented — reject if present (including empty object).
+  Value env_v = Value::get_property_str(ctx, opts_v, "env");
+  if (!env_v.is_nullish()) {
+    JS_ThrowTypeError(
+        ctx,
+        "ProcessOptions.env is not supported (child inherits host environ)");
+    return false;
+  }
+
   Value cwd = Value::get_property_str(ctx, opts_v, "cwd");
   if (!cwd.is_nullish()) {
     auto s = converter<std::string>::from_js(ctx, cwd.get());
-    if (s) opts.cwd = std::move(*s);
+    if (!s) {
+      JS_ThrowTypeError(ctx, "ProcessOptions.cwd must be a string");
+      return false;
+    }
+    opts.cwd = std::move(*s);
   }
   Value tmo = Value::get_property_str(ctx, opts_v, "timeoutMs");
   if (!tmo.is_nullish()) {
     auto ms = converter<std::int32_t>::from_js(ctx, tmo.get());
-    if (ms && *ms >= 0) opts.timeout_ms = *ms;
+    if (!ms || *ms < 0) {
+      JS_ThrowTypeError(ctx, "ProcessOptions.timeoutMs must be a non-negative number");
+      return false;
+    }
+    opts.timeout = std::chrono::milliseconds{*ms};
   }
   Value cs = Value::get_property_str(ctx, opts_v, "closeStdin");
   if (!cs.is_nullish()) {
     auto b = converter<bool>::from_js(ctx, cs.get());
-    if (b) opts.close_stdin = *b;
+    if (!b) {
+      JS_ThrowTypeError(ctx, "ProcessOptions.closeStdin must be a boolean");
+      return false;
+    }
+    opts.close_stdin = *b;
   }
-  // StdioMode: only stdin maps today (pipe → keep open; ignore → close).
+  // stdin: pipe → keep open; ignore → close; inherit → TypeError (no silent ignore).
   Value stdin_m = Value::get_property_str(ctx, opts_v, "stdin");
   if (!stdin_m.is_nullish()) {
     auto s = converter<std::string>::from_js(ctx, stdin_m.get());
-    if (s) {
-      if (*s == "ignore") opts.close_stdin = true;
-      else if (*s == "pipe") opts.close_stdin = false;
-      // "inherit" not supported by registry — leave default / closeStdin.
+    if (!s) {
+      JS_ThrowTypeError(ctx, "ProcessOptions.stdin must be a string StdioMode");
+      return false;
+    }
+    if (*s == "ignore") {
+      opts.close_stdin = true;
+    } else if (*s == "pipe") {
+      opts.close_stdin = false;
+    } else if (*s == "inherit") {
+      JS_ThrowTypeError(
+          ctx, "ProcessOptions.stdin \"inherit\" is not supported (use \"pipe\" or \"ignore\")");
+      return false;
+    } else {
+      JS_ThrowTypeError(
+          ctx, "ProcessOptions.stdin must be \"pipe\", \"ignore\", or \"inherit\"");
+      return false;
     }
   }
+  // stdout / stderr: registry always pipes + captures; only "pipe" accepted.
+  auto check_capture_stdio = [ctx](const char* name, JSValueConst v) -> bool {
+    if (is_nullish(v)) return true;
+    auto s = converter<std::string>::from_js(ctx, v);
+    if (!s) {
+      JS_ThrowTypeError(ctx, "ProcessOptions.%s must be a string StdioMode", name);
+      return false;
+    }
+    if (*s == "pipe") return true;
+    if (*s == "inherit" || *s == "ignore") {
+      JS_ThrowTypeError(
+          ctx,
+          "ProcessOptions.%s \"%s\" is not supported (stdout/stderr are always "
+          "capture pipes; only \"pipe\" or omit)",
+          name,
+          s->c_str());
+      return false;
+    }
+    JS_ThrowTypeError(
+        ctx, "ProcessOptions.%s must be \"pipe\", \"ignore\", or \"inherit\"", name);
+    return false;
+  };
+  Value stdout_m = Value::get_property_str(ctx, opts_v, "stdout");
+  if (!check_capture_stdio("stdout", stdout_m.get())) return false;
+  Value stderr_m = Value::get_property_str(ctx, opts_v, "stderr");
+  if (!check_capture_stdio("stderr", stderr_m.get())) return false;
+
   Value hso = Value::get_property_str(ctx, opts_v, "hardMaxStdout");
   if (hso.is_nullish()) hso = Value::get_property_str(ctx, opts_v, "maxStdoutBytes");
   if (!hso.is_nullish()) {
     auto n = converter<std::int64_t>::from_js(ctx, hso.get());
-    if (n && *n >= 0) opts.hard_max_stdout = static_cast<std::size_t>(*n);
+    if (!n || *n < 0) {
+      JS_ThrowTypeError(ctx, "ProcessOptions.maxStdoutBytes must be a non-negative number");
+      return false;
+    }
+    opts.hard_max_stdout = static_cast<std::size_t>(*n);
   }
   Value hse = Value::get_property_str(ctx, opts_v, "hardMaxStderr");
   if (hse.is_nullish()) hse = Value::get_property_str(ctx, opts_v, "maxStderrBytes");
   if (!hse.is_nullish()) {
     auto n = converter<std::int64_t>::from_js(ctx, hse.get());
-    if (n && *n >= 0) opts.hard_max_stderr = static_cast<std::size_t>(*n);
+    if (!n || *n < 0) {
+      JS_ThrowTypeError(ctx, "ProcessOptions.maxStderrBytes must be a non-negative number");
+      return false;
+    }
+    opts.hard_max_stderr = static_cast<std::size_t>(*n);
   }
+  return true;
 }
 
 Result<std::vector<std::string>> string_array_from_js(
@@ -252,18 +306,25 @@ JSValue js_process_constructor(
       if (!args) return throw_error(ctx, args.error());
       for (auto& a : *args) av.push_back(std::move(a));
       if (argc >= 3 && !is_nullish(argv[2]) && is_object(argv[2])) {
-        parse_start_options_fields(ctx, argv[2], start_opts);
+        if (!parse_start_options_fields(ctx, argv[2], start_opts)) {
+          return JS_EXCEPTION;
+        }
       }
     } else if (is_object(argv[1])) {
       // new Process(command, options) — no args array
-      parse_start_options_fields(ctx, argv[1], start_opts);
+      if (!parse_start_options_fields(ctx, argv[1], start_opts)) {
+        return JS_EXCEPTION;
+      }
     } else {
       return JS_ThrowTypeError(ctx, "Process: args must be an array or options object");
     }
   }
 
-  auto proc = std::make_shared<vacps::process::Process>(
-      rt->services().processes, std::move(av), std::move(start_opts));
+  auto created = rt->services().processes.create(std::move(av), std::move(start_opts));
+  if (!created) {
+    return throw_error(ctx, created.error());
+  }
+  auto proc = std::move(*created);
 
   ensure_process_class(ctx);
   auto* handle = new ProcessHandle{std::move(proc), rt->shared_from_this()};
@@ -361,14 +422,17 @@ JSValue js_process_inst_read(
           co_return;
         }
 
-        JSValue ua = bytes_to_uint8array(c, result->data(), result->size());
-        if (JS_IsException(ua)) {
+        Value ua = to_uint8_array(
+            c,
+            reinterpret_cast<const std::uint8_t*>(result->data.data()),
+            result->data.size());
+        if (ua.is_exception()) {
           Value ex{c, JS_GetException(c)};
           (void)ex;
           bridge.reject_message("Process.read: failed to allocate Uint8Array");
           co_return;
         }
-        bridge.resolve(Value{c, ua});
+        bridge.resolve(std::move(ua));
         co_return;
       });
 }
@@ -479,7 +543,7 @@ JSValue js_process_inst_terminate(
       rt,
       [proc, signal = std::move(signal)](
           JSContext*, PromiseBridge& bridge) mutable -> boost::asio::awaitable<void> {
-        auto result = proc->terminate(signal, 3000);
+        auto result = proc->terminate(signal, std::chrono::milliseconds{3000});
         if (!result) {
           bridge.reject(result.error());
           co_return;
@@ -541,7 +605,7 @@ JSValue js_process_run(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
   std::vector<std::string> av;
   av.push_back(std::move(*cmd));
   vacps::process::StartOptions start_opts{};
-  // One-shot: close stdin; capture pipes via registry defaults.
+  // One-shot: close stdin; capture pipes.
   start_opts.close_stdin = true;
 
   if (argc >= 2 && !is_nullish(argv[1])) {
@@ -550,17 +614,24 @@ JSValue js_process_run(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
       if (!args) return throw_error(ctx, args.error());
       for (auto& a : *args) av.push_back(std::move(a));
       if (argc >= 3 && !is_nullish(argv[2]) && is_object(argv[2])) {
-        parse_start_options_fields(ctx, argv[2], start_opts);
+        if (!parse_start_options_fields(ctx, argv[2], start_opts)) {
+          return JS_EXCEPTION;
+        }
       }
     } else if (is_object(argv[1])) {
-      parse_start_options_fields(ctx, argv[1], start_opts);
+      if (!parse_start_options_fields(ctx, argv[1], start_opts)) {
+        return JS_EXCEPTION;
+      }
     } else {
       return JS_ThrowTypeError(ctx, "process.run: args must be an array or options object");
     }
   }
 
-  auto proc = std::make_shared<vacps::process::Process>(
-      rt->services().processes, std::move(av), std::move(start_opts));
+  auto created = rt->services().processes.create(std::move(av), std::move(start_opts));
+  if (!created) {
+    return throw_error(ctx, created.error());
+  }
+  auto proc = std::move(*created);
 
   return spawn_js_promise(
       ctx,
@@ -622,7 +693,9 @@ int js_process_init(JSContext* ctx, JSModuleDef* m) {
 
 }  // namespace
 
-JSModuleDef* init_module_process(JSContext* ctx, const char* name, void* /*binding*/) {
+JSModuleDef* init_module_process(JSContext* ctx, const char* name, void* binding) {
+  // binding: ProcessBindingContext* (process::Registry*).
+  [[maybe_unused]] auto* proc_ctx = static_cast<ProcessBindingContext*>(binding);
   JSModuleDef* m = JS_NewCModule(ctx, name, js_process_init);
   if (!m) return nullptr;
   JS_AddModuleExport(ctx, m, "Process");

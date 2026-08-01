@@ -4,7 +4,6 @@
 
 #include <sqlite3.h>
 
-#include <filesystem>
 #include <format>
 #include <type_traits>
 #include <utility>
@@ -36,18 +35,8 @@ void Database::close() noexcept {
 }
 
 Result<Database> Database::open(std::string path, OpenMode mode) {
-  namespace fs = std::filesystem;
-  std::error_code ec;
-  const fs::path p(path);
-
-  // Only create parent dirs when the open may create the DB file.
-  if (mode == OpenMode::ReadWriteCreate && p.has_parent_path()) {
-    fs::create_directories(p.parent_path(), ec);
-    if (ec) {
-      return std::unexpected(Error{std::format(
-          "create data dir failed: {} ({})", ec.message(), p.parent_path().string())});
-    }
-  }
+  // Parent directories are the caller's responsibility (Store::open creates them
+  // for ReadWriteCreate). Keeping this layer free of mkdir side effects.
 
   int flags = SQLITE_OPEN_FULLMUTEX;
   switch (mode) {
@@ -216,7 +205,8 @@ VoidResult Database::execute(std::string_view sql, const std::vector<SqlValue>& 
 Result<QueryResult> Database::query(
     std::string_view sql,
     const std::vector<SqlValue>& params,
-    std::size_t max_rows) {
+    std::size_t max_rows,
+    std::optional<std::size_t> max_bytes) {
   auto stmt_r = prepare(sql);
   if (!stmt_r) {
     return std::unexpected(std::move(stmt_r.error()));
@@ -232,10 +222,36 @@ Result<QueryResult> Database::query(
   QueryResult out;
   const int ncols = sqlite3_column_count(stmt);
   out.columns.reserve(static_cast<std::size_t>(ncols));
+  std::size_t approx_bytes = 0;
   for (int c = 0; c < ncols; ++c) {
     const char* name = sqlite3_column_name(stmt, c);
     out.columns.emplace_back(name != nullptr ? name : "");
+    approx_bytes += out.columns.back().size();
   }
+  if (max_bytes && approx_bytes > *max_bytes) {
+    cleanup();
+    return std::unexpected(Error{std::format(
+        "sqlite query exceeded max_bytes={} (approx {})", *max_bytes, approx_bytes)});
+  }
+
+  auto cell_bytes = [](const SqlValue& cell) -> std::size_t {
+    return std::visit(
+        [](const auto& v) -> std::size_t {
+          using T = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            return 0;
+          } else if constexpr (std::is_same_v<T, std::int64_t> || std::is_same_v<T, double>) {
+            return 8;
+          } else if constexpr (std::is_same_v<T, std::string>) {
+            return v.size();
+          } else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>>) {
+            return v.size();
+          } else {
+            return 0;
+          }
+        },
+        cell);
+  };
 
   for (;;) {
     const int rc = sqlite3_step(stmt);
@@ -255,7 +271,14 @@ Result<QueryResult> Database::query(
     std::vector<SqlValue> row;
     row.reserve(static_cast<std::size_t>(ncols));
     for (int c = 0; c < ncols; ++c) {
-      row.push_back(column_value(stmt, c));
+      SqlValue cell = column_value(stmt, c);
+      approx_bytes += cell_bytes(cell);
+      row.push_back(std::move(cell));
+    }
+    if (max_bytes && approx_bytes > *max_bytes) {
+      cleanup();
+      return std::unexpected(Error{std::format(
+          "sqlite query exceeded max_bytes={} (approx {})", *max_bytes, approx_bytes)});
     }
     out.rows.push_back(std::move(row));
   }

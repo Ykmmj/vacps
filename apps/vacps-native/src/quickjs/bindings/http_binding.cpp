@@ -3,6 +3,7 @@
 
 #include "http/client.hpp"
 #include "http/server.hpp"
+#include "quickjs/module_bindings.hpp"
 #include "quickjs/script_request_handler.hpp"
 #include "quickjs/raii/atom.hpp"
 #include "quickjs/script_runtime.hpp"
@@ -31,7 +32,7 @@ JSClassID g_http_server_class_id = 0;
 void http_server_finalizer(JSRuntime* /*rt*/, JSValue val) {
   auto* h = static_cast<HttpServerHandle*>(JS_GetOpaque(val, g_http_server_class_id));
   if (h != nullptr && h->server) {
-    // Acceptor only — never process shutdown / io_context.stop from finalizer.
+    // Stop accept + cancel sessions — never process shutdown / io_context.stop.
     h->server->close();
   }
   delete h;
@@ -115,8 +116,9 @@ JSValue js_http_server_constructor(
 
   ensure_http_server_class(ctx);
   // C++ Server ctor stores endpoint only; acceptor bind is deferred to start()/listen().
-  // Wrap ScriptRuntime in ScriptRequestHandler so HTTP transport stays QuickJS-free.
-  auto handler = std::make_shared<ScriptRequestHandler>(host);
+  // weak_ptr into ScriptRuntime — breaks Server↔Runtime cycle (handler must not own host).
+  auto handler = std::make_shared<ScriptRequestHandler>(
+      std::weak_ptr<ScriptRuntime>(host));
   auto server =
       std::make_shared<vacps::http::Server>(host->ioc(), std::move(listen), std::move(handler));
   auto* handle = new HttpServerHandle{std::move(server)};
@@ -143,12 +145,21 @@ JSValue js_http_server_listen(JSContext* ctx, JSValueConst this_val, int, JSValu
   if (host == nullptr) {
     return throw_msg(ctx, "Server.listen: runtime not wired");
   }
+  if (host->closing()) {
+    return throw_msg(ctx, "Server.listen: runtime is shutting down");
+  }
   auto server = h->server;
+  auto services = host->shared_from_this();  // keep ScriptRuntime (and services) alive
   return spawn_js_promise(
       ctx,
       host,
-      [server = std::move(server)](JSContext* /*c*/, PromiseBridge& bridge) mutable
+      [server = std::move(server), services = std::move(services)](
+          JSContext* /*c*/, PromiseBridge& bridge) mutable
           -> boost::asio::awaitable<void> {
+        if (services->closing()) {
+          bridge.reject_message("Server.listen: runtime is shutting down");
+          co_return;
+        }
         if (server->is_open()) {
           bridge.reject_message("Server.listen: already listening");
           co_return;
@@ -156,6 +167,7 @@ JSValue js_http_server_listen(JSContext* ctx, JSValueConst this_val, int, JSValu
         if (auto r = server->start(); !r) {
           bridge.reject(r.error());
         } else {
+          // Server is JS-owned; no Host ServerRegistry (NATIVE_RESOURCE_OWNERSHIP).
           bridge.resolve_undefined();
         }
         co_return;
@@ -164,7 +176,7 @@ JSValue js_http_server_listen(JSContext* ctx, JSValueConst this_val, int, JSValu
 
 /**
  * server.close() → Promise<void>
- * Closes acceptor/signals only — does not stop io_context or run process shutdown.
+ * Stops accept + cancels active sessions. Does not stop io_context or process shutdown.
  */
 JSValue js_http_server_close(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
   auto* h = http_server_from_this(ctx, this_val);
@@ -174,11 +186,14 @@ JSValue js_http_server_close(JSContext* ctx, JSValueConst this_val, int, JSValue
     return throw_msg(ctx, "Server.close: runtime not wired");
   }
   auto server = h->server;
+  auto services = host->shared_from_this();
   return spawn_js_promise(
       ctx,
       host,
-      [server = std::move(server)](JSContext* /*c*/, PromiseBridge& bridge) mutable
+      [server = std::move(server), services = std::move(services)](
+          JSContext* /*c*/, PromiseBridge& bridge) mutable
           -> boost::asio::awaitable<void> {
+        // close(): acceptor stop + cancel_all_sessions(); session I/O ends via cancel.
         server->close();
         bridge.resolve_undefined();
         co_return;
@@ -335,7 +350,9 @@ int js_http_init(JSContext* ctx, JSModuleDef* m) {
 
 }  // namespace
 
-JSModuleDef* init_module_http(JSContext* ctx, const char* name, void* /*binding*/) {
+JSModuleDef* init_module_http(JSContext* ctx, const char* name, void* binding) {
+  // binding: HttpBindingContext* (ca_bundle for outbound TLS).
+  [[maybe_unused]] auto* http_ctx = static_cast<HttpBindingContext*>(binding);
   JSModuleDef* m = JS_NewCModule(ctx, name, js_http_init);
   if (!m) return nullptr;
   JS_AddModuleExport(ctx, m, "Server");

@@ -218,6 +218,18 @@ JSValue js_url_get_origin(JSContext* ctx, JSValueConst this_val, int, JSValueCon
   return js_string_owned(ctx, h->url.origin());
 }
 
+JSValue js_url_get_username(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+  auto* h = url_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  return js_string_view(ctx, h->url.username());
+}
+
+JSValue js_url_get_password(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+  auto* h = url_from_this(ctx, this_val);
+  if (!h) return JS_EXCEPTION;
+  return js_string_view(ctx, h->url.password());
+}
+
 /**
  * URL.searchParams → same live URLSearchParams for this URL instance.
  * Mutations update url.search / href via domain SearchParams → Url linkage.
@@ -283,6 +295,8 @@ VoidResult install_url_binding(JSContext* ctx) {
 
   define_getter(ctx, proto.get(), "href", js_url_get_href);
   define_getter(ctx, proto.get(), "protocol", js_url_get_protocol);
+  define_getter(ctx, proto.get(), "username", js_url_get_username);
+  define_getter(ctx, proto.get(), "password", js_url_get_password);
   define_getter(ctx, proto.get(), "hostname", js_url_get_hostname);
   define_getter(ctx, proto.get(), "host", js_url_get_host);
   define_getter(ctx, proto.get(), "pathname", js_url_get_pathname);

@@ -6,6 +6,7 @@
 #include <boost/asio/detached.hpp>
 
 #include <cstdlib>
+#include <string>
 #include <utility>
 
 namespace vacps::runtime {
@@ -37,19 +38,36 @@ VoidResult ApplicationRuntime::start(std::string_view script_path) {
   }
   rt_ = std::move(*host_r);
 
+  // Composition root installs vacps:* + globals (not ScriptRuntime::create)
+  // so quickjs_core stays free of bindings / domain-module link edges.
+  if (auto mods = vacps::js::install_default_modules(*rt_); !mods) {
+    return std::unexpected(std::move(mods.error()));
+  }
+
   // Signals + tick timer before bootstrap so early SIGINT/SIGTERM still
   // reach ordered teardown once targets are bound.
   shutdown_.arm_signals(rt_, tick_.timer());
 
+  // Read script on the caller thread; ScriptRuntime only compiles/evals source.
+  auto source = vacps::js::read_script_file(script_path);
+  if (!source) {
+    return std::unexpected(std::move(source.error()));
+  }
   const std::string path{script_path};
+  const std::string src = std::move(*source);
   asio::co_spawn(
       ioc_,
-      [this, path]() -> asio::awaitable<void> {
-        auto init = co_await rt_->load_and_initialize(path);
+      [this, path, src]() -> asio::awaitable<void> {
+        auto init = co_await rt_->initialize_from_source(src, path);
         if (!init) {
           vacps::log::error("script init failed: {}", init.error().message);
           exit_code_ = 1;
-          ioc_.stop();
+          // Same ordered teardown as signal/stop — not raw ioc.stop() alone.
+          shutdown_.request_stop(rt_, tick_.timer());
+          co_return;
+        }
+        if (shutdown_.stopping()) {
+          // Signal arrived during init; request_stop already scheduled.
           co_return;
         }
         tick_.start(rt_, opts_.tick_interval);
@@ -63,14 +81,9 @@ VoidResult ApplicationRuntime::start(std::string_view script_path) {
 int ApplicationRuntime::run() {
   ioc_.run();
 
-  if (exit_code_ != 0) {
-    vacps::log::flush();
-    return EXIT_FAILURE;
-  }
-
-  // Event loop ended without the signal path (e.g. tick loop exited while the
-  // script is still ready) — run the same ordered teardown once.
-  if (rt_ && rt_->script_ready() && !shutdown_.stopping()) {
+  // Event loop ended without the signal/init-fail path (e.g. tick loop exited
+  // while the script is still ready) — run the same ordered teardown once.
+  if (rt_ && !rt_->closed() && !shutdown_.stopping()) {
     ioc_.restart();
     shutdown_.request_stop(rt_, tick_.timer());
     ioc_.run();
@@ -78,7 +91,7 @@ int ApplicationRuntime::run() {
 
   vacps::log::info("stopped");
   vacps::log::flush();
-  return EXIT_SUCCESS;
+  return exit_code_ != 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 void ApplicationRuntime::stop() {

@@ -13,6 +13,12 @@
 
 namespace vacps::text {
 
+/** WHATWG TextEncoderEncodeIntoResult (read = UTF-16 code units of source). */
+struct EncodeIntoResult {
+  std::size_t read{0};
+  std::size_t written{0};
+};
+
 /**
  * WHATWG TextEncoder domain helper (UTF-8 only).
  *
@@ -48,22 +54,31 @@ class Encoder final {
   }
 
   /**
-   * In-place encode into a caller buffer (TextEncoder.encodeInto subset).
-   * Writes min(utf8.size(), dest.size()) bytes after validation.
-   * Returns number of bytes written.
+   * In-place encode into a caller buffer (TextEncoder.encodeInto).
+   *
+   * Never writes a partial multi-byte UTF-8 sequence: if dest is too small for
+   * the next code point, that code point is omitted (trim_partial_utf8).
+   * `read` is the UTF-16 code-unit length of the encoded prefix (WHATWG).
+   * `written` is the number of bytes stored in dest.
    */
-  [[nodiscard]] static Result<std::size_t> encode_into(
+  [[nodiscard]] static Result<EncodeIntoResult> encode_into(
       std::string_view utf8,
       std::span<std::uint8_t> dest) {
     if (!utf8.empty() &&
         !simdutf::validate_utf8(utf8.data(), utf8.size())) {
       return std::unexpected(Error{"TextEncoder.encodeInto: invalid UTF-8"});
     }
-    const std::size_t n = std::min(utf8.size(), dest.size());
+    std::size_t n = std::min(utf8.size(), dest.size());
+    if (n > 0 && n < utf8.size()) {
+      // Prefix of valid UTF-8 may end mid-sequence — peel incomplete tail.
+      n = simdutf::trim_partial_utf8(utf8.data(), n);
+    }
     if (n > 0) {
       std::memcpy(dest.data(), utf8.data(), n);
     }
-    return n;
+    const std::size_t read =
+        n == 0 ? 0 : simdutf::utf16_length_from_utf8(utf8.data(), n);
+    return EncodeIntoResult{read, n};
   }
 };
 

@@ -36,7 +36,10 @@ declare module 'vacps:store' {
     readonly sql: string;
     readonly params?: readonly SqlParam[];
     readonly type?: 'run' | 'query';
-    /** Fail-and-rollback if changes do not match (checked after each step). */
+    /**
+     * Fail-and-rollback if sqlite changes() do not match (run steps only).
+     * Invalid on type: 'query' — binding rejects with a clear error.
+     */
     readonly expectedChanges?: ExpectedChanges;
   }
 
@@ -72,10 +75,15 @@ declare module 'vacps:store' {
 
     /**
      * Atomic multi-step unit: BEGIN IMMEDIATE + steps + COMMIT.
-     * expectedChanges is checked after each step; mismatch → rollback.
+     * expectedChanges is checked after each run step; mismatch → rollback.
+     * expectedChanges on query steps is rejected (not checked against changes()).
      */
     transaction(steps: readonly TransactionStep[]): Promise<TransactionResult[]>;
 
+    /**
+     * Release the sqlite connection. Idempotent.
+     * GC finalizer also closes without needing the script runtime (sync close).
+     */
     close(): Promise<void>;
   }
 }

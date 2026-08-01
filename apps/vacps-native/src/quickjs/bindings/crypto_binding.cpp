@@ -177,7 +177,9 @@ int js_crypto_init(JSContext* ctx, JSModuleDef* m) {
 
 }  // namespace
 
-JSModuleDef* init_module_crypto(JSContext* ctx, const char* name, void* /*binding*/) {
+JSModuleDef* init_module_crypto(JSContext* ctx, const char* name, void* binding) {
+  // Pure module: binding is intentionally nullptr (stateless crypto helpers).
+  (void)binding;
   JSModuleDef* m = JS_NewCModule(ctx, name, js_crypto_init);
   if (!m) return nullptr;
   JS_AddModuleExportList(ctx, m, k_crypto_exports, VACPS_COUNTOF(k_crypto_exports));

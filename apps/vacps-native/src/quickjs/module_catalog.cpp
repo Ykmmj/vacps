@@ -2,41 +2,37 @@
 
 #include "quickjs/bindings/modules_init.hpp"
 #include "quickjs/globals/install.hpp"
+#include "quickjs/module_bindings.hpp"
+#include "quickjs/script_runtime.hpp"
+#include "quickjs/script_services.hpp"
 
 #include <cstring>
 #include <format>
 #include <string>
+#include <utility>
 
 namespace vacps::js {
+
+void ModuleBindings::wire_from(ScriptServices& services) noexcept {
+  fs.data_dir = &services.data_dir;
+  fs.pool = &services.fs_pool;
+  fs.use_asio_file = &services.use_asio_file;
+
+  host.data_dir = &services.data_dir;
+  host.environment = &services.environment;
+
+  store.pool = &services.db_pool;
+
+  http.ca_bundle = &services.ca_bundle;
+
+  process.processes = &services.processes;
+}
 
 namespace {
 
 [[nodiscard]] bool starts_with_vacps(const char* name) noexcept {
   static constexpr char kPrefix[] = "vacps:";
   return name != nullptr && std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) == 0;
-}
-
-/** Process-static catalog; descriptors are function pointers only (no ScriptRuntime state). */
-ModuleCatalog& default_module_catalog() {
-  static ModuleCatalog catalog = [] {
-    ModuleCatalog c;
-    // Explicit composition list — add new vacps:* modules here only.
-    auto reg = c.register_modules({
-        {"vacps:log", init_module_log, nullptr},
-        {"vacps:store", init_module_store, nullptr},
-        {"vacps:host", init_module_host, nullptr},
-        {"vacps:http", init_module_http, nullptr},
-        {"vacps:fs", init_module_fs, nullptr},
-        {"vacps:process", init_module_process, nullptr},
-        {"vacps:crypto", init_module_crypto, nullptr},
-    });
-    if (!reg) {
-      // Static init cannot return expected; leave empty — install will fail closed.
-      return ModuleCatalog{};
-    }
-    return c;
-  }();
-  return catalog;
 }
 
 }  // namespace
@@ -122,20 +118,60 @@ void install_module_loader(JSRuntime* rt, const ModuleCatalog* catalog) {
       const_cast<ModuleCatalog*>(catalog));
 }
 
-VoidResult install_modules(JSRuntime* rt, JSContext* ctx) {
+Result<std::unique_ptr<ModuleCatalog>> make_default_module_catalog(
+    ModuleBindings& bindings) {
+  auto catalog = std::make_unique<ModuleCatalog>();
+  // Explicit composition list — add new vacps:* modules here only.
+  // Pure modules (log, crypto): binding = nullptr (no ScriptServices config).
+  // Stateful modules: binding → ModuleBindings context (non-owning into ScriptServices).
+  auto reg = catalog->register_modules({
+      {"vacps:log", init_module_log, nullptr},
+      {"vacps:store", init_module_store, &bindings.store},
+      {"vacps:host", init_module_host, &bindings.host},
+      {"vacps:http", init_module_http, &bindings.http},
+      {"vacps:fs", init_module_fs, &bindings.fs},
+      {"vacps:process", init_module_process, &bindings.process},
+      {"vacps:crypto", init_module_crypto, nullptr},
+  });
+  if (!reg) {
+    return std::unexpected(std::move(reg.error()));
+  }
+  return catalog;
+}
+
+VoidResult install_modules(
+    JSRuntime* rt,
+    JSContext* ctx,
+    ModuleCatalog* catalog) {
   if (rt == nullptr || ctx == nullptr) {
     return std::unexpected(Error{"install_modules: null runtime/context"});
   }
-  ModuleCatalog& catalog = default_module_catalog();
-  if (catalog.size() == 0) {
+  if (catalog == nullptr) {
+    return std::unexpected(Error{"install_modules: null catalog"});
+  }
+  if (catalog->size() == 0) {
     return std::unexpected(Error{"install_modules: module catalog empty"});
   }
-  // Catalog is process-static and outlives every JSRuntime.
-  install_module_loader(rt, &catalog);
+  // Catalog is owned by ScriptRuntime and outlives this JSRuntime.
+  install_module_loader(rt, catalog);
   if (auto globals = install_global_apis(ctx); !globals) {
     return globals;
   }
   return {};
+}
+
+VoidResult install_default_modules(ScriptRuntime& rt) {
+  if (rt.closed() || !rt.ok()) {
+    return std::unexpected(Error{"install_default_modules: runtime not open"});
+  }
+  // Wire non-owning binding contexts into ScriptServices (composition).
+  rt.bindings_.wire_from(*rt.services_);
+  auto catalog = make_default_module_catalog(rt.bindings_);
+  if (!catalog) {
+    return std::unexpected(std::move(catalog.error()));
+  }
+  rt.catalog_ = std::move(*catalog);
+  return install_modules(rt.runtime().get(), rt.context().get(), rt.catalog_.get());
 }
 
 }  // namespace vacps::js

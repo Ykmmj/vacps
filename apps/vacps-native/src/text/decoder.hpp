@@ -21,6 +21,11 @@ enum class Encoding {
 
 struct DecoderOptions {
   bool fatal{false};
+  /**
+   * WHATWG ignoreBOM:
+   * - false (default): consume a leading BOM matching the encoding
+   * - true: keep BOM as U+FEFF character
+   */
   bool ignore_bom{false};
 };
 

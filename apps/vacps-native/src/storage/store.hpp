@@ -49,6 +49,10 @@ struct TransactionStep {
   std::string sql;
   std::vector<SqlValue> params;
   StepType type{StepType::Run};
+  /**
+   * Only valid for Run steps. Query + expected_changes is rejected by the
+   * binding; domain skips the changes() check for Query steps.
+   */
   std::optional<ExpectedChanges> expected_changes;
   /** Only used for Query steps; default matches Database::kDefaultMaxQueryRows. */
   std::size_t max_rows{Database::kDefaultMaxQueryRows};
@@ -67,7 +71,8 @@ class Store {
 
   /**
    * Open a new connection via Database::open, applying OpenOptions::mode
-   * (default ReadWriteCreate).
+   * (default ReadWriteCreate). Creates parent directories when mode is
+   * ReadWriteCreate so the DB file can be created under a new tree.
    */
   [[nodiscard]] static Result<std::shared_ptr<Store>> open(
       std::string path,
@@ -83,7 +88,8 @@ class Store {
   /**
    * @param max_rows  Cap on returned rows (Database enforces; default 10_000).
    * @param max_bytes Optional approximate payload budget (columns + cell bytes).
-   *                  Checked after materialization; pair with max_rows for hard cap.
+   *                  Enforced during materialization (not only after full result).
+   *                  Pair with max_rows for a hard row cap.
    */
   [[nodiscard]] Result<QueryResult> query(
       std::string_view sql,
@@ -93,13 +99,18 @@ class Store {
 
   /**
    * BEGIN IMMEDIATE … steps … COMMIT on this connection under mutex_.
-   * After each step with expected_changes, check immediately;
+   * After each Run step with expected_changes, check immediately;
    * mismatch → ROLLBACK (via with_transaction) and error — no later steps run.
+   * expected_changes on Query steps is ignored (binding rejects it for JS).
    */
   [[nodiscard]] Result<std::vector<TransactionResult>> transaction(
       const std::vector<TransactionStep>& steps);
 
-  /** Idempotent: release the sqlite connection. */
+  /**
+   * Idempotent: release the sqlite connection.
+   * Thread-safe (mutex_). Safe to call from a GC finalizer without ScriptRuntime —
+   * sync sqlite close on the caller thread is intentional.
+   */
   [[nodiscard]] VoidResult close();
 
  private:
@@ -109,10 +120,6 @@ class Store {
   [[nodiscard]] static VoidResult check_expected_changes(
       const ExpectedChanges& exp,
       std::int64_t changes);
-  [[nodiscard]] static std::size_t estimate_query_bytes(const QueryResult& qr);
-  [[nodiscard]] static VoidResult check_max_bytes(
-      const QueryResult& qr,
-      std::optional<std::size_t> max_bytes);
 
   // Locked around every Database use — per-Store serialization.
   mutable std::mutex mutex_;

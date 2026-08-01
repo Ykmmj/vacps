@@ -105,12 +105,54 @@ else()
 endif()
 
 # ── Layered libraries (n1.md §十九) ────────────────────────────────
-# Domain layers do not link QuickJS. quickjs_core does not link domain modules.
-# quickjs_bindings composes domain + engine. vacps_native_core / vacps_runtime
-# are INTERFACE umbrellas so agent + tests keep a single link name.
+# Domain layers do not link QuickJS. quickjs_core does not link domain modules
+# (fs/storage/http/process) or bindings. quickjs_bindings composes domain +
+# engine. vacps_native_core is an INTERFACE umbrella; vacps_runtime is the
+# composition STATIC (ScriptServices + ApplicationRuntime).
 #
-# Static archives + cross-archive refs (e.g. ScriptRuntime → install_modules
-# in bindings) need a rescan group at the final executable.
+# install_default_modules lives in bindings and is called from
+# ApplicationRuntime after ScriptRuntime::create — no core→bindings cycle,
+# so LINK_GROUP RESCAN is not required.
+
+# Platform triple for vacps:host platform() — arch + libc from the compiler.
+execute_process(
+  COMMAND ${CMAKE_CXX_COMPILER} -dumpmachine
+  OUTPUT_VARIABLE VACPS_COMPILER_TRIPLE
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(VACPS_COMPILER_TRIPLE MATCHES "aarch64")
+  set(_vacps_plat_arch "aarch64")
+elseif(VACPS_COMPILER_TRIPLE MATCHES "x86_64")
+  set(_vacps_plat_arch "x86_64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  set(_vacps_plat_arch "aarch64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+  set(_vacps_plat_arch "x86_64")
+else()
+  set(_vacps_plat_arch "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+if(VACPS_COMPILER_TRIPLE MATCHES "musl")
+  set(_vacps_plat_libc "musl")
+elseif(VACPS_COMPILER_TRIPLE MATCHES "gnu")
+  set(_vacps_plat_libc "gnu")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # Static Alpine product default; preprocessor in platform.hpp can still refine.
+  if(VACPS_STATIC)
+    set(_vacps_plat_libc "musl")
+  else()
+    set(_vacps_plat_libc "gnu")
+  endif()
+else()
+  set(_vacps_plat_libc "unknown")
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(_vacps_plat_os "linux")
+else()
+  string(TOLOWER "${CMAKE_SYSTEM_NAME}" _vacps_plat_os)
+endif()
+set(VACPS_PLATFORM_STRING "${_vacps_plat_os}-${_vacps_plat_arch}-${_vacps_plat_libc}")
+message(STATUS "VACPS_PLATFORM_STRING=${VACPS_PLATFORM_STRING} (triple=${VACPS_COMPILER_TRIPLE})")
 
 function(vacps_layer name)
   add_library(${name} STATIC ${ARGN})
@@ -120,6 +162,7 @@ function(vacps_layer name)
   )
   target_compile_definitions(${name} PUBLIC
     VACPS_NATIVE_VERSION="${PROJECT_VERSION}"
+    VACPS_PLATFORM_STRING="${VACPS_PLATFORM_STRING}"
     BOOST_ASIO_NO_DEPRECATED
     BOOST_BEAST_USE_STD_STRING_VIEW
     BOOST_PROCESS_USE_STD_FS=1
@@ -204,10 +247,11 @@ target_link_libraries(vacps_storage PUBLIC
   vacps_sqlite
 )
 
-# ── vacps_process ──────────────────────────────────────────────────
+# ── vacps_process (Process + ProcessRuntime + budget; no Registry) ─
 vacps_layer(vacps_process
   src/process/process.cpp
-  src/process/registry.cpp
+  src/process/runtime.cpp
+  src/process/budget.cpp
 )
 target_link_libraries(vacps_process PUBLIC
   vacps_base
@@ -235,6 +279,7 @@ target_link_libraries(vacps_text PUBLIC
 
 # ── vacps_http (transport only — IRequestHandler; no QuickJS) ──────
 # script_dispatch lives in vacps_quickjs_bindings (needs ScriptRuntime).
+# HTTP transport only — JS owns Server instances (no ServerRegistry).
 vacps_layer(vacps_http
   src/http/client.cpp
   src/http/server.cpp
@@ -249,23 +294,23 @@ target_link_libraries(vacps_http PUBLIC
 )
 
 # ── vacps_quickjs_core: engine RAII + ScriptRuntime ────────────────
-# Headers-only also used here: value, convert, cstring, atom, class_binding,
-# object_holder, promise_bridge, js_bridge (js_bridge still includes storage
-# headers — include path only; no vacps_storage link per n1 layering).
+# Headers: value, convert, cstring, atom, class_binding, object_holder,
+# promise_bridge, js_bridge (engine helpers only — no storage types).
+# ScriptServices lives in vacps_runtime (composition): core must not link
+# fs/storage/http/process per n1 §十九. Headers may still name those types
+# via ScriptServices / ModuleBindings (include path only).
 vacps_layer(vacps_quickjs_core
   src/quickjs/runtime.cpp
   src/quickjs/context.cpp
-  src/quickjs/script_services.cpp
   src/quickjs/script_runtime.cpp
 )
 target_link_libraries(vacps_quickjs_core PUBLIC
   vacps_base
-  vacps_process
   vacps_quickjs
 )
 
 # ── vacps_quickjs_bindings: modules, globals, HTTP→JS adapter ──────
-# module_catalog.cpp owns composition (init_module_* list) + loader.
+# module_catalog.cpp: make_default_module_catalog + install_default_modules.
 vacps_layer(vacps_quickjs_bindings
   src/quickjs/module_catalog.cpp
   src/quickjs/globals/install.cpp
@@ -297,10 +342,11 @@ target_link_libraries(vacps_quickjs_bindings PUBLIC
   nlohmann_json::nlohmann_json
 )
 
-# ── Umbrella: full stack for agent + tests (n1 vacps_runtime) ──────
-# LINK_GROUP RESCAN: ScriptRuntime (core) → install_modules (bindings)
-# and similar cross-archive static refs under --gc-sections.
-set(_vacps_layer_libs
+# ── Umbrella: engine + bindings + domains (no composition / process entry) ─
+# One-way deps: bindings → core; domains do not link QuickJS. Plain interface
+# link (no RESCAN) after install_default_modules left core.
+add_library(vacps_native_core INTERFACE)
+target_link_libraries(vacps_native_core INTERFACE
   vacps_quickjs_bindings
   vacps_quickjs_core
   vacps_http
@@ -313,19 +359,19 @@ set(_vacps_layer_libs
   vacps_base
 )
 
-add_library(vacps_native_core INTERFACE)
-target_link_libraries(vacps_native_core INTERFACE
-  "$<LINK_GROUP:RESCAN,${_vacps_layer_libs}>"
-)
-
-# Composition / process entry (n1 §十七 ShutdownCoordinator; §十九 vacps_runtime).
+# Composition / process entry (ShutdownCoordinator; ownership doc).
+# ScriptServices (process backend Registry, fs/db pools, probe) lives here.
 vacps_layer(vacps_runtime
+  src/quickjs/script_services.cpp
   src/runtime/shutdown_coordinator.cpp
   src/runtime/tick_loop.cpp
   src/runtime/application_runtime.cpp
 )
 target_link_libraries(vacps_runtime PUBLIC
   vacps_native_core
+  vacps_process
+  vacps_http
+  vacps_fs
 )
 
 # ── Agent binary ───────────────────────────────────────────────────
@@ -355,11 +401,14 @@ if(VACPS_BUILD_TESTS)
     tests/test_js_native_api.cpp
     tests/test_promise_bridge.cpp
     tests/test_url_global.cpp
+    tests/test_text_decoder.cpp
+    tests/test_platform.cpp
     tests/test_http_client.cpp
     tests/test_js_tasks.cpp
+    tests/test_shutdown.cpp
   )
   target_link_libraries(vacps-native-tests PRIVATE
-    vacps_native_core
+    vacps_runtime
     GTest::gtest_main
   )
   target_compile_definitions(vacps-native-tests PRIVATE

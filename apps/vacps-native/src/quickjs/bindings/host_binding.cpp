@@ -1,7 +1,9 @@
 #include "quickjs/bindings/modules_init.hpp"
 #include "quickjs/bindings/common.hpp"
 
+#include "app/platform.hpp"
 #include "app/version.hpp"
+#include "quickjs/module_bindings.hpp"
 #include "quickjs/script_runtime.hpp"
 #include "quickjs/js_bridge.hpp"
 #include "quickjs/raii/value.hpp"
@@ -36,7 +38,7 @@ JSValue js_host_now_ms(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 }
 
 JSValue js_host_platform(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-  return converter<std::string>::to_js(ctx, "linux-x86_64-musl").release();
+  return converter<std::string>::to_js(ctx, std::string{vacps::platform_string()}).release();
 }
 
 /**
@@ -75,7 +77,9 @@ int js_host_init(JSContext* ctx, JSModuleDef* m) {
 
 }  // namespace
 
-JSModuleDef* init_module_host(JSContext* ctx, const char* name, void* /*binding*/) {
+JSModuleDef* init_module_host(JSContext* ctx, const char* name, void* binding) {
+  // binding: HostBindingContext* (data_dir / environment snapshot).
+  [[maybe_unused]] auto* host_ctx = static_cast<HostBindingContext*>(binding);
   JSModuleDef* m = JS_NewCModule(ctx, name, js_host_init);
   if (!m) return nullptr;
   JS_AddModuleExportList(ctx, m, k_host_exports, VACPS_COUNTOF(k_host_exports));

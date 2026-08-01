@@ -3,6 +3,7 @@
 #include "app/error.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -58,7 +59,8 @@ class Database {
 
   /**
    * Open a SQLite connection at `path`.
-   * Parent directories are created only for ReadWriteCreate.
+   * Does not create parent directories — callers (e.g. Store::open) must ensure
+   * the parent path exists when creating a new file.
    * Always includes SQLITE_OPEN_FULLMUTEX.
    */
   [[nodiscard]] static Result<Database> open(
@@ -67,7 +69,6 @@ class Database {
 
   [[nodiscard]] bool ok() const { return db_ != nullptr; }
   [[nodiscard]] const std::string& path() const { return path_; }
-  [[nodiscard]] sqlite3* handle() const { return db_; }
 
   /** Multi-statement script (no parameters). */
   [[nodiscard]] VoidResult exec(std::string_view sql);
@@ -78,11 +79,18 @@ class Database {
   /** Default max rows for query(); oversized results return an error. */
   static constexpr std::size_t kDefaultMaxQueryRows = 10'000;
 
-  /** SELECT (or any statement with a result set) + optional binds. */
+  /**
+   * SELECT (or any statement with a result set) + optional binds.
+   * @param max_rows  Cap on returned rows; exceeded mid-scan → error.
+   * @param max_bytes Optional approximate payload budget (column names + cell
+   *                  bytes). Checked while materializing each row so large
+   *                  results abort before fully loaded.
+   */
   [[nodiscard]] Result<QueryResult> query(
       std::string_view sql,
       const std::vector<SqlValue>& params = {},
-      std::size_t max_rows = kDefaultMaxQueryRows);
+      std::size_t max_rows = kDefaultMaxQueryRows,
+      std::optional<std::size_t> max_bytes = std::nullopt);
 
   /**
    * Run `work` inside BEGIN IMMEDIATE … COMMIT on this connection.

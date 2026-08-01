@@ -30,12 +30,12 @@ struct ListenEndpoint {
  * HTTP transport only — zero product routing. Lifetime: shared_ptr.
  *
  * Construction only stores ListenEndpoint; bind/listen happens in start().
- * close() closes the acceptor only and does NOT stop io_context, cancel
- * process registry, or run JS shutdown.
+ * close() stops accepting and cancels active sessions; it does NOT stop
+ * io_context, cancel process registry, or run JS shutdown.
  *
- * Process-level SIGINT/SIGTERM and graceful process shutdown live in
- * runtime::ShutdownCoordinator (wired from main). This class must not
- * own signal_set, call ioc.stop(), or invoke ScriptRuntime shutdown APIs.
+ * Process-level SIGINT/SIGTERM live in runtime::ShutdownCoordinator.
+ * Host does not track Server instances; JS owns close() order (ownership doc).
+ * This class must not own signal_set, call ioc.stop(), or invoke ScriptRuntime APIs.
  *
  * Request handling is injected via IRequestHandler (no QuickJS dependency).
  */
@@ -49,10 +49,19 @@ class Server : public std::enable_shared_from_this<Server> {
   Server(const Server&) = delete;
   Server& operator=(const Server&) = delete;
 
+  /**
+   * Force-stop accept + cancel sessions (RAII). Same as close(); best-effort
+   * when JS omitted close() (docs/NATIVE_RESOURCE_OWNERSHIP.md §五).
+   */
+  ~Server();
+
   /** Sync bind + listen + spawn accept loop. Fails on bad host / bind errors. */
   [[nodiscard]] VoidResult start();
 
-  /** Close acceptor only (does not stop io_context or tear down ScriptRuntime). */
+  /**
+   * Stop accepting and cancel/drain active sessions. Idempotent.
+   * Does not stop io_context or tear down ScriptRuntime.
+   */
   void close() noexcept;
 
   void session_started(std::shared_ptr<Session> session) noexcept;

@@ -1,5 +1,5 @@
 import type { BackendMetrics, BackendStatus, BackendSystem } from '@vacps/contracts';
-import { File, O_RDONLY } from 'vacps:fs';
+import { File } from 'vacps:fs';
 import * as host from 'vacps:host';
 import * as process from 'vacps:process';
 
@@ -18,7 +18,7 @@ interface NetSample {
 }
 
 async function readTextFile(path: string): Promise<string> {
-  const f = await File.open(path, O_RDONLY);
+  const f = await File.open(path, 'read');
   try {
     return await f.readText();
   } finally {

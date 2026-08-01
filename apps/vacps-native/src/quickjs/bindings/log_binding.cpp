@@ -79,7 +79,10 @@ int js_log_init(JSContext* ctx, JSModuleDef* m) {
 
 }  // namespace
 
-JSModuleDef* init_module_log(JSContext* ctx, const char* name, void* /*binding*/) {
+JSModuleDef* init_module_log(JSContext* ctx, const char* name, void* binding) {
+  // Pure module: binding is intentionally nullptr (no ScriptServices config).
+  // flush() still uses script_runtime_from for Promise bridge only.
+  (void)binding;
   JSModuleDef* m = JS_NewCModule(ctx, name, js_log_init);
   if (!m) return nullptr;
   JS_AddModuleExportList(ctx, m, k_log_exports, VACPS_COUNTOF(k_log_exports));
