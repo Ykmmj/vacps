@@ -10,7 +10,6 @@ import {
   telemetryConfigured,
   type AgentConfig,
 } from './config';
-import type { HostRequest, HostResponse } from './contracts/http';
 import type { TaskRequest, TaskResult } from './contracts/task';
 import { TaskState } from './contracts/task';
 import { ShellExecutor } from './executor/shell-executor';
@@ -28,16 +27,17 @@ import {
   type RegistrationStatus,
 } from './registration/control-plane-state';
 import { ProcessManager } from './runtime/process-manager';
-import { configurePathGuard } from './runtime/path-guard';
 import { assertControlPlaneAuthConfig } from './security/http-auth';
 import { createServer } from './server/app';
+import { createInboundRequestAdapter } from './server/inbound-request';
 import type { App } from './server/router';
 import { TaskStore } from './storage/task-store';
 import { NativeTelemetryCollector } from './telemetry/native-telemetry';
 
 /**
  * Composition root for native agent script (apps/vacps main wiring, class form).
- * Host C++ calls initialize / handleRequest / tickControlPlane / shutdown.
+ * Host C++ calls initialize / tickControlPlane / shutdown.
+ * Inbound HTTP: native transport event → JS Server onRequest callback (not a host export).
  */
 export class Application {
   private config: AgentConfig = loadConfig();
@@ -48,6 +48,8 @@ export class Application {
   private telemetry: NativeTelemetryCollector | undefined;
   private httpApp: App | undefined;
   private server: http.Server | undefined;
+  /** Per-application inbound adapter (owns request-id sequence). */
+  private readonly adaptInboundRequest = createInboundRequestAdapter();
   private ready = false;
   private cpState: ControlPlaneState = {
     registrationStatus: 'unknown',
@@ -59,10 +61,6 @@ export class Application {
   async initialize(): Promise<void> {
     this.config = loadConfig();
     assertControlPlaneAuthConfig(this.config);
-    configurePathGuard({
-      dataDir: host.dataDir(),
-      extraRoots: this.config.FS_ALLOWED_ROOTS,
-    });
     const path = `${host.dataDir()}/agent.db`;
     this.db = await Store.open(path);
     this.store = await TaskStore.create(this.db);
@@ -91,16 +89,36 @@ export class Application {
       isReady: () => this.ready,
     });
 
-    // Bind address is agent policy (loadConfig / env) — C++ Server only gets options.
-    this.server = new http.Server({
-      host: this.config.LISTEN_HOST,
-      port: this.config.LISTEN_PORT,
-    });
-    await this.server.listen();
+    // Bind address is agent policy (loadConfig / env). Transport stays route-free;
+    // onRequest adapts the wire request into the business router contract.
+    this.server = new http.Server(
+      {
+        host: this.config.LISTEN_HOST,
+        port: this.config.LISTEN_PORT,
+      },
+      async (req) => {
+        const app = this.httpApp;
+        if (!app) {
+          return {
+            status: 503,
+            headers: { 'content-type': 'application/json; charset=utf-8' },
+            body: JSON.stringify({
+              error: {
+                code: 'service_unavailable',
+                message: 'application not initialized',
+              },
+            }),
+          };
+        }
+        // HostResponse (string body) is a valid ServerResponse.
+        return app.handleRequest(this.adaptInboundRequest(req));
+      },
+    );
+    const addr = await this.server.listen();
     this.ready = true;
 
     log.info(
-      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path} listening=${this.server.listening} controlPlane=${this.config.CONTROL_PLANE_URL ?? 'off'}`,
+      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path} listening=${this.server.listening} addr=${addr.host}:${addr.port} controlPlane=${this.config.CONTROL_PLANE_URL ?? 'off'}`,
     );
 
     if (registrationConfigured(this.config)) {
@@ -110,19 +128,6 @@ export class Application {
       await saveControlPlaneState(this.db, this.cpState);
     }
     this.nextTelemetryMs = host.nowMs() + 5_000;
-  }
-
-  async handleRequest(request: HostRequest): Promise<HostResponse> {
-    if (!this.httpApp) {
-      return {
-        status: 503,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-        body: JSON.stringify({
-          error: { code: 'service_unavailable', message: 'application not initialized' },
-        }),
-      };
-    }
-    return this.httpApp.handleRequest(request);
   }
 
   async runTask(task: TaskRequest): Promise<TaskResult> {
@@ -191,7 +196,7 @@ export class Application {
   async shutdown(): Promise<void> {
     log.info('application shutdown');
     // Business close order (NATIVE_RESOURCE_OWNERSHIP): Server → processes → Store.
-    // Host does not stopAll these; only this export runs before FreeContext.
+    // Stop accepting (native event → JS callback) before tearing down dependents.
     if (this.server) {
       await this.server.close();
       this.server = undefined;

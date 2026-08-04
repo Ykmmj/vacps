@@ -4,14 +4,21 @@
  * vacps::storage::Store — one SQLite connection owned by a JS Store instance.
  *
  * Serialization: every public method holds `mutex_` for the duration of the
- * Database call. This is the per-Store serialization mechanism so concurrent
- * offloaded jobs for the same Store cannot interleave SQL on the connection.
- * Different Store instances may still run in parallel on the shared host pool.
+ * Database call so concurrent run_blocking jobs for the same Store cannot
+ * interleave SQL on the connection. RunBlocking uses Runtime::Async and the
+ * detail::Impl-owned generic worker pool (binding stage); this domain type
+ * stays free of Runtime/QuickJS/Host dependencies.
+ *
+ * Lifetime: JS holds shared_ptr via ClassHolder; async methods capture
+ * shared_ptr by value across await/run_blocking. ~Store is only the last-ref RAII
+ * fallback (finalizer drops the holder — it does not call close()). Explicit
+ * close() remains the ordered, mutex-serialized path used by the binding.
  */
 
 #include "app/error.hpp"
 #include "storage/database.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -56,6 +63,8 @@ struct TransactionStep {
   std::optional<ExpectedChanges> expected_changes;
   /** Only used for Query steps; default matches Database::kDefaultMaxQueryRows. */
   std::size_t max_rows{Database::kDefaultMaxQueryRows};
+  /** Only used for Query steps; approximate payload budget (columns + cells). */
+  std::optional<std::size_t> max_bytes;
 };
 
 /** Per-step result: RunResult for run, QueryResult for query. */
@@ -67,7 +76,14 @@ class Store {
   Store& operator=(const Store&) = delete;
   Store(Store&&) = delete;
   Store& operator=(Store&&) = delete;
-  ~Store();
+
+  /**
+   * Best-effort RAII when the last shared_ptr drops (including after the JS
+   * ClassHolder finalizer). noexcept; does not take mutex_ — by contract no
+   * legal in-flight operation still holds a shared_ptr. Marks closed and
+   * resets Database. Prefer explicit close() from JS for ordered shutdown.
+   */
+  ~Store() noexcept;
 
   /**
    * Open a new connection via Database::open, applying OpenOptions::mode
@@ -79,6 +95,8 @@ class Store {
       OpenOptions options = {});
 
   [[nodiscard]] const std::string& path() const noexcept { return path_; }
+
+  /** Non-blocking: atomic flag only; does not take mutex_ or touch Database. */
   [[nodiscard]] bool closed() const noexcept;
 
   [[nodiscard]] VoidResult exec(std::string_view sql);
@@ -107,14 +125,15 @@ class Store {
       const std::vector<TransactionStep>& steps);
 
   /**
-   * Idempotent: release the sqlite connection.
-   * Thread-safe (mutex_). Safe to call from a GC finalizer without ScriptRuntime —
-   * sync sqlite close on the caller thread is intentional.
+   * Idempotent: release the sqlite connection under mutex_ (serialized with
+   * other Store methods). The JS binding uses run_blocking for this worker path; it is not
+   * the GC finalizer path (finalizer only drops shared_ptr → ~Store).
+   * Marks closed as soon as the serialization lock is held and closing begins.
    */
   [[nodiscard]] VoidResult close();
 
  private:
-  explicit Store(std::unique_ptr<Database> db, std::string path, OpenOptions options);
+  explicit Store(std::unique_ptr<Database> db, std::string path);
 
   [[nodiscard]] VoidResult ensure_open() const;
   [[nodiscard]] static VoidResult check_expected_changes(
@@ -125,7 +144,8 @@ class Store {
   mutable std::mutex mutex_;
   std::unique_ptr<Database> db_;
   std::string path_;
-  OpenOptions options_;
+  // Set under mutex_ in close(); also set lock-free in ~Store. Read lock-free by closed().
+  std::atomic<bool> closed_{false};
 };
 
 }  // namespace vacps::storage

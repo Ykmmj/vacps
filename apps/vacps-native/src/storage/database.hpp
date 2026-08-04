@@ -43,7 +43,7 @@ enum class OpenMode {
 };
 
 /**
- * SQLite connection infrastructure only (design n1 §六 vacps:store).
+ * SQLite connection infrastructure only (used by vacps:store).
  * No domain tables or task logic.
  *
  * Transaction control (BEGIN/COMMIT/ROLLBACK) is not public product API —
@@ -94,7 +94,7 @@ class Database {
 
   /**
    * Run `work` inside BEGIN IMMEDIATE … COMMIT on this connection.
-   * Intended for a single offload job so no other SQL can interleave.
+   * Intended for a single run_blocking job so no other SQL can interleave.
    * On work error / exception: ROLLBACK and propagate.
    */
   template <class F>
@@ -146,7 +146,7 @@ class Database {
 
   /**
    * Atomically run all steps (BEGIN … each step … COMMIT) without yielding.
-   * Use from a single offload job only.
+   * Use from a single run_blocking job only.
    */
   [[nodiscard]] Result<std::vector<TxStepResult>> run_transaction(
       const std::vector<TxStep>& steps);

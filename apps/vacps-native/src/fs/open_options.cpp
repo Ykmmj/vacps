@@ -2,6 +2,10 @@
 
 #include <format>
 
+#if defined(__linux__)
+#include <fcntl.h>
+#endif
+
 namespace vacps::fs {
 
 Result<OpenMode> open_mode_from_string(std::string_view s) {
@@ -11,9 +15,13 @@ Result<OpenMode> open_mode_from_string(std::string_view s) {
   if (s == "write-new") return OpenMode::write_new;
   if (s == "append") return OpenMode::append;
   if (s == "append-read") return OpenMode::append_read;
-  return std::unexpected(Error{std::format(
-      "File.open: unknown mode \"{}\" (expected read|read-write|write|write-new|append|append-read)",
-      s)});
+  return std::unexpected(Error{
+      std::format(
+          "File.open: unknown mode \"{}\" (expected "
+          "read|read-write|write|write-new|append|append-read)",
+          s),
+      "open",
+      0});
 }
 
 const char* open_mode_to_string(OpenMode mode) noexcept {
@@ -48,30 +56,30 @@ bool open_mode_creates(OpenMode mode) noexcept {
   return false;
 }
 
-Flags flags_for_open_mode(OpenMode mode) noexcept {
-  switch (mode) {
-    case OpenMode::read:
-      return Flags::read_only;
-    case OpenMode::read_write:
-      return Flags::read_write;
-    case OpenMode::write:
-      return Flags::write_only | Flags::create | Flags::truncate;
-    case OpenMode::write_new:
-      return Flags::write_only | Flags::create | Flags::exclusive;
-    case OpenMode::append:
-      return Flags::write_only | Flags::create | Flags::append;
-    case OpenMode::append_read:
-      return Flags::read_write | Flags::create | Flags::append;
-  }
-  return Flags::read_only;
+bool open_mode_appends(OpenMode mode) noexcept {
+  return mode == OpenMode::append || mode == OpenMode::append_read;
 }
 
-bool flags_create(Flags flags) noexcept {
-#if defined(BOOST_ASIO_HAS_FILE)
-  return (static_cast<unsigned>(flags) &
-          static_cast<unsigned>(asio::file_base::create)) != 0;
+int posix_open_flags(OpenMode mode) noexcept {
+#if defined(__linux__)
+  switch (mode) {
+    case OpenMode::read:
+      return O_RDONLY;
+    case OpenMode::read_write:
+      return O_RDWR;
+    case OpenMode::write:
+      return O_WRONLY | O_CREAT | O_TRUNC;
+    case OpenMode::write_new:
+      return O_WRONLY | O_CREAT | O_EXCL;
+    case OpenMode::append:
+      return O_WRONLY | O_CREAT | O_APPEND;
+    case OpenMode::append_read:
+      return O_RDWR | O_CREAT | O_APPEND;
+  }
+  return O_RDONLY;
 #else
-  return (static_cast<unsigned>(flags) & static_cast<unsigned>(Flags::create)) != 0;
+  (void)mode;
+  return 0;
 #endif
 }
 

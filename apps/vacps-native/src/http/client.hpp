@@ -4,8 +4,11 @@
 
 #include <boost/asio/awaitable.hpp>
 
+#include <chrono>
 #include <cstdint>
+#include <stop_token>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,16 +33,16 @@ struct ClientRequest {
   std::string method{"GET"};
   std::string url;
   std::vector<std::pair<std::string, std::string>> headers;
-  std::string body;
-  /** 0 = no timeout (not recommended). Default 30s. Applies to resolve+I/O. */
-  std::int32_t timeout_ms{30'000};
+  std::vector<std::uint8_t> body;
+  /** Must be > 0. Default 30s. One absolute wall budget for the whole request. */
+  std::chrono::milliseconds timeout{30'000};
   /**
    * Max response body size enforced during read via Beast body_limit.
    * Default 8 MiB. Oversized bodies fail without buffering the whole payload.
    */
   std::size_t max_response_bytes{8u * 1024u * 1024u};
   /**
-   * PEM CA bundle for HTTPS (injected from ScriptServices.ca_bundle / bootstrap).
+   * PEM CA bundle for HTTPS (injected from bootstrap / host config).
    * Empty → platform default paths only (no getenv at request time).
    * Missing CA for https is fail-closed (no verify skip).
    */
@@ -49,15 +52,21 @@ struct ClientRequest {
 struct ClientResponse {
   int status{0};
   std::vector<std::pair<std::string, std::string>> headers;
-  std::string body;
+  std::vector<std::uint8_t> body;
 };
 
 /**
  * One-shot HTTP/HTTPS request on the caller's executor (host io_context).
  * HTTPS: verify_peer + SNI + host_name_verification; TLS ≥ 1.2.
  * Does not follow redirects (caller sees 3xx as-is).
+ *
+ * @param stop External cancellation; stop_callback posts onto the request
+ *        executor before emitting Asio cancellation (never emits on a foreign
+ *        thread). Runtime/shutdown cancel → ECANCELED; wall timeout → ETIMEDOUT.
  */
-[[nodiscard]] asio::awaitable<Result<ClientResponse>> async_request(ClientRequest req);
+[[nodiscard]] asio::awaitable<Result<ClientResponse>> async_request(
+    std::stop_token stop,
+    ClientRequest req);
 
 /** Resolve CA path: explicit file path → well-known platform defaults. No getenv. */
 [[nodiscard]] Result<std::string> resolve_ca_bundle(std::string_view explicit_path);

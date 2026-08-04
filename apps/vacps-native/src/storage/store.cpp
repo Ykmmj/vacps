@@ -36,11 +36,14 @@ VoidResult ensure_parent_dirs(const std::string& path, OpenMode mode) {
 
 }  // namespace
 
-Store::Store(std::unique_ptr<Database> db, std::string path, OpenOptions options)
-    : db_(std::move(db)), path_(std::move(path)), options_(std::move(options)) {}
+Store::Store(std::unique_ptr<Database> db, std::string path)
+    : db_(std::move(db)), path_(std::move(path)) {}
 
-Store::~Store() {
-  std::lock_guard lock(mutex_);
+Store::~Store() noexcept {
+  // No mutex_: the last shared_ptr drop already guarantees no in-flight legal
+  // operation retains this Store. Finalizer must not block on mutex_ and must
+  // not call close() (explicit close is JS run_blocking and mutex-serialized).
+  closed_.store(true, std::memory_order_relaxed);
   db_.reset();
 }
 
@@ -54,13 +57,12 @@ Result<std::shared_ptr<Store>> Store::open(std::string path, OpenOptions options
     return std::unexpected(std::move(db.error()));
   }
   auto store = std::shared_ptr<Store>(new Store(
-      std::make_unique<Database>(std::move(*db)), std::move(path), std::move(options)));
+      std::make_unique<Database>(std::move(*db)), std::move(path)));
   return store;
 }
 
 bool Store::closed() const noexcept {
-  std::lock_guard lock(mutex_);
-  return db_ == nullptr || !db_->ok();
+  return closed_.load(std::memory_order_relaxed);
 }
 
 VoidResult Store::ensure_open() const {
@@ -145,7 +147,7 @@ Result<std::vector<TransactionResult>> Store::transaction(
         case StepType::Query: {
           // expected_changes is not meaningful for SELECT / result sets —
           // do not check against sqlite3_changes (binding rejects the combo for JS).
-          auto qr = self.query(step.sql, step.params, step.max_rows);
+          auto qr = self.query(step.sql, step.params, step.max_rows, step.max_bytes);
           if (!qr) {
             return std::unexpected(std::move(qr.error()));
           }
@@ -173,6 +175,9 @@ Result<std::vector<TransactionResult>> Store::transaction(
 
 VoidResult Store::close() {
   std::lock_guard lock(mutex_);
+  // Publish closed before releasing the connection so closed() is true for the
+  // remainder of teardown (and for concurrent observers) once we own mutex_.
+  closed_.store(true, std::memory_order_relaxed);
   db_.reset();
   return {};
 }

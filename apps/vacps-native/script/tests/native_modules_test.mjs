@@ -1,9 +1,9 @@
 /**
- * Integration tests for C++ vacps:* modules (runs inside QuickJS ScriptRuntime, not Node).
- * Loaded by tests/test_js_native_api.cpp via ScriptRuntime::eval_module + await_value.
+ * Integration tests for C++ vacps:* modules (runs inside QuickJS Runtime/host, not Node).
+ * Standalone ESM smoke script for the vacps:* module surface.
  *
  * On success: top-level await completes and default export is true.
- * On failure: throws Error (Promise rejects → C++ test fails).
+ * On failure: throws Error so the host run fails.
  */
 import * as log from 'vacps:log';
 import * as host from 'vacps:host';
@@ -82,13 +82,38 @@ await test('host.platform', () => {
 
 // ── vacps:log ─────────────────────────────────────────────────────
 
-await test('log levels + flush', () => {
+await test('log levels + async flush', async () => {
   log.trace('trace-js');
   log.debug('debug-js');
   log.info('info-js');
   log.warn('warn-js');
   log.error('error-js');
-  log.flush();
+  await log.flush();
+});
+
+// ── global URL / Encoding APIs ───────────────────────────────────
+
+await test('URL + live URLSearchParams', () => {
+  const url = new URL('/items?a=1&a=2', 'http://127.0.0.1:8080/base');
+  assertEq(url.href, 'http://127.0.0.1:8080/items?a=1&a=2', 'resolved href');
+  assertEq(url.searchParams.getAll('a').join(','), '1,2', 'repeated params');
+  url.searchParams.append('b', 'hello world');
+  assertEq(url.search, '?a=1&a=2&b=hello+world', 'live params update URL');
+  url.search = '?z=9';
+  assertEq(url.searchParams.get('z'), '9', 'search update live params');
+  assert(URL.canParse('/relative', url), 'canParse with URL base');
+});
+
+await test('TextEncoder/TextDecoder UTF-8 + encodeInto', () => {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const encoded = encoder.encode('vacps-中文');
+  assertEq(decoder.decode(encoded), 'vacps-中文', 'UTF-8 roundtrip');
+  const destination = new Uint8Array(8);
+  const progress = encoder.encodeInto('中A', destination);
+  assertEq(progress.read, 2, 'encodeInto UTF-16 units read');
+  assertEq(progress.written, 4, 'encodeInto bytes written');
+  assertEq(decoder.decode(destination.subarray(0, progress.written)), '中A', 'encodeInto bytes');
 });
 
 // ── vacps:store ───────────────────────────────────────────────────
@@ -135,37 +160,40 @@ await test('store transaction rollback on expectedChanges miss', async () => {
   await db.close();
 });
 
-// ── vacps:fs (File.open + namespace ops only) ──────────────────────
+// ── vacps:fs (File.open + namespace ops only; bytes-first) ─────────
+
+const fsTextEncoder = new TextEncoder();
+const fsTextDecoder = new TextDecoder();
 
 async function readTextFile(path) {
-  const f = await fs.File.open(path, 'read');
+  const f = await fs.File.open(path, { mode: 'read' });
   try {
-    return await f.readText();
+    return fsTextDecoder.decode(await f.read());
   } finally {
     await f.close();
   }
 }
 
 async function writeTextFile(path, content) {
-  const f = await fs.File.open(path, 'write');
+  const f = await fs.File.open(path, { mode: 'write' });
   try {
-    await f.writeText(content);
+    await f.write(fsTextEncoder.encode(content));
   } finally {
     await f.close();
   }
 }
 
 async function appendTextFile(path, content) {
-  const f = await fs.File.open(path, 'append');
+  const f = await fs.File.open(path, { mode: 'append' });
   try {
-    await f.writeText(content);
+    await f.write(fsTextEncoder.encode(content));
   } finally {
     await f.close();
   }
 }
 
 async function readBytesFile(path) {
-  const f = await fs.File.open(path, 'read');
+  const f = await fs.File.open(path, { mode: 'read' });
   try {
     return await f.read();
   } finally {
@@ -174,7 +202,7 @@ async function readBytesFile(path) {
 }
 
 async function writeBytesFile(path, data) {
-  const f = await fs.File.open(path, 'write');
+  const f = await fs.File.open(path, { mode: 'write' });
   try {
     await f.write(data);
   } finally {
@@ -237,12 +265,30 @@ await test('fs File write/read/append/exists/readDirectory/rename/remove', async
   await fs.remove('js_api/fs/r2.txt');
 });
 
-// Path allowlist is JS path-guard.ts at tool boundaries — not C++ vacps:fs.
 // Pure I/O: relative paths under dataDir; absolute paths open as given.
+// No path allowlist in C++ vacps:fs or the JS module surface.
 await test('fs pure I/O relative under dataDir', async () => {
   await writeTextFile('js_api/fs/pure.txt', 'pure');
   assertEq(await readTextFile('js_api/fs/pure.txt'), 'pure', 'relative pure I/O');
   await fs.remove('js_api/fs/pure.txt');
+});
+
+await test('fs FileOperationQueue serializes concurrent handle operations', async () => {
+  await writeTextFile('js_api/fs/queued.txt', 'alpha-beta-gamma');
+  const file = await fs.File.open('js_api/fs/queued.txt', { mode: 'read' });
+  try {
+    const [alpha, beta, stat] = await Promise.all([
+      file.readAt(0, 5),
+      file.readAt(6, 4),
+      file.stat(),
+    ]);
+    assertEq(fsTextDecoder.decode(alpha), 'alpha', 'first queued read');
+    assertEq(fsTextDecoder.decode(beta), 'beta', 'second queued read');
+    assertEq(stat.size, 'alpha-beta-gamma'.length, 'queued stat');
+  } finally {
+    await file.close();
+    await fs.remove('js_api/fs/queued.txt');
+  }
 });
 
 // ── vacps:crypto ──────────────────────────────────────────────────
@@ -330,15 +376,51 @@ await test('Process class start/wait/close', async () => {
 
 // ── vacps:http ────────────────────────────────────────────────────
 
-await test('http.Server listen/close', async () => {
-  // Use a high ephemeral-ish port from nowMs to avoid clashes in parallel tests.
-  const port = 20000 + (host.nowMs() % 20000);
-  const server = new http.Server({ host: '127.0.0.1', port });
+await test('http.Server async handler + loopback request + close', async () => {
+  // This deliberately crosses both directions:
+  // native accept -> JS handler -> native fs Promise -> JS response -> native write.
+  let handled = 0;
+  const server = new http.Server({ host: '127.0.0.1', port: 0 }, async (request) => {
+    assertEq(request.method, 'POST', 'handler method');
+    assertEq(request.url, '/async?value=42', 'handler request-target');
+    assertEq(fsTextDecoder.decode(request.body), 'ping', 'handler body');
+    assert(await fs.exists('js_api/fs'), 'native Promise awaited inside JS handler');
+    handled += 1;
+    return {
+      status: 201,
+      headers: { 'x-vacps-async': 'handled' },
+      body: fsTextEncoder.encode('pong'),
+    };
+  });
   assert(server.listening === false, 'not listening yet');
-  await server.listen();
-  assert(server.listening === true, 'listening');
-  await server.close();
+  assert(server.address === undefined, 'address undefined before listen');
+  try {
+    const addr = await server.listen();
+    assert(server.listening === true, 'listening');
+    assert(typeof addr.host === 'string' && addr.host.length > 0, 'listen host');
+    assert(typeof addr.port === 'number' && addr.port > 0, 'ephemeral port > 0');
+    assert(server.address !== undefined, 'address set while listening');
+    assertEq(server.address.host, addr.host, 'address.host');
+    assertEq(server.address.port, addr.port, 'address.port');
+
+    const response = await http.request({
+      url: `http://${addr.host}:${addr.port}/async?value=42`,
+      method: 'POST',
+      headers: { 'x-vacps-test': 'loopback' },
+      body: fsTextEncoder.encode('ping'),
+      timeoutMs: 5_000,
+    });
+    assertEq(response.status, 201, 'loopback status');
+    assertEq(response.headers['x-vacps-async'], 'handled', 'loopback response header');
+    assertEq(fsTextDecoder.decode(response.body), 'pong', 'loopback response body');
+    assertEq(handled, 1, 'handler invocation count');
+  } finally {
+    await server.close();
+  }
   assert(server.listening === false, 'closed');
+  // close is idempotent
+  await server.close();
+  assert(server.listening === false, 'closed twice');
 });
 
 await test('http.request rejects bad url', async () => {
@@ -362,3 +444,6 @@ export default {
   total: results.length,
   ok: passed === results.length,
 };
+
+export async function initialize() {}
+export async function shutdown() {}

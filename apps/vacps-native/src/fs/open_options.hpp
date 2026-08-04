@@ -4,34 +4,21 @@
  * Open modes and options for vacps::fs::File.
  *
  * Primary public API is string OpenMode ("read" | "read-write" | …).
- * Mapping OpenMode → Asio Flags / POSIX open bits happens inside File::open
- * (domain), not in JS bindings.
- *
- * Flags (Asio file_base bitmask) remain an internal dual-backend detail.
+ * Mapping OpenMode → POSIX open bits happens inside File::open.
  */
 
 #include "app/error.hpp"
-
-#include <boost/asio/detail/config.hpp>
 
 #include <cstdint>
 #include <optional>
 #include <string_view>
 
-#if defined(BOOST_ASIO_HAS_FILE)
-#include <boost/asio/file_base.hpp>
-#endif
-
 namespace vacps::fs {
-
-namespace asio = boost::asio;
-
-// ── Public open mode (JS string union) ────────────────────────────
 
 /**
  * File open modes — primary C++ / JS API.
  *
- * Mapping (POSIX / Asio flags):
+ * Mapping (POSIX):
  * - read         → O_RDONLY
  * - read_write   → O_RDWR
  * - write        → O_WRONLY | O_CREAT | O_TRUNC
@@ -48,12 +35,23 @@ enum class OpenMode {
   append_read,
 };
 
+/**
+ * Backend selection for File::open.
+ * Auto: Asio/io_uring when the process probe succeeded and an executor is
+ * provided; otherwise POSIX pool backend.
+ */
+enum class FileBackend {
+  Auto,
+  Asio,
+  Posix,
+};
+
 struct OpenOptions {
   OpenMode mode{OpenMode::read};
   /**
-   * Permission bits when the mode creates the file (pool-backend open(2)).
-   * Default 0644 when unset. Asio random_access_file::open has no mode
-   * parameter — library default applies on that backend.
+   * Permission bits when the mode creates the file (open(2) mode).
+   * Default 0644 when unset. Applied on the single POSIX open path for both
+   * backends.
    */
   std::optional<std::uint32_t> permissions{};
 };
@@ -65,61 +63,21 @@ struct OpenOptions {
 [[nodiscard]] const char* open_mode_to_string(OpenMode mode) noexcept;
 
 /** Effective create mode bits (default 0644). */
-[[nodiscard]] inline unsigned effective_permissions(const OpenOptions& opts) noexcept {
+[[nodiscard]] inline unsigned effective_permissions(
+    const OpenOptions& opts) noexcept {
   return opts.permissions.value_or(0644u);
 }
 
 /** True when OpenMode implies O_CREAT. */
 [[nodiscard]] bool open_mode_creates(OpenMode mode) noexcept;
 
-// ── Internal Flags (dual-backend Asio / POSIX bitmask) ────────────
-
-#if defined(BOOST_ASIO_HAS_FILE)
-
-using Flags = asio::file_base::flags;
-
-#else
+/** True when OpenMode implies O_APPEND. */
+[[nodiscard]] bool open_mode_appends(OpenMode mode) noexcept;
 
 /**
- * Compatible bitmask when Asio file support is not compiled in.
- * Numeric values match Linux open flags. Not part of the JS surface.
+ * POSIX open(2) flags for OpenMode (without O_CLOEXEC).
+ * Single source of truth for both backends.
  */
-enum class Flags : int {
-  read_only = 0,
-  write_only = 1,
-  read_write = 2,
-  append = 1024,
-  create = 64,
-  exclusive = 128,
-  truncate = 512,
-  sync_all_on_write = 1052672,
-};
-
-inline Flags operator|(Flags a, Flags b) noexcept {
-  return static_cast<Flags>(static_cast<int>(a) | static_cast<int>(b));
-}
-inline Flags operator&(Flags a, Flags b) noexcept {
-  return static_cast<Flags>(static_cast<int>(a) & static_cast<int>(b));
-}
-inline Flags& operator|=(Flags& a, Flags b) noexcept {
-  a = a | b;
-  return a;
-}
-
-#endif
-
-/** Map OpenMode → Asio/POSIX Flags (domain mapping for File::open). */
-[[nodiscard]] Flags flags_for_open_mode(OpenMode mode) noexcept;
-
-/** True when flags include create. */
-[[nodiscard]] bool flags_create(Flags flags) noexcept;
-
-[[nodiscard]] inline Flags flags_from_int(int bits) noexcept {
-  return static_cast<Flags>(bits);
-}
-
-[[nodiscard]] inline int flags_to_int(Flags flags) noexcept {
-  return static_cast<int>(flags);
-}
+[[nodiscard]] int posix_open_flags(OpenMode mode) noexcept;
 
 }  // namespace vacps::fs

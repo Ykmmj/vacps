@@ -1,122 +1,127 @@
 #pragma once
 
 #include "app/error.hpp"
-#include "fs/async.hpp"
-#include "fs/executor.hpp"
 #include "fs/fs.hpp"
 #include "fs/open_options.hpp"
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/strand.hpp>
-#include <boost/asio/thread_pool.hpp>
 
-#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace vacps::fs {
 
+namespace asio = boost::asio;
+
 /**
- * Open file handle — primary I/O API for vacps:fs.
+ * Open file handle — pure domain content I/O for vacps:fs.
  *
- * ## Dual backend (product requirement — keep both)
+ * ## Dual backend (one public API)
  *
- * Selected once at open; exclusive per instance for the lifetime of the File:
+ * Selected once at complete_open after the process-wide io_uring probe:
  *
- * 1. **Asio** — `boost::asio::random_access_file` when `use_asio_file` is true
- *    (runtime `probe_io_uring()` succeeded) and an ioc executor is provided.
- *    Preferred path for non-blocking file I/O on hosts with working io_uring.
- * 2. **Pool** — private FD + sync POSIX I/O offloaded on `thread_pool`.
- *    Required fallback when io_uring is unavailable or blocked (e.g. Docker
- *    default seccomp → setup EPERM). Constructing Asio file objects in that
- *    environment throws; we never probe-fail and still open Asio.
+ * 1. **Asio / io_uring data plane** — `boost::asio::random_access_file` on the
+ *    owning (main) executor. Data path uses genuine
+ *    `async_read_some_at` / `async_write_some_at`. Deliberate **two-descriptor**
+ *    ownership: (a) the assigned data fd inside random_access_file, (b) a
+ *    `F_DUPFD_CLOEXEC` control fd for run_blocking fstat/ftruncate/fsync/append
+ *    write. Never call random_access_file methods (including native_handle,
+ *    cancel, close, resize, sync_all) from a worker. Explicit close/cancel of
+ *    the Asio object runs on the owning executor (module main + operation
+ *    queue serialization).
  *
- * This is **not** transitional dual-path junk and must not be “simplified” to
- * a single backend. Review feedback that asks for “blocking POSIX only first”
- * rejects the product constraint: we need io_uring where it works **and** a
- * reliable pool path where it does not, behind one JS/C++ File surface.
+ * 2. **POSIX fallback** — single owned fd + blocking pread/pwrite/write/
+ *    fstat/ftruncate/fsync/close. Binding uses Runtime::Async::run_blocking.
  *
- * ## Concurrency (per-File serialization)
+ * Probe failure (including Docker seccomp EPERM/ENOSYS) selects POSIX before
+ * any Asio file object is constructed. Parent directories are never created.
  *
- * Every async op (read/write/readAt/writeAt/truncate/stat/flush/close) acquires
- * a per-File exclusive async lock (wait queue on `strand_`) for the whole
- * logical operation, including nested awaits. That prevents races on
- * `offset_`, the FD / `random_access_file`, and the life state when multiple
- * promises touch the same handle.
+ * Append: each `write(2)` syscall under O_APPEND is kernel-positioned
+ * atomically; a logical call spanning multiple partial writes is not one
+ * indivisible append. `write_at` is rejected on append handles.
  *
- * - **Pool backend:** lock held while blocking POSIX I/O runs on the host
- *   `thread_pool` (lambdas capture `shared_ptr<File>`, never bare `this` alone).
- * - **Asio backend:** lock held across `async_read_some_at` / `async_write_some_at`
- *   awaits so sequential cursor updates and handle lifetime stay coherent.
+ * Path `stat` (namespace) uses lstat semantics. Handle `stat` uses fstat on
+ * the control/owned fd (opened target, not the symlink itself).
  *
- * Lifetime state: Open → Closing → Closed. Entering Closing/Closed rejects new
- * I/O; close waits for the exclusive lock (after prior ops) then releases the
- * handle; close is idempotent.
+ * No QuickJS / Runtime::Async / worker executor / private run_blocking in this type.
+ * This domain File does not own a serialization queue; callers must serialize
+ * access externally. The vacps:fs JS module FileHandle owns a module-private
+ * FileOperationQueue for that purpose.
  *
- * Known Asio API limit (document, do not pretend to unify via fake wrappers):
- * pool open passes create permissions to `open(2)`; Asio
- * `random_access_file::open(path, flags)` does not take user mode bits and
- * uses the library default for create. Callers that need exact create mode
- * on both backends must accept that Asio limitation until Asio exposes mode.
- *
- * Path policy is JS-only (`script/src/runtime/path-guard.ts` at tool
- * boundaries). C++ resolves paths and does pure open/read/write — no
- * allowlist in native.
- *
- * Primary open API uses `OpenMode` string modes (mapped to Asio Flags /
- * POSIX bits inside open). Primary I/O API is awaitable `async_*`; sync
- * methods are for the pool backend and unit tests.
- *
- * Namespace ops (mkdir/list/rename/…) stay on path helpers in async.hpp.
- * Content I/O is only through this class. Pool FD ownership is private (not a
- * public type or JS binding).
+ * Lifetime: public async_read_at / async_write_at are non-coroutine wrappers
+ * that call shared_from_this() immediately and pass shared_ptr by value into
+ * private static coroutine impls. Coroutine parameters live in the frame before
+ * initial suspend, covering the call-to-first-resume gap and every later
+ * co_await. With external serialization, destruction happens only when no op is
+ * in flight. Concurrent shared access without external serialization is
+ * undefined. Explicit close on the owning executor is the supported shutdown
+ * path; ~File is best-effort RAII once idle.
  */
 class File final : public std::enable_shared_from_this<File> {
  public:
-  /** Default cap when maxBytes is omitted / SIZE_MAX (16 MiB). */
   static constexpr std::size_t kDefaultMaxReadBytes = 16ull * 1024 * 1024;
-  /** Hard reject for any read maxBytes above this (64 MiB). */
   static constexpr std::size_t kHardMaxReadBytes = 64ull * 1024 * 1024;
 
-  /**
-   * Open a file with host FS context (primary public API).
-   *
-   * Uses `fs.ioc_executor` / `fs.use_asio_file` for Asio backend selection,
-   * `fs.pool` for pool-backend I/O. When `relative_base` is empty, resolves
-   * relative paths under `fs.data_dir`.
-   */
-  [[nodiscard]] static Result<std::shared_ptr<File>> open(
-      FsExecutor& fs,
+  struct PreparedOpen {
+    int fd{-1};
+    std::string display_path;
+    OpenMode mode{OpenMode::read};
+    bool prefer_asio{false};
+
+    PreparedOpen() = default;
+    PreparedOpen(const PreparedOpen&) = delete;
+    PreparedOpen& operator=(const PreparedOpen&) = delete;
+    PreparedOpen(PreparedOpen&& o) noexcept
+        : fd(std::exchange(o.fd, -1)),
+          display_path(std::move(o.display_path)),
+          mode(o.mode),
+          prefer_asio(o.prefer_asio) {}
+    PreparedOpen& operator=(PreparedOpen&& o) noexcept {
+      if (this != &o) {
+        reset();
+        fd = std::exchange(o.fd, -1);
+        display_path = std::move(o.display_path);
+        mode = o.mode;
+        prefer_asio = o.prefer_asio;
+      }
+      return *this;
+    }
+    ~PreparedOpen() { reset(); }
+
+    void reset() noexcept;
+    [[nodiscard]] int release() noexcept { return std::exchange(fd, -1); }
+  };
+
+  [[nodiscard]] static Result<PreparedOpen> prepare_open(
       std::string_view path,
       const OpenOptions& options,
-      const std::filesystem::path& relative_base = {});
+      const std::filesystem::path& relative_base = {},
+      FileBackend backend = FileBackend::Auto);
 
   /**
-   * Convenience: force pool backend (unit tests). No host pool → sync-only
-   * until a pool is provided via the FsExecutor overload.
+   * Phase 2 on the file executor (main). Prefer_asio requires a live probe
+   * and non-empty executor; otherwise POSIX. Exception-safe FD transfer.
    */
+  [[nodiscard]] static Result<std::shared_ptr<File>> complete_open(
+      PreparedOpen prepared,
+      asio::any_io_executor file_executor = {});
+
+  /** Test helper only. */
   [[nodiscard]] static Result<std::shared_ptr<File>> open(
       std::string_view path,
       const OpenOptions& options,
-      const std::filesystem::path& relative_base = {});
-
-  /**
-   * Async open using FsExecutor.
-   * Asio path runs on the ioc executor; pool path offloads blocking open.
-   */
-  [[nodiscard]] static asio::awaitable<Result<std::shared_ptr<File>>> async_open(
-      FsExecutor& fs,
-      std::string path,
-      OpenOptions options,
-      std::filesystem::path relative_base = {});
+      const std::filesystem::path& relative_base = {},
+      asio::any_io_executor file_executor = {},
+      FileBackend backend = FileBackend::Auto);
 
   File(const File&) = delete;
   File& operator=(const File&) = delete;
@@ -124,150 +129,132 @@ class File final : public std::enable_shared_from_this<File> {
   File& operator=(File&&) = delete;
   ~File();
 
-  // ── Primary API: awaitable I/O ─────────────────────────────────
+  // ── Asio data path (main executor only) ──────────────────────────
+  // Non-coroutine wrappers: shared_from_this() runs at the call site before
+  // any lazy awaitable is returned.
 
-  /**
-   * @param max_bytes  SIZE_MAX → kDefaultMaxReadBytes; > kHardMaxReadBytes rejected.
-   */
-  [[nodiscard]] asio::awaitable<Result<std::vector<std::uint8_t>>> async_read(
-      std::size_t max_bytes = (std::numeric_limits<std::size_t>::max)());
-  [[nodiscard]] asio::awaitable<Result<std::vector<std::uint8_t>>> async_read_at(
+  [[nodiscard]] asio::awaitable<Result<std::vector<std::uint8_t>>>
+  async_read_at(
       std::uint64_t offset,
-      std::size_t max_bytes);
-  [[nodiscard]] asio::awaitable<Result<std::string>> async_read_text(
-      std::size_t max_bytes = (std::numeric_limits<std::size_t>::max)());
-  [[nodiscard]] asio::awaitable<Result<std::size_t>> async_write(
-      std::span<const std::uint8_t> data);
+      std::size_t max_bytes,
+      std::stop_token stop = {});
+
   [[nodiscard]] asio::awaitable<Result<std::size_t>> async_write_at(
       std::uint64_t offset,
-      std::span<const std::uint8_t> data);
-  [[nodiscard]] asio::awaitable<Result<std::size_t>> async_write_text(std::string data);
-  [[nodiscard]] asio::awaitable<VoidResult> async_truncate(std::uint64_t size);
-  [[nodiscard]] asio::awaitable<Result<FileStat>> async_stat();
-  [[nodiscard]] asio::awaitable<VoidResult> async_flush();
-  [[nodiscard]] asio::awaitable<VoidResult> async_close();
+      std::vector<std::uint8_t> data,
+      std::stop_token stop = {});
 
-  // ── Sync I/O (pool backend + unit tests) ───────────────────────
+  // ── Sync primitives (POSIX fd / control fd; binding run_blocking) ────
 
-  [[nodiscard]] Result<std::vector<std::uint8_t>> read(
-      std::size_t max_bytes = (std::numeric_limits<std::size_t>::max)());
   [[nodiscard]] Result<std::vector<std::uint8_t>> read_at(
       std::uint64_t offset,
       std::size_t max_bytes);
-  [[nodiscard]] Result<std::size_t> write(std::span<const std::uint8_t> data);
   [[nodiscard]] Result<std::size_t> write_at(
       std::uint64_t offset,
       std::span<const std::uint8_t> data);
-  [[nodiscard]] Result<std::string> read_text(
+  [[nodiscard]] Result<std::vector<std::uint8_t>> read(
       std::size_t max_bytes = (std::numeric_limits<std::size_t>::max)());
-  [[nodiscard]] Result<std::size_t> write_text(std::string_view data);
+  [[nodiscard]] Result<std::size_t> write(std::span<const std::uint8_t> data);
+  [[nodiscard]] Result<std::size_t> append_write(
+      std::span<const std::uint8_t> data);
+  /**
+   * Truncate. Does not move the logical cursor (matches common positioned
+   * I/O semantics). Cursor may then point past EOF; subsequent sequential
+   * reads return empty; writes extend as usual.
+   */
   [[nodiscard]] VoidResult truncate(std::uint64_t size);
+  /** fstat on the control/owned fd (opened target). */
   [[nodiscard]] Result<FileStat> stat();
   [[nodiscard]] VoidResult flush();
+  /**
+   * Idempotent. Asio path: must run on the file executor (closes random_access
+   * file + control fd). POSIX path: closes owned fd (may be run_blocking).
+   */
   [[nodiscard]] VoidResult close();
 
   [[nodiscard]] bool closed() const noexcept;
   [[nodiscard]] bool uses_asio_file() const noexcept { return use_asio_; }
+  [[nodiscard]] bool is_append_mode() const noexcept {
+    return open_mode_appends(open_mode_);
+  }
   [[nodiscard]] const std::string& display_path() const noexcept {
     return display_path_;
   }
-  /** Open mode used at open (string OpenMode). */
   [[nodiscard]] OpenMode open_mode() const noexcept { return open_mode_; }
-  /** Internal Asio/POSIX flags derived from open_mode (for tests / diagnostics). */
-  [[nodiscard]] Flags flags() const noexcept { return flags_; }
+  [[nodiscard]] std::uint64_t cursor() const noexcept { return offset_; }
+
+  /** Checked cursor advance; returns error on overflow. */
+  [[nodiscard]] VoidResult advance_cursor(std::uint64_t delta) noexcept;
+  void set_cursor(std::uint64_t c) noexcept { offset_ = c; }
+
+  [[nodiscard]] static Result<std::size_t> resolve_read_max(
+      std::size_t max_bytes);
+
+  /** Validate permissions bits (must be within 0777 when set). */
+  [[nodiscard]] static VoidResult validate_permissions(
+      const OpenOptions& options);
 
  private:
   enum class Life : std::uint8_t { Open = 0, Closing = 1, Closed = 2 };
 
   struct PrivateTag {};
-  /** Opaque Asio random_access_file holder (defined in file.cpp). */
   struct AsioState;
-  /**
-   * Pool-backend FD owner (defined only in file.cpp).
-   * Not part of the public FS surface — never expose to bindings / JS.
-   */
-  struct PoolFd;
-
-  /**
-   * Implementation open (detail). Prefer FsExecutor overloads.
-   * Kept for unit tests that pass pool + use_asio_file explicitly.
-   */
-  [[nodiscard]] static Result<std::shared_ptr<File>> open_impl(
-      asio::any_io_executor ex,
-      asio::thread_pool* pool_fallback,
-      bool use_asio_file,
-      std::string_view path,
-      const OpenOptions& options,
-      const std::filesystem::path& relative_base);
+  struct PosixFd;
 
   File(
       PrivateTag,
-      std::unique_ptr<PoolFd> fd,
-      asio::thread_pool* pool,
-      asio::any_io_executor strand_ex,
+      std::unique_ptr<PosixFd> fd,
       std::string display_path,
-      OpenMode open_mode,
-      Flags flags);
+      OpenMode open_mode);
   File(
       PrivateTag,
       std::unique_ptr<AsioState> asio_state,
-      asio::thread_pool* pool,
-      asio::any_io_executor strand_ex,
       std::string display_path,
-      OpenMode open_mode,
-      Flags flags);
+      OpenMode open_mode);
 
   [[nodiscard]] VoidResult ensure_open() const;
-  [[nodiscard]] bool flags_append() const noexcept;
-  [[nodiscard]] Result<std::uint64_t> current_size() const;
-  /** Resolve SIZE_MAX → default; reject above hard max. */
-  [[nodiscard]] static Result<std::size_t> resolve_read_max(std::size_t max_bytes);
-  /** Release FD / Asio handle (no life_ transition). */
+  /** Control/owned POSIX fd for run_blocking ops (never Asio native_handle). */
+  [[nodiscard]] int control_fd() const noexcept;
   void close_handles() noexcept;
-  /** Open → Closing → close_handles → Closed (idempotent). */
-  VoidResult close_impl();
 
-  [[nodiscard]] Result<std::vector<std::uint8_t>> pool_read(std::size_t max_bytes);
-  [[nodiscard]] Result<std::vector<std::uint8_t>> pool_read_at(
+  [[nodiscard]] static bool offset_ok(std::uint64_t offset) noexcept;
+  [[nodiscard]] static bool offset_add_ok(
+      std::uint64_t base,
+      std::uint64_t delta) noexcept;
+  /** Validate [offset, offset+length) fits uint64_t and off_t when length>0. */
+  [[nodiscard]] static VoidResult check_range(
       std::uint64_t offset,
-      std::size_t max_bytes);
-  [[nodiscard]] Result<std::size_t> pool_write(std::span<const std::uint8_t> data);
-  [[nodiscard]] Result<std::size_t> pool_write_at(
-      std::uint64_t offset,
-      std::span<const std::uint8_t> data);
+      std::size_t length,
+      std::string_view op);
 
-  [[nodiscard]] asio::awaitable<Result<std::vector<std::uint8_t>>> asio_read(
-      std::size_t max_bytes);
-  [[nodiscard]] asio::awaitable<Result<std::vector<std::uint8_t>>> asio_read_at(
+  /** Adopt raw fd into PosixFd RAII before any File allocation. */
+  [[nodiscard]] static Result<std::shared_ptr<File>> adopt_posix(
+      int fd,
+      std::string display_path,
+      OpenMode mode);
+
+  /** Private static coroutines; `self` is a frame parameter (pre-suspend). */
+  [[nodiscard]] static asio::awaitable<Result<std::vector<std::uint8_t>>>
+  async_read_at_impl(
+      std::shared_ptr<File> self,
       std::uint64_t offset,
-      std::size_t max_bytes);
-  [[nodiscard]] asio::awaitable<Result<std::size_t>> asio_write(
-      std::vector<std::uint8_t> data);
-  [[nodiscard]] asio::awaitable<Result<std::size_t>> asio_write_at(
+      std::size_t max_bytes,
+      std::stop_token stop);
+
+  [[nodiscard]] static asio::awaitable<Result<std::size_t>> async_write_at_impl(
+      std::shared_ptr<File> self,
       std::uint64_t offset,
-      std::vector<std::uint8_t> data);
+      std::vector<std::uint8_t> data,
+      std::stop_token stop);
 
   bool use_asio_{false};
-  std::unique_ptr<PoolFd> pool_fd_;
+  std::unique_ptr<PosixFd> posix_fd_;
   std::unique_ptr<AsioState> asio_;
-  asio::thread_pool* pool_{nullptr};
-  /**
-   * Asio backend: serialize ops on this strand (ioc executor).
-   * Pool backend: strand unused for I/O; pool_mu_ serializes pool_* + life_.
-   */
-  asio::strand<asio::any_io_executor> strand_;
   std::string display_path_;
   OpenMode open_mode_{OpenMode::read};
-  Flags flags_{};
-  /** Sequential cursor for read/write (not moved by read_at/write_at). */
   std::uint64_t offset_{0};
-  /** Open → Closing → Closed; Closing/Closed reject new I/O. */
-  std::atomic<Life> life_{Life::Open};
-  /**
-   * Serializes pool-backend I/O and close_impl. Never held across co_await —
-   * only inside async_offload lambdas / sync methods (avoids strand+timer hang).
-   */
-  mutable std::mutex pool_mu_;
+  Life life_{Life::Open};
+  mutable std::mutex mu_;
 };
 
 }  // namespace vacps::fs

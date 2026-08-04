@@ -3,11 +3,14 @@
  * Matches vacps:store surface: class Store with static open only.
  */
 
-export type SqlParam = null | number | string | ArrayBuffer | Uint8Array;
+export type SqlParam = null | number | bigint | string | ArrayBuffer | Uint8Array;
+
+/** Result cell encode: null | number | bigint | string | ArrayBuffer. */
+export type SqlValue = null | number | bigint | string | ArrayBuffer;
 
 export interface RunResult {
-  readonly changes: number;
-  readonly lastInsertRowid: number;
+  readonly changes: number | bigint;
+  readonly lastInsertRowid: number | bigint;
 }
 
 export type ExpectedChanges =
@@ -15,19 +18,32 @@ export type ExpectedChanges =
   | { atLeast: number }
   | { atMost: number };
 
+export interface QueryOptions {
+  /** Max rows returned; default 10_000. Exceeded → reject. */
+  maxRows?: number;
+  /** Approximate payload budget (columns + cells); exceeded → reject. */
+  maxBytes?: number;
+}
+
 export interface TransactionStep {
   readonly sql: string;
   readonly params?: readonly SqlParam[];
   readonly type?: 'run' | 'query';
   /** Run steps only; invalid with type: 'query'. */
   readonly expectedChanges?: ExpectedChanges;
+  /** Query steps only: max rows returned; exceeded → fail and rollback. */
+  readonly maxRows?: number;
+  /** Query steps only: approximate payload budget; exceeded → fail and rollback. */
+  readonly maxBytes?: number;
 }
 
 export type Row = Record<string, unknown>;
 export type TransactionResult = RunResult | Row[];
 
+export type StoreOpenMode = 'read-only' | 'read-write' | 'read-write-create';
+
 export interface StoreOpenOptions {
-  mode?: 'read-only' | 'read-write' | 'read-write-create';
+  mode?: StoreOpenMode;
 }
 
 export class Store {
@@ -53,7 +69,8 @@ export class Store {
   query(
     _sql: string,
     _params?: readonly SqlParam[],
-  ): Promise<Array<Record<string, unknown>>> {
+    _options?: QueryOptions,
+  ): Promise<Row[]> {
     throw new Error('unreachable');
   }
   transaction(_steps: readonly TransactionStep[]): Promise<TransactionResult[]> {

@@ -12,13 +12,14 @@ import {
 } from 'vacps:fs';
 import * as process from 'vacps:process';
 
+import { requireAbsolutePath } from '../util/absolute-path';
+import { resolveUnderWorkspace } from '../util/resolve-under-workspace';
 import {
   truncateStringToUtf8Bytes,
   utf8ByteLengthOfString,
   utf8Decode,
   utf8PrefixEnd,
 } from '../util/utf8';
-import { assertSafeAbsolutePath, resolveWorkspacePath } from './path-guard';
 
 export { utf8PrefixEnd } from '../util/utf8';
 
@@ -74,48 +75,52 @@ function asUint8(buf: ArrayBuffer | Uint8Array): Uint8Array {
   return buf instanceof Uint8Array ? buf : new Uint8Array(buf);
 }
 
-// ── Product-local File helpers (open → read/write → close) ─
+// ── Product-local File helpers (open → bytes I/O → close) ─
+// Text lives in JS TextEncoder/TextDecoder (native vacps:fs is bytes-first).
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 async function readTextFile(path: string): Promise<string> {
-  const f = await File.open(path, 'read');
+  const f = await File.open(path, { mode: 'read' });
   try {
-    return await f.readText();
+    return textDecoder.decode(await f.read());
   } finally {
     await f.close();
   }
 }
 
 async function writeTextFile(path: string, content: string): Promise<void> {
-  const f = await File.open(path, 'write');
+  const f = await File.open(path, { mode: 'write' });
   try {
-    await f.writeText(content);
+    await f.write(textEncoder.encode(content));
   } finally {
     await f.close();
   }
 }
 
 async function readBytesFile(path: string): Promise<Uint8Array> {
-  const f = await File.open(path, 'read');
+  const f = await File.open(path, { mode: 'read' });
   try {
-    return await f.read();
+    return asUint8(await f.read());
   } finally {
     await f.close();
   }
 }
 
 async function readRangeFile(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
-  const f = await File.open(path, 'read');
+  const f = await File.open(path, { mode: 'read' });
   try {
-    return await f.readAt(offset, maxBytes);
+    return asUint8(await f.readAt(offset, maxBytes));
   } finally {
     await f.close();
   }
 }
 
 async function hashFileBytes(path: string): Promise<{ sizeBytes: number; sha256Hex: string }> {
-  const f = await File.open(path, 'read');
+  const f = await File.open(path, { mode: 'read' });
   try {
-    const bytes = await f.read();
+    const bytes = asUint8(await f.read());
     return { sizeBytes: bytes.byteLength, sha256Hex: crypto.sha256Hex(bytes) };
   } finally {
     await f.close();
@@ -125,7 +130,7 @@ async function hashFileBytes(path: string): Promise<{ sizeBytes: number; sha256H
 // ── Core CRUD ─────────────────────────────────────────────────────
 
 export async function filesStat(pathInput: string) {
-  const path = assertSafeAbsolutePath(pathInput);
+  const path = requireAbsolutePath(pathInput);
   let st: FileStat;
   try {
     st = await stat(path);
@@ -160,7 +165,7 @@ export async function filesRead(input: {
   maxBytes?: number;
   encoding?: 'utf-8' | 'base64';
 }) {
-  const path = assertSafeAbsolutePath(input.path);
+  const path = requireAbsolutePath(input.path);
   const encoding = input.encoding ?? 'utf-8';
   const maxBytes = clamp(input.maxBytes ?? 32_768, 1, 256 * 1024);
 
@@ -249,7 +254,7 @@ export async function filesWrite(input: {
   createParentDirectories?: boolean;
   expectedSha256?: string;
 }) {
-  const path = assertSafeAbsolutePath(input.path);
+  const path = requireAbsolutePath(input.path);
   const pathExists = await exists(path);
   if (input.mode === 'create' && pathExists) {
     throw runtimeError('Path already exists.', 'path_exists', 409);
@@ -286,7 +291,7 @@ export async function filesList(input: {
   includeHidden?: boolean;
   cursor?: string;
 }) {
-  const path = assertSafeAbsolutePath(input.path);
+  const path = requireAbsolutePath(input.path);
   if (!(await exists(path))) {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
@@ -313,7 +318,7 @@ export async function filesList(input: {
 }
 
 export async function filesMkdir(input: { path: string; recursive?: boolean }) {
-  const path = assertSafeAbsolutePath(input.path);
+  const path = requireAbsolutePath(input.path);
   await mkdir(path, { recursive: input.recursive === true });
   return { path, operation: 'created', type: 'directory' };
 }
@@ -325,7 +330,7 @@ export async function filesDelete(input: {
   expectedType?: 'file' | 'directory';
   dryRun?: boolean;
 }) {
-  const path = assertSafeAbsolutePath(input.path);
+  const path = requireAbsolutePath(input.path);
   let st: FileStat;
   try {
     st = await stat(path);
@@ -395,8 +400,8 @@ export async function filesMove(input: {
   overwrite?: boolean;
   expectedSha256?: string;
 }) {
-  const from = assertSafeAbsolutePath(input.from);
-  const to = assertSafeAbsolutePath(input.to);
+  const from = requireAbsolutePath(input.from);
+  const to = requireAbsolutePath(input.to);
   if (!(await exists(from))) {
     throw runtimeError(`Path not found: ${from}`, 'path_not_found', 404);
   }
@@ -439,7 +444,7 @@ export async function filesGlob(input: {
   cursor?: string;
   respectGitignore?: boolean;
 }) {
-  const root = assertSafeAbsolutePath(input.path ?? '/tmp');
+  const root = requireAbsolutePath(input.path ?? '/tmp');
   const limit = clamp(input.limit ?? 200, 1, 2000);
   const includeHidden = Boolean(input.includeHidden);
   const respectGitignore = input.respectGitignore !== false;
@@ -522,7 +527,7 @@ export async function filesGrep(input: {
   maxBytes?: number;
   cursor?: string;
 }) {
-  const target = assertSafeAbsolutePath(input.path ?? '/tmp');
+  const target = requireAbsolutePath(input.path ?? '/tmp');
   const maxMatches = clamp(input.maxMatches ?? 100, 1, 500);
   const contextBefore = clamp(input.contextBefore ?? 0, 0, 10);
   const contextAfter = clamp(input.contextAfter ?? 0, 0, 10);
@@ -639,7 +644,7 @@ export async function filesEdit(input: {
   replaceAll?: boolean;
   expectedSha256?: string;
 }) {
-  const path = assertSafeAbsolutePath(input.path);
+  const path = requireAbsolutePath(input.path);
   const text = await readTextFile(path);
   const beforeHash = crypto.sha256Hex(text);
   if (input.expectedSha256 && normalizeHash(input.expectedSha256) !== beforeHash) {
@@ -678,7 +683,7 @@ export async function applyPatch(input: {
   dryRun?: boolean;
   atomic?: boolean;
 }) {
-  const workspace = input.workspacePath ? assertSafeAbsolutePath(input.workspacePath) : '/tmp';
+  const workspace = input.workspacePath ? requireAbsolutePath(input.workspacePath) : '/tmp';
   const operations = parsePatch(input.patch);
   if (operations.length === 0) {
     throw runtimeError('Patch contained no operations.', 'invalid_patch', 400);
@@ -686,7 +691,7 @@ export async function applyPatch(input: {
 
   const planned = operations.map((op) => ({
     ...op,
-    absolute: resolveWorkspacePath(workspace, op.path),
+    absolute: resolveUnderWorkspace(workspace, op.path),
   }));
 
   const backups = new Map<string, string | null>();

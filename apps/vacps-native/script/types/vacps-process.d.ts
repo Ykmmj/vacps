@@ -4,40 +4,26 @@
  * Surface: class Process + run(command, args?, options?).
  * JS Process object is the resource handle (no registry id API).
  *
- * ProcessOptions honesty (binding throws TypeError for unsupported values):
- * - env: not implemented — omit; providing `env` throws.
- * - stdin: 'pipe' | 'ignore' only; 'inherit' throws (no silent ignore).
- * - stdout / stderr: always piped + captured; only 'pipe' (or omit) accepted;
- *   'inherit' | 'ignore' throw.
+ * ProcessOptions is honest and narrow:
+ * - cwd?, timeoutMs?, stdin?: 'pipe'|'ignore', maxStdoutBytes?, maxStderrBytes?
+ * - env is not supported — providing it throws TypeError.
+ * - stdout/stderr mode keys are not supported (always captured pipes).
+ * Defaults: Process class stdin pipe/open; run() stdin ignore/closed.
+ * timeoutMs 0/omit = none. Capture caps 0..64 MiB (0 retains nothing).
  */
 declare module 'vacps:process' {
-  export type StdioMode = 'pipe' | 'inherit' | 'ignore';
-
   export interface ProcessOptions {
     readonly cwd?: string;
     /**
-     * Custom child environment is not supported. Providing this property
-     * throws TypeError at construct / run (see module header).
+     * 'pipe' keeps stdin open for write(); 'ignore' closes stdin after spawn.
+     * Default: Process class → 'pipe'; run() → 'ignore'.
      */
-    readonly env?: Readonly<Record<string, string>>;
-    /**
-     * 'pipe' (default for Process handle) keeps stdin open for write();
-     * 'ignore' closes stdin after spawn. 'inherit' is unsupported → TypeError.
-     */
-    readonly stdin?: StdioMode;
-    /**
-     * Always a capture pipe today. Only 'pipe' or omit; other modes → TypeError.
-     */
-    readonly stdout?: StdioMode;
-    /**
-     * Always a capture pipe today. Only 'pipe' or omit; other modes → TypeError.
-     */
-    readonly stderr?: StdioMode;
+    readonly stdin?: 'pipe' | 'ignore';
     /** Kill after this many ms (0 / omit = no timeout). */
     readonly timeoutMs?: number;
-    /** Cap retained stdout (default 16 MiB). */
+    /** Cap retained stdout bytes (default 16 MiB; 0 captures nothing). */
     readonly maxStdoutBytes?: number;
-    /** Cap retained stderr (default 16 MiB). */
+    /** Cap retained stderr bytes (default 16 MiB; 0 captures nothing). */
     readonly maxStderrBytes?: number;
   }
 
@@ -46,10 +32,6 @@ declare module 'vacps:process' {
     readonly timedOut: boolean;
     readonly stdout: string;
     readonly stderr: string;
-    readonly stdoutProduced?: number;
-    readonly stderrProduced?: number;
-    readonly stdoutTruncated?: boolean;
-    readonly stderrTruncated?: boolean;
   }
 
   /**
@@ -57,23 +39,22 @@ declare module 'vacps:process' {
    * JS object is the resource handle (no registry id).
    */
   export class Process {
-    constructor(command: string, args?: readonly string[], options?: ProcessOptions);
-
-    /** OS pid after start(); null before spawn / after reaped. */
-    readonly pid: number | null;
-    readonly running: boolean;
+    constructor(
+      command: string,
+      args?: readonly string[],
+      options?: ProcessOptions,
+    );
 
     start(): Promise<void>;
-    read(stream?: 'stdout' | 'stderr'): Promise<Uint8Array>;
-    write(data: ArrayBufferView | ArrayBuffer | string): Promise<number>;
+    write(data: string | ArrayBuffer | ArrayBufferView): Promise<number>;
     wait(): Promise<ProcessResult>;
-    terminate(signal?: string): Promise<void>;
+    terminate(signal?: 'SIGTERM' | 'SIGINT' | 'SIGKILL'): Promise<void>;
     close(): Promise<void>;
   }
 
   /**
-   * Convenience: construct → start → drain → wait → close.
-   * Signature: run(command, args?, options?).
+   * Convenience: construct → start → wait → close.
+   * Signature: run(command, args?, options?) only (no second-arg overload).
    */
   export function run(
     command: string,

@@ -17,10 +17,12 @@ interface NetSample {
   at: number;
 }
 
+const textDecoder = new TextDecoder();
+
 async function readTextFile(path: string): Promise<string> {
-  const f = await File.open(path, 'read');
+  const f = await File.open(path, { mode: 'read' });
   try {
-    return await f.readText();
+    return textDecoder.decode(await f.read());
   } finally {
     await f.close();
   }

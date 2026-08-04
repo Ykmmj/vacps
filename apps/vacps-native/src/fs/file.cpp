@@ -1,21 +1,21 @@
 #include "fs/file.hpp"
 
+#include "fs/io_uring_probe.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <format>
 #include <limits>
-#include <system_error>
 #include <utility>
 
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/buffer.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/redirect_error.hpp>
-#include <boost/asio/system_executor.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/error_code.hpp>
-#include <boost/system/system_error.hpp>
 
 #if defined(BOOST_ASIO_HAS_FILE)
 #include <boost/asio/random_access_file.hpp>
@@ -25,6 +25,7 @@
 #endif
 
 #if defined(__linux__)
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,57 +38,20 @@ namespace {
 using AsioFile = asio::random_access_file;
 #endif
 
-/**
- * Pick the base executor for this File's strand (lock wait queue).
- * - Asio backend: ioc executor that owns random_access_file
- * - Pool backend: host thread_pool (or system_executor when pool is null in tests)
- */
-[[nodiscard]] asio::any_io_executor strand_base_executor(
-    asio::any_io_executor ex,
-    asio::thread_pool* pool) {
-  if (ex) {
-    return ex;
-  }
-  if (pool != nullptr) {
-    return pool->get_executor();
-  }
-  return asio::any_io_executor{asio::system_executor{}};
-}
-
-/**
- * Pool-backend open(2) bits. Flags values already match POSIX open flags on
- * Linux; add close-on-exec. Not part of the public C++ API.
- */
-[[nodiscard]] int flags_to_posix(Flags flags) noexcept {
-  int bits = flags_to_int(flags);
-#if defined(__linux__)
-  bits |= O_CLOEXEC;
-#if !defined(BOOST_ASIO_HAS_FILE)
-  static_assert(static_cast<int>(Flags::read_only) == O_RDONLY);
-  static_assert(static_cast<int>(Flags::write_only) == O_WRONLY);
-  static_assert(static_cast<int>(Flags::read_write) == O_RDWR);
-  static_assert(static_cast<int>(Flags::append) == O_APPEND);
-  static_assert(static_cast<int>(Flags::create) == O_CREAT);
-  static_assert(static_cast<int>(Flags::exclusive) == O_EXCL);
-  static_assert(static_cast<int>(Flags::truncate) == O_TRUNC);
-#endif
-#endif
-  return bits;
-}
-
-[[nodiscard]] FileStat file_stat_from_fd(int fd, const std::string& display_path) {
+[[nodiscard]] FileStat file_stat_from_fd(
+    int fd,
+    const std::string& display_path) {
   FileStat out;
   out.path = display_path;
 #if defined(__linux__)
   struct stat st{};
   if (::fstat(fd, &st) != 0) {
-    return out;  // empty type → caller maps to fstat error
+    return out;
   }
-  out.is_symlink = S_ISLNK(st.st_mode);
+  // fstat never returns S_IFLNK for a non-O_PATH fd of a symlink open target.
+  out.is_symlink = false;
   if (S_ISDIR(st.st_mode)) {
     out.type = "directory";
-  } else if (S_ISLNK(st.st_mode)) {
-    out.type = "symlink";
   } else if (S_ISREG(st.st_mode)) {
     out.type = "file";
     out.size_bytes = static_cast<std::uint64_t>(st.st_size);
@@ -104,26 +68,43 @@ using AsioFile = asio::random_access_file;
   return out;
 }
 
-}  // namespace
+[[nodiscard]] bool compute_prefer_asio(FileBackend backend) {
+  // Never construct Asio file objects unless the process probe succeeded.
+  switch (backend) {
+    case FileBackend::Posix:
+      return false;
+    case FileBackend::Asio:
+    case FileBackend::Auto:
+    default:
+      return io_uring_available();
+  }
+}
 
-struct File::AsioState {
-#if VACPS_FS_HAS_ASIO_FILE
-  explicit AsioState(asio::any_io_executor ex) : file(std::move(ex)) {}
-  AsioFile file;
-#else
-  explicit AsioState(asio::any_io_executor) {}
-#endif
+/** Operation-local cancellation bridge (main-executor posts only). */
+struct OpCancelState {
+  asio::cancellation_signal signal;
+  bool active{true};
 };
 
-/** Pool-backend FD RAII — private to File (not a product surface). */
-struct File::PoolFd {
-  explicit PoolFd(int fd) noexcept : fd_(fd) {}
-  ~PoolFd() { reset(); }
+}  // namespace
 
-  PoolFd(const PoolFd&) = delete;
-  PoolFd& operator=(const PoolFd&) = delete;
-  PoolFd(PoolFd&& o) noexcept : fd_(std::exchange(o.fd_, -1)) {}
-  PoolFd& operator=(PoolFd&& o) noexcept {
+void File::PreparedOpen::reset() noexcept {
+#if defined(__linux__)
+  if (fd >= 0) {
+    ::close(fd);
+  }
+#endif
+  fd = -1;
+}
+
+struct File::PosixFd {
+  explicit PosixFd(int fd) noexcept : fd_(fd) {}
+  ~PosixFd() { reset(); }
+
+  PosixFd(const PosixFd&) = delete;
+  PosixFd& operator=(const PosixFd&) = delete;
+  PosixFd(PosixFd&& o) noexcept : fd_(std::exchange(o.fd_, -1)) {}
+  PosixFd& operator=(PosixFd&& o) noexcept {
     if (this != &o) {
       reset();
       fd_ = std::exchange(o.fd_, -1);
@@ -141,58 +122,124 @@ struct File::PoolFd {
   }
 
   [[nodiscard]] int get() const noexcept { return fd_; }
+  [[nodiscard]] int release() noexcept { return std::exchange(fd_, -1); }
   [[nodiscard]] explicit operator bool() const noexcept { return fd_ >= 0; }
 
  private:
   int fd_{-1};
 };
 
+/**
+ * Asio backend state.
+ *
+ * Ownership (deliberate two-descriptor design):
+ * - `file` owns the assigned random_access_file fd (io_uring data plane).
+ *   All methods on `file` run only on `executor`.
+ * - `control` is a F_DUPFD_CLOEXEC duplicate used exclusively for run_blocking
+ *   blocking control/append (fstat/ftruncate/fsync/write under O_APPEND).
+ *   Callers must externally serialize so control ops do not overlap the
+ *   data plane (JS FileHandle owns FileOperationQueue for that).
+ */
+struct File::AsioState {
+#if VACPS_FS_HAS_ASIO_FILE
+  AsioState(asio::any_io_executor ex, int control_fd)
+      : executor(std::move(ex)), file(executor), control(control_fd) {}
+  asio::any_io_executor executor;
+  AsioFile file;
+  PosixFd control;
+#else
+  AsioState(asio::any_io_executor, int) {}
+#endif
+};
+
 File::File(
     PrivateTag,
-    std::unique_ptr<PoolFd> fd,
-    asio::thread_pool* pool,
-    asio::any_io_executor strand_ex,
+    std::unique_ptr<PosixFd> fd,
     std::string display_path,
-    OpenMode open_mode,
-    Flags flags)
+    OpenMode open_mode)
     : use_asio_(false),
-      pool_fd_(std::move(fd)),
-      pool_(pool),
-      strand_(asio::make_strand(std::move(strand_ex))),
+      posix_fd_(std::move(fd)),
       display_path_(std::move(display_path)),
-      open_mode_(open_mode),
-      flags_(flags) {}
+      open_mode_(open_mode) {}
 
 File::File(
     PrivateTag,
     std::unique_ptr<AsioState> asio_state,
-    asio::thread_pool* pool,
-    asio::any_io_executor strand_ex,
     std::string display_path,
-    OpenMode open_mode,
-    Flags flags)
+    OpenMode open_mode)
     : use_asio_(true),
       asio_(std::move(asio_state)),
-      pool_(pool),
-      strand_(asio::make_strand(std::move(strand_ex))),
       display_path_(std::move(display_path)),
-      open_mode_(open_mode),
-      flags_(flags) {}
+      open_mode_(open_mode) {}
 
 File::~File() {
-  // Last shared_ptr is gone → no in-flight async op holds the File.
-  // Best-effort handle release without posting to strand (pool may be gone).
-  life_.store(Life::Closed, std::memory_order_release);
+  std::lock_guard lock(mu_);
+  life_ = Life::Closed;
   close_handles();
 }
 
-bool File::flags_append() const noexcept {
-#if defined(BOOST_ASIO_HAS_FILE)
-  const auto append_bit = static_cast<unsigned>(asio::file_base::append);
-#else
-  const auto append_bit = static_cast<unsigned>(Flags::append);
-#endif
-  return (static_cast<unsigned>(flags_) & append_bit) != 0;
+bool File::offset_ok(std::uint64_t offset) noexcept {
+  return offset <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
+}
+
+bool File::offset_add_ok(std::uint64_t base, std::uint64_t delta) noexcept {
+  if (delta > (std::numeric_limits<std::uint64_t>::max)() - base) {
+    return false;
+  }
+  return offset_ok(base + delta);
+}
+
+VoidResult File::check_range(
+    std::uint64_t offset,
+    std::size_t length,
+    std::string_view op) {
+  if (!offset_ok(offset)) {
+    return std::unexpected(Error{
+        std::format("{} offset out of range", op), std::string{op}, 0});
+  }
+  if (length == 0) {
+    return {};
+  }
+  // Validate full span [offset, offset+length) before any I/O.
+  if (!offset_add_ok(offset, static_cast<std::uint64_t>(length - 1))) {
+    return std::unexpected(Error{
+        std::format("{} range overflow", op),
+        std::string{op},
+        EOVERFLOW});
+  }
+  return {};
+}
+
+Result<std::shared_ptr<File>> File::adopt_posix(
+    int fd,
+    std::string display_path,
+    OpenMode mode) {
+  // Boundary 1: stack PosixFd ctor is noexcept — owns fd before any allocation.
+  PosixFd guard{fd};
+  try {
+    // Boundary 2: new-expression allocates unique_ptr storage first; only then
+    // evaluates PosixFd(guard.release()). If allocation throws, guard still
+    // owns fd. After success, ownership moves exactly once into the unique_ptr.
+    auto owner = std::make_unique<PosixFd>(guard.release());
+    // Boundary 3: File storage allocation before ctor args; owner already RAII.
+    return std::shared_ptr<File>(new File(
+        PrivateTag{}, std::move(owner), std::move(display_path), mode));
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(
+        Error{"complete_open: allocation failed", "open", ENOMEM});
+  } catch (...) {
+    return std::unexpected(
+        Error{"complete_open: failed to construct File", "open", 0});
+  }
+}
+
+VoidResult File::advance_cursor(std::uint64_t delta) noexcept {
+  if (!offset_add_ok(offset_, delta)) {
+    return std::unexpected(
+        Error{"cursor overflow", "io", EOVERFLOW});
+  }
+  offset_ += delta;
+  return {};
 }
 
 Result<std::size_t> File::resolve_read_max(std::size_t max_bytes) {
@@ -200,361 +247,221 @@ Result<std::size_t> File::resolve_read_max(std::size_t max_bytes) {
     return kDefaultMaxReadBytes;
   }
   if (max_bytes > kHardMaxReadBytes) {
-    return std::unexpected(Error{std::format(
-        "read maxBytes exceeds hard limit ({} bytes / 64 MiB)",
-        kHardMaxReadBytes)});
+    return std::unexpected(Error{
+        std::format(
+            "read maxBytes exceeds hard limit ({} bytes / 64 MiB)",
+            kHardMaxReadBytes),
+        "read",
+        0});
   }
   return max_bytes;
 }
 
-Result<std::shared_ptr<File>> File::open(
-    FsExecutor& fs,
-    std::string_view path,
-    const OpenOptions& options,
-    const std::filesystem::path& relative_base) {
-  const std::filesystem::path& base =
-      relative_base.empty() ? fs.data_dir : relative_base;
-  return open_impl(
-      fs.ioc_executor, &fs.pool, fs.use_asio_file, path, options, base);
+VoidResult File::validate_permissions(const OpenOptions& options) {
+  if (!options.permissions.has_value()) {
+    return {};
+  }
+  const auto bits = *options.permissions;
+  if ((bits & ~static_cast<std::uint32_t>(0777)) != 0) {
+    return std::unexpected(Error{
+        std::format(
+            "File.open: permissions 0{:o} out of range (only mode bits 0777 allowed)",
+            bits),
+        "open",
+        0});
+  }
+  return {};
 }
 
-Result<std::shared_ptr<File>> File::open(
+Result<File::PreparedOpen> File::prepare_open(
     std::string_view path,
     const OpenOptions& options,
-    const std::filesystem::path& relative_base) {
-  // Force pool backend (unit tests / sync helpers).
-  return open_impl(
-      asio::any_io_executor{}, nullptr, false, path, options, relative_base);
-}
-
-Result<std::shared_ptr<File>> File::open_impl(
-    asio::any_io_executor ex,
-    asio::thread_pool* pool_fallback,
-    bool use_asio_file,
-    std::string_view path,
-    const OpenOptions& options,
-    const std::filesystem::path& relative_base) {
+    const std::filesystem::path& relative_base,
+    FileBackend backend) {
+  if (auto v = validate_permissions(options); !v) {
+    return std::unexpected(std::move(v.error()));
+  }
   auto abs = resolve_path(relative_base, path);
   if (!abs) {
     return std::unexpected(std::move(abs.error()));
   }
 
-  // Domain: OpenMode → Asio Flags / POSIX open bits (not done in JS).
-  const Flags flags = flags_for_open_mode(options.mode);
-  const unsigned perms = effective_permissions(options);
-
-  if (open_mode_creates(options.mode) && abs->has_parent_path()) {
-    std::error_code ec;
-    std::filesystem::create_directories(abs->parent_path(), ec);
-    // EEXIST is fine; other create_directories errors surface on open.
+#if !defined(__linux__)
+  (void)options;
+  (void)backend;
+  return std::unexpected(Error{"File::open requires Linux", "open", 0});
+#else
+  const int flags = posix_open_flags(options.mode) | O_CLOEXEC;
+  const mode_t mode_bits = open_mode_creates(options.mode)
+                               ? static_cast<mode_t>(effective_permissions(options))
+                               : static_cast<mode_t>(0);
+  const int raw = ::open(abs->c_str(), flags, mode_bits);
+  if (raw < 0) {
+    return std::unexpected(make_io_error("open", errno, abs->string()));
   }
 
-  // Dual backend is intentional product design (see File class comment).
-  // Prefer Asio when the process probed io_uring; always keep pool as the
-  // portable path. Do not collapse this to “POSIX-only” in review rewrites.
+  PreparedOpen out;
+  out.fd = raw;
+  out.display_path = abs->string();
+  out.mode = options.mode;
+  out.prefer_asio = compute_prefer_asio(backend);
+  return out;
+#endif
+}
 
-  // ── Backend A: Asio random_access_file (probe + executor) ───────
-  // Never construct Asio file objects when use_asio_file is false (Docker
-  // seccomp / no io_uring). open() path errors return immediately; only a
-  // thrown system_error (late EPERM on io_uring) falls through to pool.
-  // Note: Asio open does not take create permissions (Boost API).
-#if VACPS_FS_HAS_ASIO_FILE
-  if (use_asio_file && ex) {
+Result<std::shared_ptr<File>> File::complete_open(
+    PreparedOpen prepared,
+    asio::any_io_executor file_executor) {
+  if (prepared.fd < 0) {
+    return std::unexpected(Error{"complete_open: invalid fd", "open", 0});
+  }
+
+  const OpenMode mode = prepared.mode;
+  std::string display = std::move(prepared.display_path);
+  // Prefer Asio only when probe already succeeded (prefer_asio) and executor set.
+  const bool want_asio =
+      prepared.prefer_asio && static_cast<bool>(file_executor);
+
+#if VACPS_FS_HAS_ASIO_FILE && defined(__linux__)
+  if (want_asio) {
+    // Exception-safe setup: allocate Asio state + control dup WHILE prepared
+    // still owns the original fd. Never release without live RAII ownership.
+    std::unique_ptr<AsioState> state;
+    int control_raw = -1;
     try {
-      auto state = std::make_unique<AsioState>(ex);
-      boost::system::error_code ec;
-      state->file.open(abs->string(), flags, ec);
-      if (ec) {
-        return std::unexpected(
-            Error{std::format("open failed: {}", ec.message())});
+      control_raw = ::fcntl(prepared.fd, F_DUPFD_CLOEXEC, 0);
+      if (control_raw < 0) {
+        // Dup failed — POSIX fallback; prepared still owns original.
+        const int fd = prepared.release();
+        return adopt_posix(fd, std::move(display), mode);
       }
-      // Strand on the same ioc executor that owns the Asio file handle.
-      // shared_ptr(new …): ctor is private; make_shared cannot access it.
+      // control_raw immediately owned by AsioState::control (PosixFd).
+      state = std::make_unique<AsioState>(file_executor, control_raw);
+      control_raw = -1;
+    } catch (...) {
+      if (control_raw >= 0) {
+        ::close(control_raw);
+      }
+      // prepared still owns original fd → POSIX fallback via RAII helper.
+      const int fd = prepared.release();
+      return adopt_posix(fd, std::move(display), mode);
+    }
+
+    // AsioState + control established. Transfer original via assign.
+    // Park data fd in a temporary PosixFd until assign takes ownership.
+    PosixFd data_owner{prepared.release()};
+    boost::system::error_code ec;
+    const int data_fd = data_owner.get();
+    state->file.assign(data_fd, ec);
+    if (ec) {
+      // assign failed: data_owner still owns data_fd; rebuild POSIX from control.
+      const int posix = state->control.release();
+      state.reset();
+      data_owner.reset();  // close data fd
+      if (posix >= 0) {
+        return adopt_posix(posix, std::move(display), mode);
+      }
+      return std::unexpected(Error{
+          std::format(
+              "open failed: assign random_access_file: {} (code={})",
+              ec.message(),
+              ec.value()),
+          "open",
+          ec.value()});
+    }
+    // assign took ownership of data_fd — release without close.
+    (void)data_owner.release();
+
+    // Two descriptors live in state; adopt into File under RAII.
+    try {
       return std::shared_ptr<File>(new File(
-          PrivateTag{},
-          std::move(state),
-          pool_fallback,
-          strand_base_executor(ex, pool_fallback),
-          abs->string(),
-          options.mode,
-          flags));
-    } catch (const boost::system::system_error&) {
-      // Fall through to pool backend.
+          PrivateTag{}, std::move(state), std::move(display), mode));
+    } catch (const std::bad_alloc&) {
+      state.reset();  // closes both descriptors
+      return std::unexpected(
+          Error{"complete_open: allocation failed", "open", ENOMEM});
+    } catch (...) {
+      state.reset();
+      return std::unexpected(
+          Error{"complete_open: failed to construct File", "open", 0});
     }
   }
 #else
-  (void)ex;
-  (void)use_asio_file;
+  (void)want_asio;
+  (void)file_executor;
 #endif
 
-  // ── Backend B: private FD + thread_pool offload ─────────────────
-  // Always available on Linux; used when probe failed or Asio open threw.
-  // Applies OpenOptions::permissions on create (unlike Asio open).
-#if defined(__linux__)
-  const int posix_flags = flags_to_posix(flags);
-  const mode_t bits =
-      open_mode_creates(options.mode) ? static_cast<mode_t>(perms) : static_cast<mode_t>(0);
-  const int raw = ::open(abs->c_str(), posix_flags, bits);
-  if (raw < 0) {
-    return std::unexpected(
-        Error{std::format("open failed: {}", std::strerror(errno))});
-  }
-  // Strand on ioc executor when available (same as Asio path). Never put the
-  // exclusive-lock strand on fs_pool: co_await async_offload(pool) while the
-  // lock coroutine resumes on a pool strand can stall the only pool threads
-  // and hang Process/FS work that also needs the ioc (JsTasksTest.ExecAndFsRoutes).
-  return std::shared_ptr<File>(new File(
-      PrivateTag{},
-      std::make_unique<PoolFd>(raw),
-      pool_fallback,
-      strand_base_executor(ex, pool_fallback),
-      abs->string(),
-      options.mode,
-      flags));
-#else
-  (void)options;
-  (void)pool_fallback;
-  (void)flags;
-  (void)perms;
-  return std::unexpected(Error{"File::open requires Linux"});
-#endif
+  const int fd = prepared.release();
+  return adopt_posix(fd, std::move(display), mode);
 }
 
-asio::awaitable<Result<std::shared_ptr<File>>> File::async_open(
-    FsExecutor& fs,
-    std::string path,
-    OpenOptions options,
-    std::filesystem::path relative_base) {
-  // Resolve default base once so pool offload captures a concrete path.
-  if (relative_base.empty() && !fs.data_dir.empty()) {
-    relative_base = fs.data_dir;
+Result<std::shared_ptr<File>> File::open(
+    std::string_view path,
+    const OpenOptions& options,
+    const std::filesystem::path& relative_base,
+    asio::any_io_executor file_executor,
+    FileBackend backend) {
+  auto prepared = prepare_open(path, options, relative_base, backend);
+  if (!prepared) {
+    return std::unexpected(std::move(prepared.error()));
   }
-  // Asio backend must construct on the ioc executor (handle affinity).
-  if (fs.use_asio_file && fs.ioc_executor) {
-    co_return File::open(fs, path, options, relative_base);
+  if (prepared->prefer_asio && !file_executor) {
+    prepared->prefer_asio = false;
   }
-  // Pool backend: blocking open off the ioc.
-  co_return co_await async_offload(
-      fs.pool,
-      [path = std::move(path),
-       options,
-       relative_base = std::move(relative_base),
-       pool = &fs.pool] {
-        return File::open_impl(
-            asio::any_io_executor{},
-            pool,
-            false,
-            path,
-            options,
-            relative_base);
-      });
+  return complete_open(std::move(*prepared), std::move(file_executor));
+}
+
+bool File::closed() const noexcept {
+  std::lock_guard lock(mu_);
+  return life_ == Life::Closed;
 }
 
 VoidResult File::ensure_open() const {
-  if (life_.load(std::memory_order_acquire) != Life::Open) {
-    return std::unexpected(Error{"file is closed"});
+  if (life_ != Life::Open) {
+    return std::unexpected(Error{"file is closed", "io", 0});
   }
   return {};
 }
 
-bool File::closed() const noexcept {
-  return life_.load(std::memory_order_acquire) == Life::Closed;
+int File::control_fd() const noexcept {
+  if (use_asio_) {
+#if VACPS_FS_HAS_ASIO_FILE
+    if (asio_ && asio_->control) {
+      return asio_->control.get();
+    }
+#endif
+    return -1;
+  }
+  if (posix_fd_ && *posix_fd_) {
+    return posix_fd_->get();
+  }
+  return -1;
 }
 
 void File::close_handles() noexcept {
   if (use_asio_) {
 #if VACPS_FS_HAS_ASIO_FILE
-    if (asio_ && asio_->file.is_open()) {
-      boost::system::error_code ec;
-      asio_->file.close(ec);
-      (void)ec;
+    if (asio_) {
+      if (asio_->file.is_open()) {
+        boost::system::error_code ec;
+        // Supported path: explicit close on the owning executor after
+        // external serialization (no concurrent op; JS FileHandle holds the
+        // operation queue) and after async coroutines have released
+        // keep_alive. ~File is best-effort RAII only once idle.
+        asio_->file.cancel(ec);
+        asio_->file.close(ec);
+        (void)ec;
+      }
+      asio_->control.reset();
     }
 #endif
     asio_.reset();
     use_asio_ = false;
   }
-  pool_fd_.reset();
+  posix_fd_.reset();
 }
 
-VoidResult File::close_impl() {
-  // Serialize with pool I/O (mutex never held across co_await).
-  std::lock_guard lock(pool_mu_);
-  // Idempotent: already closed or another close owns the transition.
-  Life expected = Life::Open;
-  if (!life_.compare_exchange_strong(
-          expected, Life::Closing, std::memory_order_acq_rel, std::memory_order_acquire)) {
-    // Closing or Closed → treat as success (idempotent close).
-    return {};
-  }
-  close_handles();
-  life_.store(Life::Closed, std::memory_order_release);
-  return {};
-}
-
-Result<std::uint64_t> File::current_size() const {
-  if (auto ok = ensure_open(); !ok) {
-    return std::unexpected(std::move(ok.error()));
-  }
-#if VACPS_FS_HAS_ASIO_FILE
-  if (use_asio_) {
-    boost::system::error_code ec;
-    const auto n = asio_->file.size(ec);
-    if (ec) {
-      return std::unexpected(Error{std::format("size failed: {}", ec.message())});
-    }
-    return static_cast<std::uint64_t>(n);
-  }
-#endif
-#if defined(__linux__)
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  struct stat st{};
-  if (::fstat(pool_fd_->get(), &st) != 0) {
-    return std::unexpected(
-        Error{std::format("fstat failed: {}", std::strerror(errno))});
-  }
-  return static_cast<std::uint64_t>(st.st_size);
-#else
-  return std::unexpected(Error{"stat requires Linux"});
-#endif
-}
-
-// ── Pool-backend sync I/O ─────────────────────────────────────────
-
-Result<std::vector<std::uint8_t>> File::pool_read(std::size_t max_bytes) {
-  std::lock_guard lock(pool_mu_);
-  if (auto ok = ensure_open(); !ok) {
-    return std::unexpected(std::move(ok.error()));
-  }
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  if (max_bytes == 0) {
-    return std::vector<std::uint8_t>{};
-  }
-  constexpr std::size_t kChunk = 64 * 1024;
-  std::vector<std::uint8_t> buf;
-  std::array<std::uint8_t, kChunk> tmp{};
-  std::size_t got = 0;
-  while (got < max_bytes) {
-    const std::size_t want = std::min(kChunk, max_bytes - got);
-    const ssize_t n = ::read(pool_fd_->get(), tmp.data(), want);
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      return std::unexpected(
-          Error{std::format("read failed: {}", std::strerror(errno))});
-    }
-    if (n == 0) break;
-    buf.insert(buf.end(), tmp.data(), tmp.data() + n);
-    got += static_cast<std::size_t>(n);
-    offset_ += static_cast<std::uint64_t>(n);
-  }
-  return buf;
-}
-
-Result<std::vector<std::uint8_t>> File::pool_read_at(
-    std::uint64_t offset,
-    std::size_t max_bytes) {
-  std::lock_guard lock(pool_mu_);
-  if (auto ok = ensure_open(); !ok) {
-    return std::unexpected(std::move(ok.error()));
-  }
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  if (max_bytes == 0) {
-    return std::vector<std::uint8_t>{};
-  }
-  if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
-    return std::unexpected(Error{"read_at offset out of range"});
-  }
-  constexpr std::size_t kChunk = 64 * 1024;
-  std::vector<std::uint8_t> buf;
-  std::array<std::uint8_t, kChunk> tmp{};
-  std::size_t got = 0;
-  while (got < max_bytes) {
-    const std::size_t want = std::min(kChunk, max_bytes - got);
-    const ssize_t n = ::pread(
-        pool_fd_->get(),
-        tmp.data(),
-        want,
-        static_cast<off_t>(offset + got));
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      return std::unexpected(
-          Error{std::format("pread failed: {}", std::strerror(errno))});
-    }
-    if (n == 0) break;
-    buf.insert(buf.end(), tmp.data(), tmp.data() + n);
-    got += static_cast<std::size_t>(n);
-  }
-  return buf;
-}
-
-Result<std::size_t> File::pool_write(std::span<const std::uint8_t> data) {
-  std::lock_guard lock(pool_mu_);
-  if (auto ok = ensure_open(); !ok) {
-    return std::unexpected(std::move(ok.error()));
-  }
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  std::size_t off = 0;
-  while (off < data.size()) {
-    const ssize_t n = ::write(pool_fd_->get(), data.data() + off, data.size() - off);
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      return std::unexpected(
-          Error{std::format("write failed: {}", std::strerror(errno))});
-    }
-    off += static_cast<std::size_t>(n);
-    offset_ += static_cast<std::uint64_t>(n);
-  }
-  return off;
-}
-
-Result<std::size_t> File::pool_write_at(
-    std::uint64_t offset,
-    std::span<const std::uint8_t> data) {
-  std::lock_guard lock(pool_mu_);
-  if (auto ok = ensure_open(); !ok) {
-    return std::unexpected(std::move(ok.error()));
-  }
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
-    return std::unexpected(Error{"write_at offset out of range"});
-  }
-  std::size_t off = 0;
-  while (off < data.size()) {
-    const ssize_t n = ::pwrite(
-        pool_fd_->get(),
-        data.data() + off,
-        data.size() - off,
-        static_cast<off_t>(offset + off));
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      return std::unexpected(
-          Error{std::format("pwrite failed: {}", std::strerror(errno))});
-    }
-    off += static_cast<std::size_t>(n);
-  }
-  return off;
-}
-
-Result<std::vector<std::uint8_t>> File::read(std::size_t max_bytes) {
-  auto lim = resolve_read_max(max_bytes);
-  if (!lim) {
-    return std::unexpected(std::move(lim.error()));
-  }
-  if (use_asio_) {
-    return std::unexpected(
-        Error{"File::read sync is pool-backend only; use async_read"});
-  }
-  return pool_read(*lim);
-}
+// ── Sync I/O on control/owned fd ──────────────────────────────────
 
 Result<std::vector<std::uint8_t>> File::read_at(
     std::uint64_t offset,
@@ -563,384 +470,513 @@ Result<std::vector<std::uint8_t>> File::read_at(
   if (!lim) {
     return std::unexpected(std::move(lim.error()));
   }
-  if (use_asio_) {
-    return std::unexpected(
-        Error{"File::read_at sync is pool-backend only; use async_read_at"});
-  }
-  return pool_read_at(offset, *lim);
-}
+  max_bytes = *lim;
 
-Result<std::size_t> File::write(std::span<const std::uint8_t> data) {
-  if (use_asio_) {
-    return std::unexpected(
-        Error{"File::write sync is pool-backend only; use async_write"});
-  }
-  return pool_write(data);
-}
-
-Result<std::size_t> File::write_at(
-    std::uint64_t offset,
-    std::span<const std::uint8_t> data) {
-  if (use_asio_) {
-    return std::unexpected(
-        Error{"File::write_at sync is pool-backend only; use async_write_at"});
-  }
-  return pool_write_at(offset, data);
-}
-
-Result<std::string> File::read_text(std::size_t max_bytes) {
-  auto bytes = read(max_bytes);
-  if (!bytes) {
-    return std::unexpected(std::move(bytes.error()));
-  }
-  return std::string(bytes->begin(), bytes->end());
-}
-
-Result<std::size_t> File::write_text(std::string_view data) {
-  return write(std::span<const std::uint8_t>(
-      reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
-}
-
-VoidResult File::truncate(std::uint64_t size) {
-  if (auto ok = ensure_open(); !ok) {
-    return ok;
-  }
-  if (size > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
-    return std::unexpected(Error{"truncate size out of range"});
-  }
-#if VACPS_FS_HAS_ASIO_FILE
-  if (use_asio_) {
-    boost::system::error_code ec;
-    asio_->file.resize(size, ec);
-    if (ec) {
-      return std::unexpected(
-          Error{std::format("truncate failed: {}", ec.message())});
-    }
-    return {};
-  }
-#endif
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  if (::ftruncate(pool_fd_->get(), static_cast<off_t>(size)) != 0) {
-    return std::unexpected(
-        Error{std::format("truncate failed: {}", std::strerror(errno))});
-  }
-  return {};
-}
-
-Result<FileStat> File::stat() {
+  std::lock_guard lock(mu_);
   if (auto ok = ensure_open(); !ok) {
     return std::unexpected(std::move(ok.error()));
   }
-#if VACPS_FS_HAS_ASIO_FILE
-  if (use_asio_) {
-#if defined(__linux__)
-    const int fd = asio_->file.native_handle();
-    FileStat out = file_stat_from_fd(fd, display_path_);
-    if (out.type.empty()) {
-      return std::unexpected(
-          Error{std::format("fstat failed: {}", std::strerror(errno))});
-    }
-    return out;
-#else
-    return std::unexpected(Error{"stat requires Linux"});
-#endif
-  }
-#endif
-#if defined(__linux__)
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  FileStat out = file_stat_from_fd(pool_fd_->get(), display_path_);
-  if (out.type.empty()) {
-    return std::unexpected(
-        Error{std::format("fstat failed: {}", std::strerror(errno))});
-  }
-  return out;
-#else
-  return std::unexpected(Error{"stat requires Linux"});
-#endif
-}
-
-VoidResult File::flush() {
-  if (auto ok = ensure_open(); !ok) {
-    return ok;
-  }
-#if VACPS_FS_HAS_ASIO_FILE
-  if (use_asio_) {
-    boost::system::error_code ec;
-    asio_->file.sync_all(ec);
-    if (ec) {
-      return std::unexpected(Error{std::format("fsync failed: {}", ec.message())});
-    }
-    return {};
-  }
-#endif
-  if (!pool_fd_ || !(*pool_fd_)) {
-    return std::unexpected(Error{"file is closed"});
-  }
-  if (::fsync(pool_fd_->get()) != 0) {
-    return std::unexpected(
-        Error{std::format("fsync failed: {}", std::strerror(errno))});
-  }
-  return {};
-}
-
-VoidResult File::close() {
-  return close_impl();
-}
-
-// ── Asio-backend async I/O ────────────────────────────────────────
-
-#if VACPS_FS_HAS_ASIO_FILE
-
-asio::awaitable<Result<std::vector<std::uint8_t>>> File::asio_read_at(
-    std::uint64_t offset,
-    std::size_t max_bytes) {
-  if (auto ok = ensure_open(); !ok) {
-    co_return std::unexpected(std::move(ok.error()));
-  }
   if (max_bytes == 0) {
-    co_return std::vector<std::uint8_t>{};
+    return std::vector<std::uint8_t>{};
   }
+  if (auto r = check_range(offset, max_bytes, "readAt"); !r) {
+    return std::unexpected(std::move(r.error()));
+  }
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "readAt", 0});
+  }
+
+#if defined(__linux__)
   constexpr std::size_t kChunk = 64 * 1024;
   std::vector<std::uint8_t> buf;
   std::array<std::uint8_t, kChunk> tmp{};
   std::size_t got = 0;
   while (got < max_bytes) {
     const std::size_t want = std::min(kChunk, max_bytes - got);
-    auto [ec, n] = co_await asio_->file.async_read_some_at(
-        offset + got,
-        asio::buffer(tmp.data(), want),
-        asio::as_tuple(asio::use_awaitable));
-    if (ec == asio::error::eof) {
-      break;
-    }
-    if (ec) {
-      co_return std::unexpected(
-          Error{std::format("read failed: {}", ec.message())});
+    const ssize_t n = ::pread(
+        fd, tmp.data(), want, static_cast<off_t>(offset + got));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return std::unexpected(make_io_error("readAt", errno, display_path_));
     }
     if (n == 0) break;
     buf.insert(buf.end(), tmp.data(), tmp.data() + n);
-    got += n;
+    got += static_cast<std::size_t>(n);
   }
-  co_return buf;
+  return buf;
+#else
+  return std::unexpected(Error{"readAt requires Linux", "readAt", 0});
+#endif
 }
 
-asio::awaitable<Result<std::vector<std::uint8_t>>> File::asio_read(
-    std::size_t max_bytes) {
-  auto data = co_await asio_read_at(offset_, max_bytes);
-  if (data) {
-    offset_ += static_cast<std::uint64_t>(data->size());
-  }
-  co_return data;
-}
-
-asio::awaitable<Result<std::size_t>> File::asio_write_at(
+Result<std::size_t> File::write_at(
     std::uint64_t offset,
-    std::vector<std::uint8_t> data) {
+    std::span<const std::uint8_t> data) {
+  std::lock_guard lock(mu_);
   if (auto ok = ensure_open(); !ok) {
-    co_return std::unexpected(std::move(ok.error()));
+    return std::unexpected(std::move(ok.error()));
+  }
+  if (is_append_mode()) {
+    return std::unexpected(Error{
+        "writeAt is not supported on append handles; use write() "
+        "(O_APPEND write)",
+        "writeAt",
+        0});
   }
   if (data.empty()) {
-    co_return std::size_t{0};
+    return std::size_t{0};
   }
+  if (auto r = check_range(offset, data.size(), "writeAt"); !r) {
+    return std::unexpected(std::move(r.error()));
+  }
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "writeAt", 0});
+  }
+
+#if defined(__linux__)
   std::size_t off = 0;
   while (off < data.size()) {
-    auto [ec, n] = co_await asio_->file.async_write_some_at(
-        offset + off,
-        asio::buffer(data.data() + off, data.size() - off),
-        asio::as_tuple(asio::use_awaitable));
-    if (ec) {
-      co_return std::unexpected(
-          Error{std::format("write failed: {}", ec.message())});
+    const ssize_t n = ::pwrite(
+        fd,
+        data.data() + off,
+        data.size() - off,
+        static_cast<off_t>(offset + off));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return std::unexpected(make_io_error("writeAt", errno, display_path_));
     }
     if (n == 0) {
-      co_return std::unexpected(Error{"write failed: zero bytes written"});
+      return std::unexpected(
+          Error{"writeAt failed: zero bytes written", "writeAt", 0});
     }
-    off += n;
+    off += static_cast<std::size_t>(n);
   }
-  co_return off;
-}
-
-asio::awaitable<Result<std::size_t>> File::asio_write(std::vector<std::uint8_t> data) {
-  std::uint64_t at = offset_;
-  if (flags_append()) {
-    auto sz = current_size();
-    if (!sz) {
-      co_return std::unexpected(std::move(sz.error()));
-    }
-    at = *sz;
-  }
-  auto n = co_await asio_write_at(at, std::move(data));
-  if (n) {
-    offset_ = at + static_cast<std::uint64_t>(*n);
-  }
-  co_return n;
-}
-
-#else  // !VACPS_FS_HAS_ASIO_FILE
-
-asio::awaitable<Result<std::vector<std::uint8_t>>> File::asio_read(std::size_t) {
-  co_return std::unexpected(Error{"Asio file support not compiled"});
-}
-asio::awaitable<Result<std::vector<std::uint8_t>>> File::asio_read_at(
-    std::uint64_t,
-    std::size_t) {
-  co_return std::unexpected(Error{"Asio file support not compiled"});
-}
-asio::awaitable<Result<std::size_t>> File::asio_write(std::vector<std::uint8_t>) {
-  co_return std::unexpected(Error{"Asio file support not compiled"});
-}
-asio::awaitable<Result<std::size_t>> File::asio_write_at(
-    std::uint64_t,
-    std::vector<std::uint8_t>) {
-  co_return std::unexpected(Error{"Asio file support not compiled"});
-}
-
+  return off;
+#else
+  return std::unexpected(Error{"writeAt requires Linux", "writeAt", 0});
 #endif
+}
 
-// ── Public async dispatch (dual backend) ──────────────────────────
-//
-// Pool path: async_offload + pool_mu_ inside pool_* / close_impl (never hold
-// mutex across co_await). Asio path: ops co_await on ioc; life_ is atomic.
-// Do NOT use strand+max-timer exclusive locks — that hung JsTasksTest.ExecAndFsRoutes.
-
-asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read(
-    std::size_t max_bytes) {
+Result<std::vector<std::uint8_t>> File::read(std::size_t max_bytes) {
   auto lim = resolve_read_max(max_bytes);
   if (!lim) {
-    co_return std::unexpected(std::move(lim.error()));
+    return std::unexpected(std::move(lim.error()));
   }
-  auto self = shared_from_this();
-  const std::size_t n = *lim;
-  if (self->use_asio_) {
-    co_return co_await self->asio_read(n);
+  std::lock_guard lock(mu_);
+  if (auto ok = ensure_open(); !ok) {
+    return std::unexpected(std::move(ok.error()));
   }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(*self->pool_, [self, n] {
-      return self->pool_read(n);
-    });
+  const std::uint64_t at = offset_;
+  if (*lim == 0) {
+    return std::vector<std::uint8_t>{};
   }
-  co_return self->pool_read(n);
+  if (auto r = check_range(at, *lim, "read"); !r) {
+    return std::unexpected(std::move(r.error()));
+  }
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "read", 0});
+  }
+#if defined(__linux__)
+  constexpr std::size_t kChunk = 64 * 1024;
+  std::vector<std::uint8_t> buf;
+  std::array<std::uint8_t, kChunk> tmp{};
+  std::size_t got = 0;
+  const std::size_t max_b = *lim;
+  while (got < max_b) {
+    if (!offset_add_ok(at, static_cast<std::uint64_t>(got))) {
+      return std::unexpected(Error{"read offset overflow", "read", EOVERFLOW});
+    }
+    const std::size_t want = std::min(kChunk, max_b - got);
+    const ssize_t n =
+        ::pread(fd, tmp.data(), want, static_cast<off_t>(at + got));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return std::unexpected(make_io_error("read", errno, display_path_));
+    }
+    if (n == 0) break;
+    buf.insert(buf.end(), tmp.data(), tmp.data() + n);
+    got += static_cast<std::size_t>(n);
+  }
+  if (!offset_add_ok(at, static_cast<std::uint64_t>(got))) {
+    return std::unexpected(Error{"cursor overflow", "read", EOVERFLOW});
+  }
+  offset_ = at + static_cast<std::uint64_t>(got);
+  return buf;
+#else
+  return std::unexpected(Error{"read requires Linux", "read", 0});
+#endif
 }
+
+Result<std::size_t> File::append_write(std::span<const std::uint8_t> data) {
+  std::lock_guard lock(mu_);
+  if (auto ok = ensure_open(); !ok) {
+    return std::unexpected(std::move(ok.error()));
+  }
+  if (data.empty()) {
+    return std::size_t{0};
+  }
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "write", 0});
+  }
+#if defined(__linux__)
+  // Each write(2) under O_APPEND is kernel-positioned atomically. Multiple
+  // partial writes in this loop are not one indivisible append.
+  std::size_t off = 0;
+  while (off < data.size()) {
+    const ssize_t n = ::write(fd, data.data() + off, data.size() - off);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return std::unexpected(make_io_error("write", errno, display_path_));
+    }
+    if (n == 0) {
+      return std::unexpected(
+          Error{"write failed: zero bytes written", "write", 0});
+    }
+    off += static_cast<std::size_t>(n);
+  }
+  struct stat st{};
+  if (::fstat(fd, &st) == 0) {
+    offset_ = static_cast<std::uint64_t>(st.st_size);
+  } else if (offset_add_ok(offset_, static_cast<std::uint64_t>(off))) {
+    offset_ += static_cast<std::uint64_t>(off);
+  }
+  return off;
+#else
+  return std::unexpected(Error{"write requires Linux", "write", 0});
+#endif
+}
+
+Result<std::size_t> File::write(std::span<const std::uint8_t> data) {
+  if (is_append_mode()) {
+    return append_write(data);
+  }
+  std::lock_guard lock(mu_);
+  if (auto ok = ensure_open(); !ok) {
+    return std::unexpected(std::move(ok.error()));
+  }
+  if (data.empty()) {
+    return std::size_t{0};
+  }
+  const std::uint64_t at = offset_;
+  if (auto r = check_range(at, data.size(), "write"); !r) {
+    return std::unexpected(std::move(r.error()));
+  }
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "write", 0});
+  }
+#if defined(__linux__)
+  std::size_t off = 0;
+  while (off < data.size()) {
+    const ssize_t n = ::pwrite(
+        fd,
+        data.data() + off,
+        data.size() - off,
+        static_cast<off_t>(at + off));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return std::unexpected(make_io_error("write", errno, display_path_));
+    }
+    if (n == 0) {
+      return std::unexpected(
+          Error{"write failed: zero bytes written", "write", 0});
+    }
+    off += static_cast<std::size_t>(n);
+  }
+  if (!offset_add_ok(at, static_cast<std::uint64_t>(off))) {
+    return std::unexpected(Error{"cursor overflow", "write", EOVERFLOW});
+  }
+  offset_ = at + static_cast<std::uint64_t>(off);
+  return off;
+#else
+  return std::unexpected(Error{"write requires Linux", "write", 0});
+#endif
+}
+
+VoidResult File::truncate(std::uint64_t size) {
+  std::lock_guard lock(mu_);
+  if (auto ok = ensure_open(); !ok) {
+    return ok;
+  }
+  if (!offset_ok(size)) {
+    return std::unexpected(Error{"truncate size out of range", "truncate", 0});
+  }
+  // Control fd only — never Asio resize from a worker.
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "truncate", 0});
+  }
+#if defined(__linux__)
+  if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
+    return std::unexpected(make_io_error("truncate", errno, display_path_));
+  }
+  // Cursor deliberately unchanged (may point past EOF).
+  return {};
+#else
+  return std::unexpected(Error{"truncate requires Linux", "truncate", 0});
+#endif
+}
+
+Result<FileStat> File::stat() {
+  std::lock_guard lock(mu_);
+  if (auto ok = ensure_open(); !ok) {
+    return std::unexpected(std::move(ok.error()));
+  }
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "stat", 0});
+  }
+#if defined(__linux__)
+  FileStat out = file_stat_from_fd(fd, display_path_);
+  if (out.type.empty()) {
+    return std::unexpected(make_io_error("stat", errno, display_path_));
+  }
+  return out;
+#else
+  return std::unexpected(Error{"stat requires Linux", "stat", 0});
+#endif
+}
+
+VoidResult File::flush() {
+  std::lock_guard lock(mu_);
+  if (auto ok = ensure_open(); !ok) {
+    return ok;
+  }
+  const int fd = control_fd();
+  if (fd < 0) {
+    return std::unexpected(Error{"file is closed", "flush", 0});
+  }
+#if defined(__linux__)
+  if (::fsync(fd) != 0) {
+    return std::unexpected(make_io_error("flush", errno, display_path_));
+  }
+  return {};
+#else
+  return std::unexpected(Error{"flush requires Linux", "flush", 0});
+#endif
+}
+
+VoidResult File::close() {
+  std::lock_guard lock(mu_);
+  if (life_ == Life::Closed || life_ == Life::Closing) {
+    life_ = Life::Closed;
+    return {};
+  }
+  life_ = Life::Closing;
+  close_handles();
+  life_ = Life::Closed;
+  return {};
+}
+
+// ── Genuine async Asio / io_uring data path ───────────────────────
+// Public entry points are ordinary functions (not coroutines): they capture
+// shared_from_this() immediately and pass shared_ptr by value into static
+// coroutine impls. Parameters are stored in the coroutine frame before the
+// initial suspend, so File stays alive across call→first-resume and all awaits.
 
 asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read_at(
     std::uint64_t offset,
-    std::size_t max_bytes) {
-  auto lim = resolve_read_max(max_bytes);
-  if (!lim) {
-    co_return std::unexpected(std::move(lim.error()));
-  }
-  auto self = shared_from_this();
-  const std::size_t n = *lim;
-  if (self->use_asio_) {
-    co_return co_await self->asio_read_at(offset, n);
-  }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(*self->pool_, [self, offset, n] {
-      return self->pool_read_at(offset, n);
-    });
-  }
-  co_return self->pool_read_at(offset, n);
-}
-
-asio::awaitable<Result<std::string>> File::async_read_text(std::size_t max_bytes) {
-  auto bytes = co_await async_read(max_bytes);
-  if (!bytes) {
-    co_return std::unexpected(std::move(bytes.error()));
-  }
-  co_return std::string(bytes->begin(), bytes->end());
-}
-
-asio::awaitable<Result<std::size_t>> File::async_write(
-    std::span<const std::uint8_t> data) {
-  std::vector<std::uint8_t> owned(data.begin(), data.end());
-  auto self = shared_from_this();
-  if (self->use_asio_) {
-    co_return co_await self->asio_write(std::move(owned));
-  }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(*self->pool_, [self, owned = std::move(owned)] {
-      return self->pool_write(
-          std::span<const std::uint8_t>(owned.data(), owned.size()));
-    });
-  }
-  co_return self->pool_write(
-      std::span<const std::uint8_t>(owned.data(), owned.size()));
+    std::size_t max_bytes,
+    std::stop_token stop) {
+  return async_read_at_impl(shared_from_this(), offset, max_bytes, std::move(stop));
 }
 
 asio::awaitable<Result<std::size_t>> File::async_write_at(
     std::uint64_t offset,
-    std::span<const std::uint8_t> data) {
-  std::vector<std::uint8_t> owned(data.begin(), data.end());
-  auto self = shared_from_this();
-  if (self->use_asio_) {
-    co_return co_await self->asio_write_at(offset, std::move(owned));
-  }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(
-        *self->pool_, [self, offset, owned = std::move(owned)] {
-          return self->pool_write_at(
-              offset, std::span<const std::uint8_t>(owned.data(), owned.size()));
-        });
-  }
-  co_return self->pool_write_at(
-      offset, std::span<const std::uint8_t>(owned.data(), owned.size()));
+    std::vector<std::uint8_t> data,
+    std::stop_token stop) {
+  return async_write_at_impl(
+      shared_from_this(), offset, std::move(data), std::move(stop));
 }
 
-asio::awaitable<Result<std::size_t>> File::async_write_text(std::string data) {
-  co_return co_await async_write(std::span<const std::uint8_t>(
-      reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
+asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read_at_impl(
+    std::shared_ptr<File> self,
+    std::uint64_t offset,
+    std::size_t max_bytes,
+    std::stop_token stop) {
+#if !VACPS_FS_HAS_ASIO_FILE
+  (void)self;
+  (void)offset;
+  (void)max_bytes;
+  (void)stop;
+  co_return std::unexpected(
+      Error{"Asio file support not compiled", "readAt", 0});
+#else
+  if (!self->use_asio_ || !self->asio_) {
+    co_return std::unexpected(
+        Error{"async_read_at requires Asio backend", "readAt", 0});
+  }
+  if (self->life_ != Life::Open) {
+    co_return std::unexpected(Error{"file is closed", "readAt", 0});
+  }
+  auto lim = resolve_read_max(max_bytes);
+  if (!lim) {
+    co_return std::unexpected(std::move(lim.error()));
+  }
+  max_bytes = *lim;
+  if (max_bytes == 0) {
+    co_return std::vector<std::uint8_t>{};
+  }
+  if (auto r = check_range(offset, max_bytes, "readAt"); !r) {
+    co_return std::unexpected(std::move(r.error()));
+  }
+  if (stop.stop_requested()) {
+    co_return std::unexpected(
+        Error{"operation cancelled", "readAt", ECANCELED});
+  }
+
+  // Operation-local cancel: stop_token → post to file executor → signal.
+  // active flag prevents a delayed post from cancelling a later op.
+  auto op = std::make_shared<OpCancelState>();
+  auto weak_op = std::weak_ptr<OpCancelState>(op);
+  auto ex = self->asio_->executor;
+  std::stop_callback on_stop{
+      stop, [weak_op, ex]() noexcept {
+        try {
+          asio::post(ex, [weak_op]() {
+            if (auto s = weak_op.lock(); s && s->active) {
+              s->signal.emit(asio::cancellation_type::all);
+            }
+          });
+        } catch (...) {
+        }
+      }};
+
+  constexpr std::size_t kChunk = 64 * 1024;
+  std::vector<std::uint8_t> buf;
+  std::array<std::uint8_t, kChunk> tmp{};
+  std::size_t got = 0;
+  while (got < max_bytes) {
+    if (stop.stop_requested()) {
+      op->active = false;
+      co_return std::unexpected(
+          Error{"operation cancelled", "readAt", ECANCELED});
+    }
+    const std::size_t want = std::min(kChunk, max_bytes - got);
+    auto [ec, n] = co_await self->asio_->file.async_read_some_at(
+        offset + got,
+        asio::buffer(tmp.data(), want),
+        asio::bind_cancellation_slot(
+            op->signal.slot(), asio::as_tuple(asio::use_awaitable)));
+    if (ec == asio::error::eof) {
+      break;
+    }
+    if (ec == asio::error::operation_aborted || stop.stop_requested()) {
+      op->active = false;
+      co_return std::unexpected(
+          Error{"operation cancelled", "readAt", ECANCELED});
+    }
+    if (ec) {
+      op->active = false;
+      co_return std::unexpected(Error{
+          std::format(
+              "readAt failed: {} (code={})", ec.message(), ec.value()),
+          "readAt",
+          ec.value()});
+    }
+    if (n == 0) {
+      break;
+    }
+    buf.insert(buf.end(), tmp.data(), tmp.data() + n);
+    got += n;
+  }
+  op->active = false;
+  co_return buf;
+#endif
 }
 
-asio::awaitable<VoidResult> File::async_truncate(std::uint64_t size) {
-  auto self = shared_from_this();
-  if (self->use_asio_) {
-    co_return self->truncate(size);
+asio::awaitable<Result<std::size_t>> File::async_write_at_impl(
+    std::shared_ptr<File> self,
+    std::uint64_t offset,
+    std::vector<std::uint8_t> data,
+    std::stop_token stop) {
+#if !VACPS_FS_HAS_ASIO_FILE
+  (void)self;
+  (void)offset;
+  (void)data;
+  (void)stop;
+  co_return std::unexpected(
+      Error{"Asio file support not compiled", "writeAt", 0});
+#else
+  if (!self->use_asio_ || !self->asio_) {
+    co_return std::unexpected(
+        Error{"async_write_at requires Asio backend", "writeAt", 0});
   }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(*self->pool_, [self, size] {
-      return self->truncate(size);
-    });
+  if (self->life_ != Life::Open) {
+    co_return std::unexpected(Error{"file is closed", "writeAt", 0});
   }
-  co_return self->truncate(size);
-}
+  if (self->is_append_mode()) {
+    co_return std::unexpected(Error{
+        "writeAt is not supported on append handles; use write() "
+        "(O_APPEND write)",
+        "writeAt",
+        0});
+  }
+  if (data.empty()) {
+    co_return std::size_t{0};
+  }
+  if (auto r = check_range(offset, data.size(), "writeAt"); !r) {
+    co_return std::unexpected(std::move(r.error()));
+  }
+  if (stop.stop_requested()) {
+    co_return std::unexpected(
+        Error{"operation cancelled", "writeAt", ECANCELED});
+  }
 
-asio::awaitable<Result<FileStat>> File::async_stat() {
-  auto self = shared_from_this();
-  if (self->use_asio_) {
-    co_return self->stat();
-  }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(*self->pool_, [self] { return self->stat(); });
-  }
-  co_return self->stat();
-}
+  auto op = std::make_shared<OpCancelState>();
+  auto weak_op = std::weak_ptr<OpCancelState>(op);
+  auto ex = self->asio_->executor;
+  std::stop_callback on_stop{
+      stop, [weak_op, ex]() noexcept {
+        try {
+          asio::post(ex, [weak_op]() {
+            if (auto s = weak_op.lock(); s && s->active) {
+              s->signal.emit(asio::cancellation_type::all);
+            }
+          });
+        } catch (...) {
+        }
+      }};
 
-asio::awaitable<VoidResult> File::async_flush() {
-  auto self = shared_from_this();
-  if (self->use_asio_) {
-    co_return self->flush();
+  std::size_t off = 0;
+  while (off < data.size()) {
+    if (stop.stop_requested()) {
+      op->active = false;
+      co_return std::unexpected(
+          Error{"operation cancelled", "writeAt", ECANCELED});
+    }
+    auto [ec, n] = co_await self->asio_->file.async_write_some_at(
+        offset + off,
+        asio::buffer(data.data() + off, data.size() - off),
+        asio::bind_cancellation_slot(
+            op->signal.slot(), asio::as_tuple(asio::use_awaitable)));
+    if (ec == asio::error::operation_aborted || stop.stop_requested()) {
+      op->active = false;
+      co_return std::unexpected(
+          Error{"operation cancelled", "writeAt", ECANCELED});
+    }
+    if (ec) {
+      op->active = false;
+      co_return std::unexpected(Error{
+          std::format(
+              "writeAt failed: {} (code={})", ec.message(), ec.value()),
+          "writeAt",
+          ec.value()});
+    }
+    if (n == 0) {
+      op->active = false;
+      co_return std::unexpected(
+          Error{"writeAt failed: zero bytes written", "writeAt", 0});
+    }
+    off += n;
   }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(*self->pool_, [self] { return self->flush(); });
-  }
-  co_return self->flush();
-}
-
-asio::awaitable<VoidResult> File::async_close() {
-  auto self = shared_from_this();
-  if (self->use_asio_) {
-    co_return self->close_impl();
-  }
-  if (self->pool_ != nullptr) {
-    co_return co_await async_offload(*self->pool_, [self] {
-      return self->close_impl();
-    });
-  }
-  co_return self->close_impl();
+  op->active = false;
+  co_return off;
+#endif
 }
 
 }  // namespace vacps::fs

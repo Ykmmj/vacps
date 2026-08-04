@@ -1,48 +1,114 @@
 /**
- * vacps:http — inbound Server + outbound request (create-at-JS-call).
+ * vacps:http — outbound request + inbound Server.
  *
- * Final API: class Server(options), listening, listen()/close() → Promise;
- * namespace request().
+ * Inbound: native transport raises each request into a JS onRequest callback.
+ * Product routing / JSON policy stay in script — Server has zero business routes.
+ * Outbound: one-shot request() on Runtime::Async / host Asio.
  */
 declare module 'vacps:http' {
+  // ── Inbound Server ──────────────────────────────────────────────
+
   export interface ServerOptions {
+    /**
+     * Numeric IPv4/IPv6 bind literal only (never DNS / hostnames).
+     * Validated synchronously at `new Server` via the native address parser;
+     * e.g. `"localhost"` throws TypeError before any Promise is created.
+     * Default `"127.0.0.1"`.
+     */
     readonly host?: string;
-    /** Required. Bind port in range 1–65535. */
+    /** Bind port; 0 = ephemeral. */
+    readonly port: number;
+    /** Max request body bytes. */
+    readonly maxRequestBytes?: number;
+    /** Max header block bytes. */
+    readonly maxHeaderBytes?: number;
+    /** Max response body bytes accepted from the handler. */
+    readonly maxResponseBytes?: number;
+    /** Per read/write idle budget (ms). */
+    readonly ioTimeoutMs?: number;
+    /**
+     * Wall-clock deadline (ms) for one onRequest invocation. Starts a timer
+     * that requests cooperative cancellation; not a hard completion bound —
+     * `close()` still waits for handler drain. Default 30000.
+     */
+    readonly handlerTimeoutMs?: number;
+    /** listen(2) backlog. */
+    readonly backlog?: number;
+    readonly reuseAddress?: boolean;
+  }
+
+  export interface ServerRequest {
+    readonly method: string;
+    /** Request-target (path + optional query). */
+    readonly url: string;
+    /** HTTP version string (e.g. "1.0", "1.1"). */
+    readonly httpVersion: string;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly body: ArrayBuffer;
+    readonly remoteAddress: string;
+  }
+
+  export interface ServerResponse {
+    readonly status: number;
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly body?: string | ArrayBuffer | ArrayBufferView;
+  }
+
+  export type ServerRequestHandler = (
+    request: ServerRequest,
+  ) => ServerResponse | Promise<ServerResponse>;
+
+  export interface ListenAddress {
+    /**
+     * Raw numeric bound address (IPv6 is unbracketed).
+     * Callers must format when building a URL
+     * (e.g. IPv6 → `"[" + host + "]:" + port`).
+     */
+    readonly host: string;
     readonly port: number;
   }
 
   /**
-   * Inbound HTTP transport (Asio/Beast). JS owns the instance.
-   * Product routes stay in handleRequest — Server has zero business routes.
-   *
-   * Constructor only stores config; bind happens in listen().
+   * Inbound HTTP/1 transport (Asio/Beast). Construct with options + onRequest;
+   * bind in listen(). Native event → JS callback; no product routes here.
    */
   export class Server {
-    constructor(options: ServerOptions);
+    constructor(options: ServerOptions, onRequest: ServerRequestHandler);
 
     /** True while accepting connections. */
     readonly listening: boolean;
 
-    listen(): Promise<void>;
+    /** Effective bind address while listening; undefined otherwise. */
+    readonly address: ListenAddress | undefined;
+
+    /** Bind + accept. Resolves to the effective address (port may be ephemeral). */
+    listen(): Promise<ListenAddress>;
+
     close(): Promise<void>;
   }
 
-  // ── Outbound client (HTTP/HTTPS) ────────────────────────────────
+  // ── Outbound client ─────────────────────────────────────────────
 
   export interface HttpRequest {
     readonly method?: string;
     readonly url: string;
     readonly headers?: Readonly<Record<string, string>>;
-    /** UTF-8 string or raw bytes. */
-    readonly body?: string | ArrayBuffer | Uint8Array;
-    /** Default 30000. */
+    /**
+     * Request body: UTF-8 string, ArrayBuffer, or TypedArray
+     * (typed as ArrayBufferView).
+     */
+    readonly body?: string | ArrayBuffer | ArrayBufferView;
+    /**
+     * One absolute wall-clock budget for the whole request.
+     * Range 1..3600000. Default 30000.
+     */
     readonly timeoutMs?: number;
-    /** Default 8 MiB. */
+    /**
+     * Max response body bytes (Beast body_limit while reading).
+     * Range 1..67108864 (64 MiB). Default 8 MiB.
+     */
     readonly maxResponseBytes?: number;
   }
-
-  /** Design alias. */
-  export type HttpRequestOptions = HttpRequest;
 
   export interface HttpResponse {
     readonly status: number;
@@ -51,9 +117,13 @@ declare module 'vacps:http' {
   }
 
   /**
-   * One-shot outbound request (Boost.Beast + Asio SSL).
-   * HTTPS: verify_peer + SNI + hostname verification; CA from VACPS_CA_BUNDLE
-   * or platform defaults (fail-closed if missing). Does not follow redirects.
+   * One-shot outbound HTTP/HTTPS request.
+   * Options are decoded synchronously before the Promise is created.
+   * Runs on Runtime::Async / host Asio (direct path, not worker run_blocking).
+   * Binary response body as ArrayBuffer. stop-token cancellation;
+   * one timeoutMs budget; maxResponseBytes cap.
+   * HTTPS: verify_peer + SNI + hostname verification; CA path from host
+   * bootstrap composition (not a JS option). Does not follow redirects.
    */
   export function request(options: HttpRequest): Promise<HttpResponse>;
 }

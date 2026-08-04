@@ -3,9 +3,9 @@ import * as host from 'vacps:host';
 import * as log from 'vacps:log';
 import { Process, run, type ProcessResult } from 'vacps:process';
 
+import { requireAbsolutePath } from '../util/absolute-path';
 import { resolveExecutable } from '../util/resolve-executable';
 import { randomUuidV4 } from '../util/uuid';
-import { assertSafeAbsolutePath } from './path-guard';
 
 export type ProcessStatus = 'running' | 'exited' | 'signaled' | 'timed_out' | 'cancelled';
 
@@ -67,7 +67,10 @@ interface Tracked {
   hardMaxStderr?: number;
   tty?: boolean;
   stdinAvailable: boolean;
-  /** Accumulated progressive output (pump owns Process.read). */
+  /**
+   * Final retained capture copied from Process.wait() (not native progressive
+   * streaming — vacps:process has no Process.read).
+   */
   stdoutAcc: string;
   stderrAcc: string;
   /** True after terminate() was requested. */
@@ -76,9 +79,9 @@ interface Tracked {
   result: ProcessResult | null;
   done: boolean;
   finishedMs: number | null;
-  /** Background stdout/stderr pump; resolves when both streams EOF and wait() settles. */
+  /** Background waiter; resolves when Process.wait settles with final capture. */
   pump: Promise<void>;
-  /** Waiters notified when pump accumulates data or finishes. */
+  /** Waiters notified when final capture is available or the process finishes. */
   waiters: Array<() => void>;
 }
 
@@ -142,7 +145,9 @@ function waitForProgress(t: Tracked): Promise<void> {
 /**
  * Process manager (apps/vacps ProcessManager counterpart).
  * Tracks Process instances under client-facing UUIDs (not native registry ids).
- * Long-lived: start / progressive readWait / write / terminate / close.
+ * Long-lived: start / readWait / write / terminate / close.
+ * readWait exposes manager-local slices of the final retained capture after
+ * Process.wait completes — not native progressive streaming.
  * Fire-and-wait: exec() → waitUntilDone via Process.wait().
  */
 export class ProcessManager {
@@ -255,7 +260,7 @@ export class ProcessManager {
     }
 
     const timeoutMs = clamp(input.timeoutMs ?? 3_600_000, 1, 3_600_000);
-    const cwd = input.workingDirectory ? assertSafeAbsolutePath(input.workingDirectory) : '/tmp';
+    const cwd = input.workingDirectory ? requireAbsolutePath(input.workingDirectory) : '/tmp';
     const stdoutMax = clamp(input.stdoutMaxBytes ?? 16_384, 0, 1_048_576);
     const stderrMax = clamp(input.stderrMaxBytes ?? 16_384, 0, 1_048_576);
 
@@ -321,7 +326,7 @@ export class ProcessManager {
     }
 
     const timeoutMs = clamp(input.timeoutMs ?? 3_600_000, 1, 3_600_000);
-    const cwd = input.workingDirectory ? assertSafeAbsolutePath(input.workingDirectory) : '/tmp';
+    const cwd = input.workingDirectory ? requireAbsolutePath(input.workingDirectory) : '/tmp';
     const stdoutMax = clamp(input.stdoutMaxBytes ?? 16_384, 0, 1_048_576);
     const stderrMax = clamp(input.stderrMaxBytes ?? 16_384, 0, 1_048_576);
     const closeStdin = input.closeStdin !== false;
@@ -419,8 +424,9 @@ export class ProcessManager {
   }
 
   /**
-   * Progressive output for long-lived processes.
-   * Cursor is manager-local (delivered offsets); Process owns native read offsets via pump.
+   * Output for long-lived processes from the final retained capture after
+   * Process.wait completes. Cursor is manager-local (delivered offsets only).
+   * Not native progressive streaming (no Process.read).
    */
   async readWait(
     processId: string,
@@ -435,7 +441,7 @@ export class ProcessManager {
     const waitMs = clamp(input.waitMs ?? 0, 0, 60_000);
     let { stdoutOffset, stderrOffset } = parseCursor(input.cursor);
 
-    // Clamp cursor to what we have accumulated (cursor may lag pump).
+    // Clamp cursor to the final capture we hold (may still be empty until wait settles).
     stdoutOffset = Math.min(stdoutOffset, t.stdoutAcc.length);
     stderrOffset = Math.min(stderrOffset, t.stderrAcc.length);
 
@@ -443,7 +449,7 @@ export class ProcessManager {
       stdoutOffset < t.stdoutAcc.length || stderrOffset < t.stderrAcc.length || t.done;
 
     if (!hasNew() && waitMs > 0) {
-      // Long-poll until pump signals progress (exact waitMs needs a host timer; block until data/done).
+      // Long-poll until wait settles / capture is available.
       while (!hasNew()) {
         await waitForProgress(t);
       }
@@ -565,7 +571,7 @@ export class ProcessManager {
     } catch {
       requested = false;
     }
-    // Let pump observe exit when possible.
+    // Let the wait-side capture settle when possible.
     try {
       await t.pump;
     } catch {
@@ -592,7 +598,7 @@ export class ProcessManager {
     const timedOut = t.result?.timedOut === true;
     const status: ProcessStatus = finished ? mapFinishedStatus(t) : 'running';
 
-    // Prefer pump-accumulated text; fall back to wait() capture if present.
+    // Final retained capture from Process.wait (copied into stdoutAcc/stderrAcc).
     const stdout = t.stdoutAcc || t.result?.stdout || '';
     const stderr = t.stderrAcc || t.result?.stderr || '';
 
@@ -640,11 +646,9 @@ export class ProcessManager {
   }
 
   /**
-   * Wait for exit via Process.wait() (full captured buffers).
-   * Avoid concurrent Process.read pumps: dual long-wait reads on the same
-   * registry entry can stall the single-threaded ioc until wait_ms (or forever
-   * if pipe EOF lags child exit). Progressive readWait still works off stdoutAcc
-   * once wait completes; long-lived streaming can be revisited with short waits.
+   * Await Process.wait() for the final retained stdout/stderr capture.
+   * readWait serves manager-local slices of that capture after wait settles;
+   * it is not native progressive streaming (vacps:process has no Process.read).
    */
   private async pumpOutputs(t: Tracked): Promise<void> {
     const p = t.proc;
@@ -653,7 +657,7 @@ export class ProcessManager {
       if (t.result.stdout) t.stdoutAcc = t.result.stdout;
       if (t.result.stderr) t.stderrAcc = t.result.stderr;
     } catch {
-      /* closed mid-wait */
+      /* closed mid-wait — capture unavailable */
     } finally {
       t.done = true;
       t.finishedMs = host.nowMs();

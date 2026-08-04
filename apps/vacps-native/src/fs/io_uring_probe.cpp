@@ -2,6 +2,7 @@
 
 #include "app/log.hpp"
 
+#include <atomic>
 #include <cstring>
 #include <string>
 
@@ -10,8 +11,12 @@
 #endif
 
 namespace vacps::fs {
+namespace {
 
-bool probe_io_uring() noexcept {
+// 0 = unprobed, 1 = available, -1 = unavailable.
+std::atomic<int> g_io_uring_state{0};
+
+[[nodiscard]] bool probe_io_uring_uncached() noexcept {
 #if !defined(VACPS_HAVE_LIBURING)
   return false;
 #else
@@ -19,7 +24,7 @@ bool probe_io_uring() noexcept {
   int rc = ::io_uring_queue_init(8, &ring, 0);
   if (rc < 0) {
     log::info(
-        "io_uring probe: setup failed ({}) — vacps:fs File uses thread_pool",
+        "io_uring probe: setup failed ({}) — vacps:fs File uses POSIX pool backend",
         std::strerror(-rc));
     return false;
   }
@@ -31,16 +36,15 @@ bool probe_io_uring() noexcept {
 
   io_uring_sqe* sqe = ::io_uring_get_sqe(&ring);
   if (sqe == nullptr) {
-    log::warn("io_uring probe: get_sqe failed — thread_pool fallback");
+    log::warn("io_uring probe: get_sqe failed — POSIX pool backend");
     return false;
   }
   ::io_uring_prep_nop(sqe);
 
   rc = ::io_uring_submit(&ring);
   if (rc < 0) {
-    // setup ok but enter denied (incomplete seccomp) — do NOT use Asio file
     log::warn(
-        "io_uring probe: submit/enter failed ({}) — thread_pool fallback "
+        "io_uring probe: submit/enter failed ({}) — POSIX pool backend "
         "(would leave Asio ops pending)",
         std::strerror(-rc));
     return false;
@@ -50,7 +54,7 @@ bool probe_io_uring() noexcept {
   rc = ::io_uring_wait_cqe(&ring, &cqe);
   if (rc < 0 || cqe == nullptr) {
     log::warn(
-        "io_uring probe: wait_cqe failed ({}) — thread_pool fallback",
+        "io_uring probe: wait_cqe failed ({}) — POSIX pool backend",
         rc < 0 ? std::strerror(-rc) : "null cqe");
     return false;
   }
@@ -58,7 +62,7 @@ bool probe_io_uring() noexcept {
   ::io_uring_cqe_seen(&ring, cqe);
   if (op_res < 0) {
     log::warn(
-        "io_uring probe: NOP failed ({}) — thread_pool fallback",
+        "io_uring probe: NOP failed ({}) — POSIX pool backend",
         std::strerror(-op_res));
     return false;
   }
@@ -67,6 +71,29 @@ bool probe_io_uring() noexcept {
       "io_uring probe: ok — vacps:fs File may use Asio random_access_file");
   return true;
 #endif
+}
+
+}  // namespace
+
+bool io_uring_available() noexcept {
+  int state = g_io_uring_state.load(std::memory_order_acquire);
+  if (state == 1) {
+    return true;
+  }
+  if (state == -1) {
+    return false;
+  }
+  // Unprobed: probe once.
+  const bool ok = probe_io_uring_uncached();
+  const int desired = ok ? 1 : -1;
+  int expected = 0;
+  if (g_io_uring_state.compare_exchange_strong(
+          expected, desired, std::memory_order_acq_rel, std::memory_order_acquire)) {
+    return ok;
+  }
+  // Another thread raced; honor the winner.
+  state = g_io_uring_state.load(std::memory_order_acquire);
+  return state == 1;
 }
 
 }  // namespace vacps::fs

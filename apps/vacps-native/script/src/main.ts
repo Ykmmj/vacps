@@ -1,10 +1,10 @@
 import { Application } from './application';
-import type { HostRequest, HostResponse } from './contracts/http';
 import type { TaskRequest, TaskResult } from './contracts/task';
 
 /**
  * Host entry exports (C++ invoke_export).
- * Wiring mirrors apps/vacps/src/main.ts: config → store → executor → queue → server.
+ * Lifecycle: initialize / tickControlPlane / runTask / shutdown.
+ * Inbound HTTP is native event → JS Server onRequest callback (not a host export).
  */
 let application: Application | undefined;
 
@@ -15,13 +15,6 @@ export async function initialize(): Promise<void> {
   const instance = new Application();
   await instance.initialize();
   application = instance;
-}
-
-export async function handleRequest(request: HostRequest): Promise<HostResponse> {
-  if (application === undefined) {
-    throw new Error('VACPS script is not initialized');
-  }
-  return application.handleRequest(request);
 }
 
 export async function runTask(task: TaskRequest): Promise<TaskResult> {

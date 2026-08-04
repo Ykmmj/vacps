@@ -30,12 +30,15 @@ ENV HTTP_PROXY=${HTTP_PROXY} \
 
 # g++ / gcc: provides crtbeginS.o + libgcc that Clang's driver expects on Alpine
 # (clang alone cannot link without these runtime objects).
+# compiler-rt: Clang sanitizer runtimes (ASan/UBSan/TSan/LSan) under musl triple;
+# without it -fsanitize=* fails to link in this image.
 RUN apk add --no-cache \
     bash \
     ca-certificates \
     clang22 \
     lld22 \
     llvm22 \
+    compiler-rt \
     cmake \
     ninja-build \
     samurai \

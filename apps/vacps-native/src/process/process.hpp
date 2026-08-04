@@ -7,6 +7,16 @@
  * ProcessRuntime supplies executor + shared ProcessBudget only.
  * No global Registry / string id / TTL reclaim.
  *
+ * Thread / executor model:
+ * - start / write / wait / terminate / async_close and all pipe/timer work run
+ *   on the owner executor (Runtime::Impl::main_executor). Never the worker pool
+ *   and never another io_context.
+ * - started() / closed() / status() are owner-executor-only snapshots.
+ * - dispose() / destructor may run on the owner JS thread as a finalizer
+ *   fallback: they only request group SIGKILL and cancel pipes/timers (via
+ *   post onto the owner executor when needed) and never block. Detached State
+ *   operations self-retain until real reap + drain completions.
+ *
  * Destructor policy: kill still-running process group (not detach).
  */
 
@@ -19,7 +29,6 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -31,17 +40,17 @@ namespace asio = boost::asio;
 
 struct StartOptions {
   std::string cwd;
-  /** nullopt / 0 = no timeout. */
+  /** 0 = no timeout. */
   std::chrono::milliseconds timeout{0};
-  bool close_stdin{true};
-  std::size_t hard_max_stdout{16 * 1024 * 1024};
-  std::size_t hard_max_stderr{16 * 1024 * 1024};
-};
-
-struct WriteOptions {
+  /**
+   * true  → close stdin immediately after spawn (run default).
+   * false → leave stdin open for write() (Process class default).
+   */
   bool close_stdin{false};
-  std::chrono::milliseconds timeout{30'000};
-  std::size_t max_bytes{1 * 1024 * 1024};
+  /** Cap retained stdout; 0 captures nothing (produced may still grow). */
+  std::size_t max_stdout_bytes{16 * 1024 * 1024};
+  /** Cap retained stderr; 0 captures nothing. */
+  std::size_t max_stderr_bytes{16 * 1024 * 1024};
 };
 
 enum class ProcessStatus : std::uint8_t {
@@ -55,41 +64,24 @@ enum class ProcessStatus : std::uint8_t {
   Closed,
 };
 
-enum class ExitReason : std::uint8_t {
-  Exited = 0,
-  TimedOut,
-  Cancelled,
-  Signaled,
-};
-
-struct BufferStats {
-  std::size_t retained{0};
-  std::size_t produced{0};
-  bool truncated{false};
-};
-
-struct ReadResult {
-  std::string data;
-  bool eof{false};
-};
-
-/** Result of Process::wait() / one-shot run. */
+/** Result of Process::wait() / one-shot run (public fields only). */
 struct RunResult {
   std::int32_t exit_code{0};
-  ExitReason reason{ExitReason::Exited};
   bool timed_out{false};
   std::string stdout_str;
   std::string stderr_str;
-  std::size_t stdout_produced{0};
-  std::size_t stderr_produced{0};
-  bool stdout_truncated{false};
-  bool stderr_truncated{false};
 };
+
+/**
+ * Decode terminate signal name. Accepts only SIGTERM / SIGINT / SIGKILL
+ * (case-sensitive, exact). Empty → SIGTERM.
+ */
+[[nodiscard]] Result<int> decode_terminate_signal(std::string_view signal);
 
 class Process final : public std::enable_shared_from_this<Process> {
  public:
   /**
-   * @param executor  Host io_context executor (spawn/pipes/timers).
+   * @param executor  Host main executor (spawn/pipes/timers).
    * @param budget    Shared concurrent/buffer budget (required for start()).
    * @param argv      Executable + args.
    * @param opts      Spawn options.
@@ -105,57 +97,54 @@ class Process final : public std::enable_shared_from_this<Process> {
   Process(Process&&) = delete;
   Process& operator=(Process&&) = delete;
 
-  /** Kill still-running child (process group); cancel timers; free buffers. */
+  /** Kill still-running child (process group); cancel timers/pipes (nonblocking). */
   ~Process();
 
   [[nodiscard]] asio::awaitable<VoidResult> start();
 
+  /** Serialized stdin write. Does not close stdin. */
+  [[nodiscard]] asio::awaitable<Result<std::size_t>> write(std::string data);
+
   /**
-   * Progressive read of one stream ("stdout" | "stderr").
-   * Cursor is owned by this Process.
-   * @param wait  0 = non-blocking; >0 wait for data or finish.
+   * Wait until process exit and both stdout/stderr drains finish.
+   * Multiple callers join the same barrier. Returns captured data only while
+   * the handle is still open — async_close releases buffers and may cause an
+   * outstanding concurrent wait to fail (no retained snapshot outside budget).
    */
-  [[nodiscard]] asio::awaitable<Result<ReadResult>> read(
-      std::string_view stream = "stdout",
-      std::chrono::milliseconds wait = std::chrono::milliseconds{60'000},
-      std::size_t max_bytes = 65'536);
-
-  [[nodiscard]] asio::awaitable<Result<std::size_t>> write(
-      std::string data,
-      WriteOptions opts = {});
-
   [[nodiscard]] asio::awaitable<Result<RunResult>> wait();
 
   /**
-   * Signal process group. Returns false if already exited.
-   * Grace: escalate to SIGKILL after grace if not SIGKILL.
+   * Signal the process group. Resolves after the kill request, not after exit.
+   * No-op success if already exited.
    */
-  [[nodiscard]] Result<bool> terminate(
-      std::string_view signal = "SIGTERM",
-      std::chrono::milliseconds grace = std::chrono::milliseconds{3000});
+  [[nodiscard]] VoidResult terminate(int signal);
 
   /**
-   * Idempotent close: kill if running, free pipes/buffers, release process slot.
-   * Prefer awaitable form from JS; this sync path for tests/finalizer.
+   * Idempotent close: request SIGKILL, cancel stdin+read pipes, await real
+   * child-reap and stdout/stderr drain barrier, then release slot/buffers.
+   * Concurrent callers join the same barrier. close-before-start → Closed
+   * immediately. Never stops the executor.
    */
-  [[nodiscard]] VoidResult close();
+  [[nodiscard]] asio::awaitable<VoidResult> async_close();
 
-  /** Finalizer/dtor path: same as close(), never throws. */
+  /**
+   * Finalizer/dtor path: request group SIGKILL and cancel pipes/timers on the
+   * owner executor; never throws; never blocks. Does not lie about exit/eof
+   * flags — detached State ops complete on real I/O/reap.
+   */
   void dispose() noexcept;
 
-  [[nodiscard]] std::optional<std::int32_t> pid() const noexcept;
-  [[nodiscard]] bool running() const noexcept;
   [[nodiscard]] bool started() const noexcept;
   [[nodiscard]] bool closed() const noexcept;
   [[nodiscard]] ProcessStatus status() const noexcept;
 
-  [[nodiscard]] const std::vector<std::string>& argv() const noexcept { return argv_; }
+  [[nodiscard]] const std::vector<std::string>& argv() const noexcept {
+    return argv_;
+  }
   [[nodiscard]] const StartOptions& options() const noexcept { return opts_; }
 
  private:
   struct State;
-
-  [[nodiscard]] VoidResult ensure_live(std::string_view op) const;
 
   std::vector<std::string> argv_;
   StartOptions opts_{};

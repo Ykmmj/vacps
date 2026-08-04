@@ -1,5 +1,6 @@
 /**
- * Node stand-in for vacps:crypto in vitest (OpenSSL path tested via C++ gtest).
+ * Node stand-in for vacps:crypto in Vitest. The native OpenSSL path is covered
+ * by JavaScript executed through the compiled product binary.
  */
 import { createHash, randomBytes as nodeRandom } from 'node:crypto';
 

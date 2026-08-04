@@ -10,9 +10,8 @@ declare module 'vacps:host' {
   export function dataDir(): string;
   export function nowMs(): number;
   /**
-   * Process environment variable from bootstrap EnvironmentSnapshot.
-   * Unset → undefined (design). Runtime may still yield null until C++ aligns;
-   * callers should treat nullish as missing (`v == null` / `??`).
+   * Process environment variable via live getenv.
+   * Unset → undefined; set empty → "".
    */
   export function getenv(name: string): string | undefined;
 }

@@ -14,10 +14,11 @@ struct DirEntry {
   std::string name;
   bool is_dir{false};
   bool is_file{false};
+  bool is_symlink{false};
   std::uint64_t size{0};
 };
 
-/** Metadata for vacps:fs.stat. */
+/** Metadata for vacps:fs.stat / File.stat. */
 struct FileStat {
   std::string path;
   /** "file" | "directory" | "symlink" | "other" */
@@ -46,15 +47,13 @@ struct RenameOptions {
 };
 
 /**
- * Pure path resolution (no product policy / no allowlist).
+ * Pure path resolution (no product path policy).
  *
  * - Empty path / embedded NUL → error (cannot open).
  * - Absolute: returned lexically normalized.
  * - Relative: joined under workspace_root, then lexically normalized.
  *
- * Path allowlist (dataDir, /tmp, reject /proc, …) is JS only:
- * `script/src/runtime/path-guard.ts` at MCP/tool boundaries.
- * C++ vacps:fs is pure I/O.
+ * C++ vacps:fs is pure I/O — no path allowlist here or in the JS module surface.
  */
 [[nodiscard]] Result<std::filesystem::path> resolve_path(
     const std::filesystem::path& workspace_root,
@@ -65,6 +64,17 @@ struct RenameOptions {
     std::string_view user_path) {
   return resolve_path(root, user_path);
 }
+
+/** Build a structured I/O error (message + operation + errno). */
+[[nodiscard]] Error make_io_error(
+    std::string_view operation,
+    int errnum,
+    std::string_view path = {});
+
+[[nodiscard]] Error make_io_error(
+    std::string_view operation,
+    const std::error_code& ec,
+    std::string_view path = {});
 
 // Namespace / path ops (content I/O is File).
 [[nodiscard]] VoidResult mkdir(
@@ -91,7 +101,8 @@ struct RenameOptions {
     const std::filesystem::path& to,
     RenameOptions opts = {});
 
-[[nodiscard]] Result<std::vector<DirEntry>> list_dir(const std::filesystem::path& path);
+[[nodiscard]] Result<std::vector<DirEntry>> list_dir(
+    const std::filesystem::path& path);
 [[nodiscard]] Result<FileStat> file_stat(const std::filesystem::path& path);
 
 }  // namespace vacps::fs

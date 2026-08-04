@@ -28,9 +28,15 @@ Database& Database::operator=(Database&& other) noexcept {
 }
 
 void Database::close() noexcept {
-  if (db_ != nullptr) {
-    sqlite3_close(db_);
-    db_ = nullptr;
+  if (db_ == nullptr) {
+    return;
+  }
+  // Null the member exactly once before close_v2 so a re-entrant or second
+  // close never touches a successfully closed handle.
+  sqlite3* handle = std::exchange(db_, nullptr);
+  const int rc = sqlite3_close_v2(handle);
+  if (rc != SQLITE_OK) {
+    log::warn("sqlite close_v2: {}", sqlite3_errstr(rc));
   }
 }
 
@@ -55,11 +61,16 @@ Result<Database> Database::open(std::string path, OpenMode mode) {
   const int rc = sqlite3_open_v2(path.c_str(), &raw, flags, nullptr);
   if (rc != SQLITE_OK) {
     const char* msg = raw != nullptr ? sqlite3_errmsg(raw) : sqlite3_errstr(rc);
+    const std::string err =
+        std::format("sqlite open failed: {}", msg != nullptr ? msg : "unknown");
     if (raw != nullptr) {
-      sqlite3_close(raw);
+      const int close_rc = sqlite3_close_v2(raw);
+      raw = nullptr;
+      if (close_rc != SQLITE_OK) {
+        log::warn("sqlite close_v2 after open failure: {}", sqlite3_errstr(close_rc));
+      }
     }
-    return std::unexpected(
-        Error{std::format("sqlite open failed: {}", msg != nullptr ? msg : "unknown")});
+    return std::unexpected(Error{err});
   }
 
   Database db(raw, std::move(path));

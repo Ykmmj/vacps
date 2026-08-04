@@ -7,7 +7,8 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Unit tests for pure / lightly-mocked script logic.
- * Modules that require full QuickJS ScriptRuntime stay in C++ gtest integration tests.
+ * Full QuickJS Runtime/host behavior is verified by running JavaScript through
+ * the compiled product binary.
  */
 export default defineConfig({
   test: {

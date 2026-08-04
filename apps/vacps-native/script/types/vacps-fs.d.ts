@@ -1,16 +1,15 @@
 /**
  * vacps:fs — filesystem capability (create-at-JS-call).
  *
- * Primary handle API: File (string OpenMode).
+ * Primary handle API: File (string OpenMode, bytes-first I/O).
  * Namespace ops: mkdir / remove / rename / stat / exists / readDirectory.
- * Path allowlist is JS path-guard only (not C++).
+ * Pure I/O: no path allowlist in C++ or the module surface.
  *
- * Content I/O is File only — no free path-level content helpers.
- * OpenMode is a string union; O_* numeric flags are not exported.
+ * Text encode/decode: use global TextEncoder / TextDecoder (not native methods).
  */
 declare module 'vacps:fs' {
   /**
-   * File open mode (mapped to Asio/POSIX open flags inside native File::open).
+   * File open mode (mapped to POSIX open flags inside native File::open).
    * - "read"         — read-only (must exist)
    * - "read-write"   — read-write (must exist)
    * - "write"        — create/truncate write-only
@@ -28,20 +27,13 @@ declare module 'vacps:fs' {
 
   export interface FileOpenOptions {
     mode: FileOpenMode;
-    /** Unix mode bits when creating (default 0o644; pool-backend open only). */
+    /** Unix mode bits when creating (default 0o644). */
     permissions?: number;
-  }
-
-  export interface ReadTextOptions {
-    /** Default 16 MiB; hard reject above 64 MiB. */
-    maxBytes?: number;
   }
 
   export interface MkdirOptions {
     /** false/omit: create last component only; true: create intermediate dirs. */
     recursive?: boolean;
-    /** Unix mode bits when creating (host may ignore if unsupported). */
-    permissions?: number;
   }
 
   export interface RemoveOptions {
@@ -58,6 +50,8 @@ declare module 'vacps:fs' {
     readonly name: string;
     readonly isDir: boolean;
     readonly isFile: boolean;
+    /** True when the directory entry itself is a symlink (lstat). */
+    readonly isSymlink: boolean;
     readonly size: number;
   }
 
@@ -77,18 +71,16 @@ declare module 'vacps:fs' {
   /**
    * Opened file handle. Construct only via File.open (private constructor).
    * I/O is async; host uses Asio random_access_file (io_uring) when available,
-   * otherwise thread_pool + sync I/O. Per-handle ops are serialized (strand);
-   * concurrent read/write/close are safe (ordered, no data races).
+   * otherwise worker-pool POSIX I/O. Per-handle ops are serialized by the JS
+   * module FileHandle operation queue (domain File requires external serialization).
    *
    * Read limits: omitted maxBytes defaults to 16 MiB; values above 64 MiB
-   * are rejected (hard cap).
+   * are rejected (hard cap). Bytes-first — use TextEncoder/TextDecoder for text.
    */
   export class File {
     private constructor();
 
-    /** File.open(path, "read" | …) */
-    static open(path: string, mode: FileOpenMode): Promise<File>;
-    /** File.open(path, { mode, permissions? }) */
+    /** Canonical open: options object only (no mode-string overload). */
     static open(path: string, options: FileOpenOptions): Promise<File>;
 
     readonly path: string;
@@ -97,15 +89,21 @@ declare module 'vacps:fs' {
     readonly closed: boolean;
 
     /** @param maxBytes default 16 MiB; hard reject above 64 MiB */
-    read(maxBytes?: number): Promise<Uint8Array>;
+    read(maxBytes?: number): Promise<ArrayBuffer>;
     /** @param maxBytes hard reject above 64 MiB */
-    readAt(offset: number, maxBytes: number): Promise<Uint8Array>;
-    /** options.maxBytes default 16 MiB; hard reject above 64 MiB */
-    readText(options?: ReadTextOptions): Promise<string>;
+    readAt(offset: number, maxBytes: number): Promise<ArrayBuffer>;
 
+    /**
+     * Sequential / append write. On append-mode handles each underlying
+     * write(2) is atomically positioned by O_APPEND; a multi-partial logical
+     * buffer is not promised as one indivisible append.
+     */
     write(data: ArrayBufferView | ArrayBuffer): Promise<number>;
+    /**
+     * Positioned write. Rejected for append-mode handles
+     * (use write() with O_APPEND positioning per write syscall).
+     */
     writeAt(offset: number, data: ArrayBufferView | ArrayBuffer): Promise<number>;
-    writeText(text: string): Promise<number>;
 
     truncate(size: number): Promise<void>;
     stat(): Promise<FileStat>;

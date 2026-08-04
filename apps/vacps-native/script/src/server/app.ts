@@ -56,6 +56,7 @@ async function runtimeError(reply: Reply, error: unknown, fallback = 400) {
 /**
  * Product HTTP routes — same registration style as apps/vacps/src/server/app.ts
  * (`app.get` / `app.post` / hooks), over the script router (not Fastify).
+ * Invoked from Application's Server onRequest (native event → JS callback).
  */
 export async function createServer(input: CreateServerInput): Promise<App> {
   const app = createApp();

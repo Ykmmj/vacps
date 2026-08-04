@@ -3,9 +3,11 @@
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/readable_pipe.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/writable_pipe.hpp>
 #include <boost/asio/write.hpp>
@@ -14,7 +16,7 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
+#include <cerrno>
 #include <csignal>
 #include <format>
 #include <utility>
@@ -27,7 +29,13 @@ namespace asio = boost::asio;
 
 namespace {
 
-struct new_process_group {
+/**
+ * Child-side pre-exec setup (async-signal-safe only).
+ * - New process group so terminate/timeout can signal the whole tree.
+ * - Restore SIGPIPE=SIG_DFL: ignored dispositions survive exec, and children
+ *   should observe the normal default (terminate) unless they opt out.
+ */
+struct child_pre_exec {
   boost::system::error_code on_exec_setup(
       bp::posix::default_launcher& /*launcher*/,
       const bp::filesystem::path& /*executable*/,
@@ -35,22 +43,50 @@ struct new_process_group {
     if (::setpgid(0, 0) != 0) {
       return boost::system::error_code(errno, boost::system::generic_category());
     }
+    // sigemptyset / sigaction are async-signal-safe on POSIX.
+    struct ::sigaction sa {};
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+    if (::sigemptyset(&sa.sa_mask) != 0) {
+      return boost::system::error_code(errno, boost::system::generic_category());
+    }
+    if (::sigaction(SIGPIPE, &sa, nullptr) != 0) {
+      return boost::system::error_code(errno, boost::system::generic_category());
+    }
     return {};
   }
 };
 
-int parse_signal(std::string_view signal) {
-  std::string s;
-  s.reserve(signal.size());
-  for (char c : signal) {
-    s.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+[[nodiscard]] int system_code_of(const boost::system::error_code& ec) noexcept {
+  if (!ec) {
+    return 0;
   }
-  if (s == "SIGKILL" || s == "KILL") return SIGKILL;
-  if (s == "SIGINT" || s == "INT") return SIGINT;
-  return SIGTERM;
+  if (ec.category() == boost::system::system_category() ||
+      ec.category() == asio::error::get_system_category()) {
+    return ec.value();
+  }
+  if (ec == asio::error::broken_pipe) {
+    return EPIPE;
+  }
+  return 0;
 }
 
 }  // namespace
+
+Result<int> decode_terminate_signal(std::string_view signal) {
+  if (signal.empty() || signal == "SIGTERM") {
+    return SIGTERM;
+  }
+  if (signal == "SIGINT") {
+    return SIGINT;
+  }
+  if (signal == "SIGKILL") {
+    return SIGKILL;
+  }
+  return std::unexpected(Error{std::format(
+      "Process.terminate: unsupported signal '{}' (use SIGTERM, SIGINT, or SIGKILL)",
+      signal)});
+}
 
 struct Process::State {
   asio::any_io_executor ex;
@@ -65,14 +101,12 @@ struct Process::State {
 
   std::string stdout_acc;
   std::string stderr_acc;
-  std::size_t hard_max_out{16 * 1024 * 1024};
-  std::size_t hard_max_err{16 * 1024 * 1024};
+  std::size_t max_out{16 * 1024 * 1024};
+  std::size_t max_err{16 * 1024 * 1024};
   std::size_t produced_out{0};
   std::size_t produced_err{0};
   bool stdout_truncated{false};
   bool stderr_truncated{false};
-  std::size_t stdout_offset{0};
-  std::size_t stderr_offset{0};
 
   bool finished{false};
   bool process_exited{false};
@@ -82,26 +116,40 @@ struct Process::State {
   bool out_eof{false};
   bool err_eof{false};
   bool write_busy{false};
-  bool closed{false};
   bool start_called{false};
+  bool closing_{false};
   ProcessStatus status{ProcessStatus::Created};
   std::int32_t exit_code{0};
 
-  std::vector<std::shared_ptr<asio::steady_timer>> read_waiters;
+  /** Join barrier for wait() and async_close drain. */
+  std::vector<std::shared_ptr<asio::steady_timer>> finish_waiters;
   std::vector<std::shared_ptr<asio::steady_timer>> write_waiters;
   std::shared_ptr<asio::steady_timer> timeout_timer;
   std::shared_ptr<asio::steady_timer> grace_timer;
 
-  void notify_waiters() noexcept {
-    auto waiters = std::move(read_waiters);
-    read_waiters.clear();
-    for (auto& t : waiters) {
-      if (t) t->cancel();
+  void notify_finish_waiters() noexcept {
+    try {
+      auto waiters = std::move(finish_waiters);
+      finish_waiters.clear();
+      for (auto& t : waiters) {
+        if (t) {
+          t->cancel();
+        }
+      }
+    } catch (...) {
     }
-    auto ww = std::move(write_waiters);
-    write_waiters.clear();
-    for (auto& t : ww) {
-      if (t) t->cancel();
+  }
+
+  void notify_write_waiters() noexcept {
+    try {
+      auto ww = std::move(write_waiters);
+      write_waiters.clear();
+      for (auto& t : ww) {
+        if (t) {
+          t->cancel();
+        }
+      }
+    } catch (...) {
     }
   }
 
@@ -111,80 +159,221 @@ struct Process::State {
     }
   }
 
-  void try_finish() noexcept {
-    if (finished) return;
-    if (!process_exited || !out_eof || !err_eof) return;
-    finished = true;
+  /** Cancel pipes/timers without forging exit/eof completion flags. */
+  void cancel_io() noexcept {
+    try {
+      if (timeout_timer) {
+        timeout_timer->cancel();
+      }
+    } catch (...) {
+    }
+    try {
+      if (grace_timer) {
+        grace_timer->cancel();
+      }
+    } catch (...) {
+    }
+    try {
+      if (in_pipe) {
+        boost::system::error_code ec;
+        in_pipe->cancel(ec);
+        in_pipe->close(ec);
+      }
+    } catch (...) {
+    }
     stdin_open = false;
-    if (timed_out) {
-      status = ProcessStatus::TimedOut;
-    } else if (cancelled) {
-      status = ProcessStatus::Cancelled;
-    } else {
-      status = ProcessStatus::Exited;
+    try {
+      if (out_pipe) {
+        boost::system::error_code ec;
+        out_pipe->cancel(ec);
+      }
+    } catch (...) {
     }
-    if (timeout_timer) {
-      timeout_timer->cancel();
-      timeout_timer.reset();
+    try {
+      if (err_pipe) {
+        boost::system::error_code ec;
+        err_pipe->cancel(ec);
+      }
+    } catch (...) {
     }
-    if (grace_timer) {
-      grace_timer->cancel();
-      grace_timer.reset();
-    }
-    notify_waiters();
-  }
-
-  void on_process_exit(std::int32_t code, bool timed, bool cancel) {
-    if (process_exited) return;
-    process_exited = true;
-    exit_code = code;
-    if (timed) timed_out = true;
-    if (cancel) cancelled = true;
-    stdin_open = false;
-    if (timeout_timer) {
-      timeout_timer->cancel();
-      timeout_timer.reset();
-    }
-    try_finish();
-    notify_waiters();
+    notify_write_waiters();
+    notify_finish_waiters();
   }
 
   void clear_buffers() noexcept {
-    if (budget) {
-      budget->sub_buffered(stdout_acc.size() + stderr_acc.size());
+    try {
+      if (budget) {
+        budget->sub_buffered(stdout_acc.size() + stderr_acc.size());
+      }
+      stdout_acc.clear();
+      stderr_acc.clear();
+      // No shrink_to_fit: may run from noexcept dispose/finalize paths.
+    } catch (...) {
     }
-    stdout_acc.clear();
-    stdout_acc.shrink_to_fit();
-    stderr_acc.clear();
-    stderr_acc.shrink_to_fit();
   }
 
-  void force_kill_and_mark_done() noexcept {
-    if (!process_exited && pgid > 0) {
-      kill_group(SIGKILL);
+  void try_finish() noexcept {
+    if (finished) {
+      return;
+    }
+    if (!process_exited || !out_eof || !err_eof) {
+      return;
+    }
+    finished = true;
+    stdin_open = false;
+    // Preserve Closing until finalize_close; otherwise publish terminal status.
+    // No allocation here (noexcept): wait() copies acc while the handle is open.
+    if (!closing_) {
+      if (timed_out) {
+        status = ProcessStatus::TimedOut;
+      } else if (cancelled) {
+        status = ProcessStatus::Cancelled;
+      } else {
+        status = ProcessStatus::Exited;
+      }
+    }
+    try {
+      if (timeout_timer) {
+        timeout_timer->cancel();
+        timeout_timer.reset();
+      }
+    } catch (...) {
+    }
+    try {
+      if (grace_timer) {
+        grace_timer->cancel();
+        grace_timer.reset();
+      }
+    } catch (...) {
+    }
+    notify_finish_waiters();
+    // Finalize close only when an explicit close was requested.
+    if (closing_) {
+      finalize_close();
+    }
+  }
+
+  void on_process_exit(std::int32_t code) noexcept {
+    if (process_exited) {
+      return;
     }
     process_exited = true;
-    out_eof = true;
-    err_eof = true;
-    finished = true;
-    cancelled = true;
+    exit_code = code;
     stdin_open = false;
+    try {
+      if (timeout_timer) {
+        timeout_timer->cancel();
+        timeout_timer.reset();
+      }
+    } catch (...) {
+    }
+    try_finish();
+  }
+
+  /**
+   * Enter close path without waiting.
+   * Created (not started) → Closed immediately.
+   * Running/Exited… → Closing + SIGKILL + cancel I/O; finalize if already drained.
+   * Closing → re-assert kill/cancel.
+   * Closed → no-op.
+   */
+  void begin_close() noexcept {
+    if (status == ProcessStatus::Closed) {
+      return;
+    }
+    if (!start_called) {
+      status = ProcessStatus::Closed;
+      closing_ = false;
+      notify_finish_waiters();
+      notify_write_waiters();
+      return;
+    }
+    if (status == ProcessStatus::Closed) {
+      return;
+    }
+    closing_ = true;
+    if (status != ProcessStatus::Closing && status != ProcessStatus::Closed) {
+      status = ProcessStatus::Closing;
+    }
+    cancelled = true;
+    kill_group(SIGKILL);
+    cancel_io();
+    if (finished) {
+      finalize_close();
+    }
+  }
+
+  void finalize_close() noexcept {
+    if (status == ProcessStatus::Closed) {
+      return;
+    }
     status = ProcessStatus::Closed;
-    if (timeout_timer) {
-      timeout_timer->cancel();
-      timeout_timer.reset();
-    }
-    if (grace_timer) {
-      grace_timer->cancel();
-      grace_timer.reset();
-    }
-    notify_waiters();
+    closing_ = false;
     clear_buffers();
-    proc.reset();
-    out_pipe.reset();
-    err_pipe.reset();
-    in_pipe.reset();
+    try {
+      proc.reset();
+    } catch (...) {
+    }
+    try {
+      out_pipe.reset();
+    } catch (...) {
+    }
+    try {
+      err_pipe.reset();
+    } catch (...) {
+    }
+    try {
+      in_pipe.reset();
+    } catch (...) {
+    }
+    try {
+      timeout_timer.reset();
+    } catch (...) {
+    }
+    try {
+      grace_timer.reset();
+    } catch (...) {
+    }
     slot.reset();
+    notify_finish_waiters();
+    notify_write_waiters();
+  }
+
+  void append_capture(
+      std::string& acc,
+      std::size_t max_bytes,
+      bool& truncated,
+      std::size_t& produced,
+      const char* data,
+      std::size_t n) {
+    produced += n;
+    const auto global_room = budget ? budget->global_buffer_room() : n;
+    const auto entry_room =
+        acc.size() < max_bytes ? max_bytes - acc.size() : std::size_t{0};
+    const auto room = std::min(entry_room, global_room);
+    if (room > 0) {
+      const auto take = std::min(n, room);
+      acc.append(data, take);
+      if (budget) {
+        budget->add_buffered(take);
+      }
+    }
+    if (n > room) {
+      truncated = true;
+    }
+  }
+
+  asio::awaitable<void> wait_until_finished_or_closed() {
+    while (!finished && status != ProcessStatus::Closed) {
+      auto gate = std::make_shared<asio::steady_timer>(ex);
+      gate->expires_at(asio::steady_timer::time_point::max());
+      finish_waiters.push_back(gate);
+      if (finished || status == ProcessStatus::Closed) {
+        gate->cancel();
+      }
+      co_await gate->async_wait(asio::as_tuple(asio::use_awaitable));
+    }
+    co_return;
   }
 };
 
@@ -198,8 +387,8 @@ Process::Process(
       state_(std::make_shared<State>()) {
   state_->ex = std::move(executor);
   state_->budget = std::move(budget);
-  state_->hard_max_out = opts_.hard_max_stdout;
-  state_->hard_max_err = opts_.hard_max_stderr;
+  state_->max_out = opts_.max_stdout_bytes;
+  state_->max_err = opts_.max_stderr_bytes;
 }
 
 Process::~Process() {
@@ -207,43 +396,37 @@ Process::~Process() {
 }
 
 void Process::dispose() noexcept {
-  if (!state_ || state_->closed) {
+  auto st = state_;
+  if (!st) {
     return;
   }
-  state_->closed = true;
-  state_->status = ProcessStatus::Closing;
-  state_->force_kill_and_mark_done();
-  state_->status = ProcessStatus::Closed;
-}
-
-VoidResult Process::ensure_live(std::string_view op) const {
-  if (!state_ || state_->closed) {
-    return std::unexpected(Error{std::string(op) + ": process is closed"});
-  }
-  if (!state_->start_called || !state_->proc) {
-    if (state_->start_called && state_->process_exited) {
-      return {};  // started and exited is live for read/wait of buffers
+  // Any-thread safe: only post onto the owner executor. Do not read/write
+  // mutable State fields on the calling thread (finalizer / stop_callback).
+  try {
+    // Post keeps a State ref until the handler runs; drain/reap ops retain further.
+    asio::post(st->ex, [st]() noexcept {
+      try {
+        st->begin_close();
+      } catch (...) {
+      }
+    });
+  } catch (...) {
+    // Last resort if the executor cannot accept work.
+    try {
+      st->kill_group(SIGKILL);
+      st->cancel_io();
+    } catch (...) {
     }
-    if (!state_->start_called) {
-      return std::unexpected(Error{std::string(op) + ": process not started"});
-    }
   }
-  return {};
 }
 
 bool Process::closed() const noexcept {
-  return !state_ || state_->closed;
+  return !state_ || state_->status == ProcessStatus::Closed;
 }
 
 bool Process::started() const noexcept {
-  return state_ && state_->start_called && !state_->closed;
-}
-
-bool Process::running() const noexcept {
-  if (!state_ || state_->closed || !state_->start_called) {
-    return false;
-  }
-  return !state_->process_exited && !state_->finished;
+  return state_ && state_->start_called &&
+         state_->status != ProcessStatus::Closed;
 }
 
 ProcessStatus Process::status() const noexcept {
@@ -253,15 +436,11 @@ ProcessStatus Process::status() const noexcept {
   return state_->status;
 }
 
-std::optional<std::int32_t> Process::pid() const noexcept {
-  if (!state_ || state_->closed || !state_->start_called || state_->pgid <= 0) {
-    return std::nullopt;
-  }
-  return static_cast<std::int32_t>(state_->pgid);
-}
-
 asio::awaitable<VoidResult> Process::start() {
-  if (!state_ || state_->closed) {
+  if (!state_) {
+    co_return std::unexpected(Error{"Process.start: process is closed"});
+  }
+  if (state_->status == ProcessStatus::Closed || state_->closing_) {
     co_return std::unexpected(Error{"Process.start: process is closed"});
   }
   if (state_->start_called) {
@@ -282,6 +461,31 @@ asio::awaitable<VoidResult> Process::start() {
   }
   state_->slot = ProcessSlot{state_->budget};
 
+  auto fail_spawn = [st = state_](std::string msg) -> VoidResult {
+    // Kill any partially launched child; release slot; allow retry.
+    if (st->pgid > 0) {
+      st->kill_group(SIGKILL);
+    }
+    if (st->proc) {
+      try {
+        st->proc.reset();
+      } catch (...) {
+      }
+    }
+    try {
+      st->out_pipe.reset();
+      st->err_pipe.reset();
+      st->in_pipe.reset();
+    } catch (...) {
+    }
+    st->pgid = 0;
+    st->start_called = false;
+    st->stdin_open = false;
+    st->slot.reset();
+    st->status = ProcessStatus::Created;
+    return std::unexpected(Error{std::move(msg)});
+  };
+
   try {
     state_->out_pipe = std::make_shared<asio::readable_pipe>(state_->ex);
     state_->err_pipe = std::make_shared<asio::readable_pipe>(state_->ex);
@@ -300,16 +504,18 @@ asio::awaitable<VoidResult> Process::start() {
             state_->ex,
             exe,
             args,
-            bp::process_stdio{*state_->in_pipe, *state_->out_pipe, *state_->err_pipe},
+            bp::process_stdio{
+                *state_->in_pipe, *state_->out_pipe, *state_->err_pipe},
             bp::process_start_dir(opts_.cwd),
-            new_process_group{});
+            child_pre_exec{});
       }
       return bp::process(
           state_->ex,
           exe,
           args,
-          bp::process_stdio{*state_->in_pipe, *state_->out_pipe, *state_->err_pipe},
-          new_process_group{});
+          bp::process_stdio{
+              *state_->in_pipe, *state_->out_pipe, *state_->err_pipe},
+          child_pre_exec{});
     }();
 
     state_->pgid = proc.id();
@@ -330,46 +536,43 @@ asio::awaitable<VoidResult> Process::start() {
       st->timeout_timer = std::make_shared<asio::steady_timer>(st->ex);
       st->timeout_timer->expires_after(opts_.timeout);
       st->timeout_timer->async_wait([st](const boost::system::error_code& ec) {
-        if (ec || !st || st->finished || st->process_exited || st->closed) return;
+        if (ec || !st || st->finished || st->process_exited ||
+            st->status == ProcessStatus::Closed) {
+          return;
+        }
         st->timed_out = true;
         st->kill_group(SIGKILL);
       });
     }
 
-    // Drain stdout
+    // Drain stdout — local pipe hold so cleanup cannot free under this op.
     boost::asio::co_spawn(
         st->ex,
         [st]() -> asio::awaitable<void> {
+          auto pipe = st->out_pipe;
+          if (!pipe) {
+            st->out_eof = true;
+            st->try_finish();
+            co_return;
+          }
           std::array<char, 4096> buf{};
-          while (st && st->out_pipe && !st->closed) {
+          for (;;) {
             boost::system::error_code ec;
-            auto n = co_await st->out_pipe->async_read_some(
-                asio::buffer(buf), asio::redirect_error(asio::use_awaitable, ec));
+            auto n = co_await pipe->async_read_some(
+                asio::buffer(buf),
+                asio::redirect_error(asio::use_awaitable, ec));
             if (ec || n == 0) {
               st->out_eof = true;
               st->try_finish();
-              st->notify_waiters();
               co_return;
             }
-            st->produced_out += n;
-            const auto global_room =
-                st->budget ? st->budget->global_buffer_room() : n;
-            const auto entry_room =
-                st->stdout_acc.size() < st->hard_max_out
-                    ? st->hard_max_out - st->stdout_acc.size()
-                    : std::size_t{0};
-            const auto room = std::min(entry_room, global_room);
-            if (room > 0) {
-              const auto take = std::min(n, room);
-              st->stdout_acc.append(buf.data(), take);
-              if (st->budget) {
-                st->budget->add_buffered(take);
-              }
-            }
-            if (n > room) {
-              st->stdout_truncated = true;
-            }
-            st->notify_waiters();
+            st->append_capture(
+                st->stdout_acc,
+                st->max_out,
+                st->stdout_truncated,
+                st->produced_out,
+                buf.data(),
+                n);
           }
         },
         boost::asio::detached);
@@ -378,123 +581,66 @@ asio::awaitable<VoidResult> Process::start() {
     boost::asio::co_spawn(
         st->ex,
         [st]() -> asio::awaitable<void> {
+          auto pipe = st->err_pipe;
+          if (!pipe) {
+            st->err_eof = true;
+            st->try_finish();
+            co_return;
+          }
           std::array<char, 4096> buf{};
-          while (st && st->err_pipe && !st->closed) {
+          for (;;) {
             boost::system::error_code ec;
-            auto n = co_await st->err_pipe->async_read_some(
-                asio::buffer(buf), asio::redirect_error(asio::use_awaitable, ec));
+            auto n = co_await pipe->async_read_some(
+                asio::buffer(buf),
+                asio::redirect_error(asio::use_awaitable, ec));
             if (ec || n == 0) {
               st->err_eof = true;
               st->try_finish();
-              st->notify_waiters();
               co_return;
             }
-            st->produced_err += n;
-            const auto global_room =
-                st->budget ? st->budget->global_buffer_room() : n;
-            const auto entry_room =
-                st->stderr_acc.size() < st->hard_max_err
-                    ? st->hard_max_err - st->stderr_acc.size()
-                    : std::size_t{0};
-            const auto room = std::min(entry_room, global_room);
-            if (room > 0) {
-              const auto take = std::min(n, room);
-              st->stderr_acc.append(buf.data(), take);
-              if (st->budget) {
-                st->budget->add_buffered(take);
-              }
-            }
-            if (n > room) {
-              st->stderr_truncated = true;
-            }
-            st->notify_waiters();
+            st->append_capture(
+                st->stderr_acc,
+                st->max_err,
+                st->stderr_truncated,
+                st->produced_err,
+                buf.data(),
+                n);
           }
         },
         boost::asio::detached);
 
-    // Wait for exit
+    // Wait for real child reap (async_execute owns the process object).
     boost::asio::co_spawn(
         st->ex,
         [st]() -> asio::awaitable<void> {
-          if (!st->proc) co_return;
+          if (!st->proc) {
+            st->on_process_exit(-1);
+            co_return;
+          }
+          auto child = std::move(*st->proc);
           auto [ec, code] = co_await bp::async_execute(
-              std::move(*st->proc), asio::as_tuple(asio::use_awaitable));
+              std::move(child), asio::as_tuple(asio::use_awaitable));
           (void)ec;
-          const bool timed = st->timed_out;
-          const bool cancelled = st->cancelled;
-          if (timed) {
+          if (st->timed_out) {
             st->kill_group(SIGKILL);
           }
-          st->on_process_exit(code, timed, cancelled);
+          st->on_process_exit(code);
           co_return;
         },
         boost::asio::detached);
 
     co_return success();
   } catch (const boost::system::system_error& e) {
-    state_->slot.reset();
-    state_->start_called = false;
-    state_->status = ProcessStatus::Created;
-    co_return std::unexpected(Error{std::format("process.start: {}", e.what())});
+    co_return fail_spawn(std::format("process.start: {}", e.what()));
   } catch (const std::exception& e) {
-    state_->slot.reset();
-    state_->start_called = false;
-    state_->status = ProcessStatus::Created;
-    co_return std::unexpected(Error{std::format("process.start: {}", e.what())});
+    co_return fail_spawn(std::format("process.start: {}", e.what()));
+  } catch (...) {
+    co_return fail_spawn("process.start: unknown exception");
   }
 }
 
-asio::awaitable<Result<ReadResult>> Process::read(
-    std::string_view stream,
-    std::chrono::milliseconds wait,
-    std::size_t max_bytes) {
-  if (!state_ || state_->closed) {
-    co_return std::unexpected(Error{"Process.read: process is closed"});
-  }
-  if (!state_->start_called) {
-    co_return std::unexpected(Error{"Process.read: process not started"});
-  }
-  const bool want_stdout = stream == "stdout";
-  if (!want_stdout && stream != "stderr") {
-    co_return std::unexpected(Error{"Process.read: stream must be stdout or stderr"});
-  }
-
-  auto& acc = want_stdout ? state_->stdout_acc : state_->stderr_acc;
-  auto& offset = want_stdout ? state_->stdout_offset : state_->stderr_offset;
-  auto stream_eof = [&]() {
-    return want_stdout ? state_->out_eof : state_->err_eof;
-  };
-
-  auto has_progress = [&]() {
-    return acc.size() > offset || state_->finished ||
-           (stream_eof() && offset >= acc.size());
-  };
-
-  if (wait.count() > 0 && !has_progress()) {
-    auto timer = std::make_shared<asio::steady_timer>(state_->ex);
-    timer->expires_after(wait);
-    state_->read_waiters.push_back(timer);
-    auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
-    (void)ec;
-    auto& w = state_->read_waiters;
-    w.erase(std::remove(w.begin(), w.end(), timer), w.end());
-  }
-
-  ReadResult out;
-  const auto maxb = max_bytes > 0 ? max_bytes : 65'536;
-  if (offset < acc.size()) {
-    const auto n = std::min(maxb, acc.size() - offset);
-    out.data = acc.substr(offset, n);
-    offset += n;
-  }
-  out.eof = state_->finished || (stream_eof() && offset >= acc.size());
-  co_return out;
-}
-
-asio::awaitable<Result<std::size_t>> Process::write(
-    std::string data,
-    WriteOptions opts) {
-  if (!state_ || state_->closed) {
+asio::awaitable<Result<std::size_t>> Process::write(std::string data) {
+  if (!state_ || state_->status == ProcessStatus::Closed || state_->closing_) {
     co_return std::unexpected(Error{"Process.write: process is closed"});
   }
   if (!state_->start_called) {
@@ -502,30 +648,27 @@ asio::awaitable<Result<std::size_t>> Process::write(
   }
 
   while (state_->write_busy) {
-    if (state_->finished || !state_->stdin_open || state_->closed) {
+    if (state_->finished || !state_->stdin_open ||
+        state_->status == ProcessStatus::Closed || state_->closing_) {
       co_return std::unexpected(Error{"Process.write: stdin is not available"});
     }
     auto waiter = std::make_shared<asio::steady_timer>(state_->ex);
     waiter->expires_at(asio::steady_timer::time_point::max());
     state_->write_waiters.push_back(waiter);
-    auto [wec] = co_await waiter->async_wait(asio::as_tuple(asio::use_awaitable));
+    auto [wec] =
+        co_await waiter->async_wait(asio::as_tuple(asio::use_awaitable));
     (void)wec;
     auto& w = state_->write_waiters;
     w.erase(std::remove(w.begin(), w.end(), waiter), w.end());
-    if (state_->finished || state_->closed) {
+    if (state_->finished || state_->status == ProcessStatus::Closed ||
+        state_->closing_) {
       co_return std::unexpected(Error{"Process.write: process finished"});
     }
   }
 
-  if (state_->finished || !state_->stdin_open || !state_->in_pipe) {
+  if (state_->finished || !state_->stdin_open || !state_->in_pipe ||
+      state_->closing_ || state_->status == ProcessStatus::Closed) {
     co_return std::unexpected(Error{"Process.write: stdin is not available"});
-  }
-
-  if (data.size() > opts.max_bytes) {
-    co_return std::unexpected(Error{std::format(
-        "Process.write: payload {} bytes exceeds max_bytes {}",
-        data.size(),
-        opts.max_bytes)});
   }
 
   state_->write_busy = true;
@@ -534,135 +677,131 @@ asio::awaitable<Result<std::size_t>> Process::write(
     ~Guard() {
       if (s) {
         s->write_busy = false;
-        s->notify_waiters();
+        s->notify_write_waiters();
       }
     }
   } guard{state_.get()};
 
-  std::shared_ptr<asio::steady_timer> write_timer;
-  if (opts.timeout.count() > 0) {
-    write_timer = std::make_shared<asio::steady_timer>(state_->ex);
-    write_timer->expires_after(opts.timeout);
-    auto st = state_;
-    write_timer->async_wait([st](const boost::system::error_code& ec) {
-      if (ec || !st || !st->in_pipe || !st->stdin_open) return;
-      boost::system::error_code cancel_ec;
-      st->in_pipe->cancel(cancel_ec);
-    });
+  // Local hold so State cleanup cannot free the pipe under this write.
+  auto pipe = state_->in_pipe;
+  if (!pipe || !state_->stdin_open) {
+    co_return std::unexpected(Error{"Process.write: stdin is not available"});
   }
 
-  std::size_t written = 0;
   try {
-    if (!data.empty()) {
-      auto [ec, n] = co_await asio::async_write(
-          *state_->in_pipe,
-          asio::buffer(data),
-          asio::as_tuple(asio::use_awaitable));
-      if (write_timer) {
-        write_timer->cancel();
-        write_timer.reset();
-      }
-      if (ec) {
-        if (ec == asio::error::operation_aborted) {
-          co_return std::unexpected(Error{"Process.write: timed out or cancelled"});
-        }
+    if (data.empty()) {
+      co_return std::size_t{0};
+    }
+    auto [ec, n] = co_await asio::async_write(
+        *pipe, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
+    if (ec) {
+      if (ec == asio::error::operation_aborted) {
         co_return std::unexpected(
-            Error{std::format("Process.write: {}", ec.message())});
+            Error{"Process.write: cancelled", "write", 0});
       }
-      written = n;
-    } else if (write_timer) {
-      write_timer->cancel();
-      write_timer.reset();
+      // Closed child stdin → EPIPE / broken_pipe (parent must not die: SIGPIPE
+      // is ignored process-wide via bootstrap::initialize_process).
+      co_return std::unexpected(Error{
+          std::format("Process.write: {}", ec.message()),
+          "write",
+          system_code_of(ec)});
     }
-
-    if (opts.close_stdin && state_->in_pipe && state_->stdin_open) {
-      boost::system::error_code close_ec;
-      state_->in_pipe->close(close_ec);
-      state_->stdin_open = false;
-    }
-    co_return written;
+    co_return n;
   } catch (const std::exception& e) {
-    if (write_timer) write_timer->cancel();
-    co_return std::unexpected(Error{std::format("Process.write: {}", e.what())});
+    co_return std::unexpected(
+        Error{std::format("Process.write: {}", e.what())});
   }
 }
 
 asio::awaitable<Result<RunResult>> Process::wait() {
-  if (!state_ || state_->closed) {
+  if (!state_ || state_->status == ProcessStatus::Closed) {
     co_return std::unexpected(Error{"Process.wait: process is closed"});
   }
   if (!state_->start_called) {
     co_return std::unexpected(Error{"Process.wait: process not started"});
   }
 
-  while (!state_->finished && !state_->closed) {
-    auto timer = std::make_shared<asio::steady_timer>(state_->ex);
-    timer->expires_after(std::chrono::milliseconds{60'000});
-    state_->read_waiters.push_back(timer);
-    auto [ec] = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
-    (void)ec;
-    auto& w = state_->read_waiters;
-    w.erase(std::remove(w.begin(), w.end(), timer), w.end());
-    // Also wake on process_exited + drain — keep waiting until finished for
-    // full buffers, but allow building result once finished.
+  if (!state_->finished) {
+    co_await state_->wait_until_finished_or_closed();
   }
 
+  // close() releases captured buffers; an outstanding/late wait fails honestly.
+  if (state_->status == ProcessStatus::Closed) {
+    co_return std::unexpected(Error{"Process.wait: process is closed"});
+  }
+  if (!state_->finished) {
+    co_return std::unexpected(
+        Error{"Process.wait: process closed before completion"});
+  }
+
+  // Copy while the handle is still open (async_close clears acc).
   RunResult r;
   r.exit_code = state_->exit_code;
   r.timed_out = state_->timed_out;
-  if (state_->timed_out) {
-    r.reason = ExitReason::TimedOut;
-  } else if (state_->cancelled) {
-    r.reason = ExitReason::Cancelled;
-  } else {
-    r.reason = ExitReason::Exited;
-  }
   r.stdout_str = state_->stdout_acc;
   r.stderr_str = state_->stderr_acc;
-  r.stdout_produced = state_->produced_out;
-  r.stderr_produced = state_->produced_err;
-  r.stdout_truncated = state_->stdout_truncated;
-  r.stderr_truncated = state_->stderr_truncated;
   co_return r;
 }
 
-Result<bool> Process::terminate(
-    std::string_view signal,
-    std::chrono::milliseconds grace) {
-  if (!state_ || state_->closed) {
+VoidResult Process::terminate(int signal) {
+  if (!state_ || state_->status == ProcessStatus::Closed || state_->closing_) {
     return std::unexpected(Error{"Process.terminate: process is closed"});
   }
   if (!state_->start_called) {
     return std::unexpected(Error{"Process.terminate: process not started"});
   }
   if (state_->finished || state_->process_exited) {
-    return false;
+    return success();
   }
 
   state_->cancelled = true;
-  const int sig = parse_signal(signal);
-  state_->kill_group(sig);
-  if (sig != SIGKILL && grace.count() > 0) {
+  state_->kill_group(signal);
+  if (signal != SIGKILL) {
+    // Fire-and-forget escalate; does not delay this call.
     auto st = state_;
     st->grace_timer = std::make_shared<asio::steady_timer>(st->ex);
-    st->grace_timer->expires_after(grace);
+    st->grace_timer->expires_after(std::chrono::milliseconds{3000});
     st->grace_timer->async_wait([st](const boost::system::error_code& ec) {
-      if (ec || !st || st->finished || st->closed) return;
+      if (ec || !st || st->finished || st->status == ProcessStatus::Closed) {
+        return;
+      }
       st->kill_group(SIGKILL);
     });
-  } else if (sig != SIGKILL && grace.count() <= 0) {
-    state_->kill_group(SIGKILL);
   }
-  state_->notify_waiters();
-  return true;
+  state_->notify_finish_waiters();
+  return success();
 }
 
-VoidResult Process::close() {
-  if (!state_ || state_->closed) {
-    return {};
+asio::awaitable<VoidResult> Process::async_close() {
+  auto st = state_;
+  if (!st) {
+    co_return success();
   }
-  dispose();
-  return {};
+
+  // Drain barrier must not inherit caller cancellation (same as Server.close).
+  co_await asio::this_coro::reset_cancellation_state(
+      asio::disable_cancellation());
+
+  if (st->status == ProcessStatus::Closed) {
+    co_return success();
+  }
+
+  st->begin_close();
+
+  while (st->status != ProcessStatus::Closed) {
+    if (st->finished) {
+      st->finalize_close();
+      break;
+    }
+    auto gate = std::make_shared<asio::steady_timer>(st->ex);
+    gate->expires_at(asio::steady_timer::time_point::max());
+    st->finish_waiters.push_back(gate);
+    if (st->status == ProcessStatus::Closed || st->finished) {
+      gate->cancel();
+    }
+    co_await gate->async_wait(asio::as_tuple(asio::use_awaitable));
+  }
+  co_return success();
 }
 
 }  // namespace vacps::process
