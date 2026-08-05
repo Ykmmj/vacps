@@ -138,9 +138,7 @@ describe('Agent request signatures (v2)', () => {
   });
 
   it('agrees on request target normalization (pathname + search, no fragment)', () => {
-    expect(requestTargetOf('https://agent.example/fs/read?path=a#frag')).toBe(
-      '/fs/read?path=a',
-    );
+    expect(requestTargetOf('https://agent.example/fs/read?path=a#frag')).toBe('/fs/read?path=a');
     expect(workerRequestTargetOf('https://agent.example/fs/read?path=a#frag')).toBe(
       '/fs/read?path=a',
     );

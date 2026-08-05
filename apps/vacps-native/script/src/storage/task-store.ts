@@ -405,8 +405,7 @@ export class TaskStore {
       const raw = row['result_json']
         ? (JSON.parse(String(row['result_json'])) as unknown)
         : undefined;
-      const r =
-        raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      const r = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
       const expiredSummary = {
         kind: 'process',
         exit_code: r['exitCode'] ?? r['exit_code'] ?? null,

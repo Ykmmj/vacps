@@ -36,8 +36,7 @@ export function resolveUnderWorkspace(workspace: string, filePath: string): stri
     const joined = root === '/' ? `/${filePath}` : `${root}/${filePath}`;
     resolved = normalizeAbsolutePath(joined);
   }
-  const underRoot =
-    root === '/' || resolved === root || resolved.startsWith(`${root}/`);
+  const underRoot = root === '/' || resolved === root || resolved.startsWith(`${root}/`);
   if (!underRoot) {
     throw invalidPath('path escapes workspace.');
   }

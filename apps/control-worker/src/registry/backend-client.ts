@@ -14,8 +14,7 @@ import { createControlPlaneSignatureHeaders } from '../security/request-signatur
  * Accepts Backend (`id`) or registration-shaped (`backendId`) targets.
  */
 export type BackendRequestTarget =
-  | Pick<Backend, 'id' | 'baseUrl'>
-  | { backendId: string; baseUrl: string };
+  Pick<Backend, 'id' | 'baseUrl'> | { backendId: string; baseUrl: string };
 
 /** Contract: Narrow — caller supplies a typed BackendRequestTarget discriminant. */
 function backendAudienceId(backend: BackendRequestTarget): string {
@@ -122,17 +121,11 @@ export class BackendClient {
     });
   }
 
-  async editFile(
-    backend: BackendRequestTarget,
-    body: Record<string, unknown>,
-  ): Promise<unknown> {
+  async editFile(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/edit', { method: 'POST', body: JSON.stringify(body) });
   }
 
-  async writeFile(
-    backend: BackendRequestTarget,
-    body: Record<string, unknown>,
-  ): Promise<unknown> {
+  async writeFile(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/write', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -140,10 +133,7 @@ export class BackendClient {
     });
   }
 
-  async applyPatch(
-    backend: BackendRequestTarget,
-    body: Record<string, unknown>,
-  ): Promise<unknown> {
+  async applyPatch(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/apply_patch', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -151,17 +141,11 @@ export class BackendClient {
     });
   }
 
-  async moveFile(
-    backend: BackendRequestTarget,
-    body: Record<string, unknown>,
-  ): Promise<unknown> {
+  async moveFile(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/move', { method: 'POST', body: JSON.stringify(body) });
   }
 
-  async deleteFile(
-    backend: BackendRequestTarget,
-    body: Record<string, unknown>,
-  ): Promise<unknown> {
+  async deleteFile(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/delete', { method: 'POST', body: JSON.stringify(body) });
   }
 
@@ -185,10 +169,7 @@ export class BackendClient {
     });
   }
 
-  async execShell(
-    backend: BackendRequestTarget,
-    body: Record<string, unknown>,
-  ): Promise<unknown> {
+  async execShell(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     const yieldMs = typeof body.yield_time_ms === 'number' ? body.yield_time_ms : 10_000;
     return this.request(backend, '/exec/shell', {
       method: 'POST',
@@ -278,11 +259,7 @@ export class BackendClient {
     await this.request(backend, `/schedulers/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
-  async runSchedule(
-    backend: BackendRequestTarget,
-    id: string,
-    task: unknown,
-  ): Promise<unknown> {
+  async runSchedule(backend: BackendRequestTarget, id: string, task: unknown): Promise<unknown> {
     return this.request(backend, `/schedulers/${encodeURIComponent(id)}/run`, {
       method: 'POST',
       body: JSON.stringify({ task }),

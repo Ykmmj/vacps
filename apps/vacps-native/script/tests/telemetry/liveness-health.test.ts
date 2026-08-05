@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  buildLivenessHealth,
-  deriveLiveHealthState,
-} from '../../src/telemetry/liveness-health';
+import { buildLivenessHealth, deriveLiveHealthState } from '../../src/telemetry/liveness-health';
 
 describe('deriveLiveHealthState', () => {
   it('reports ok and worker running only when fully ready with both loops', () => {

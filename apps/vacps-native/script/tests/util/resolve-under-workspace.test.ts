@@ -44,7 +44,10 @@ describe('resolveUnderWorkspace', () => {
 
   it('rejects prefix-twin paths (workspace is not a string prefix alone)', () => {
     expectInvalidPath(() => resolveUnderWorkspace(ws, '/tmp/ws2/x'), /escapes workspace/);
-    expectInvalidPath(() => resolveUnderWorkspace('/tmp/ws', '/tmp/ws-extra/f'), /escapes workspace/);
+    expectInvalidPath(
+      () => resolveUnderWorkspace('/tmp/ws', '/tmp/ws-extra/f'),
+      /escapes workspace/,
+    );
   });
 
   it('treats workspace root itself as in-scope', () => {

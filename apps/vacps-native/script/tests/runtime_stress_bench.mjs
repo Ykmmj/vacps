@@ -237,7 +237,7 @@ async function httpBenchmarks() {
     latency.sort((left, right) => left - right);
     assert(peers.size <= 16, `per-origin connection cap exceeded: ${peers.size}`);
     log.info(
-      `[latency] HTTP loopback ms: p50=${percentile(latency, 0.50)} ` +
+      `[latency] HTTP loopback ms: p50=${percentile(latency, 0.5)} ` +
         `p95=${percentile(latency, 0.95)} p99=${percentile(latency, 0.99)}`,
     );
 

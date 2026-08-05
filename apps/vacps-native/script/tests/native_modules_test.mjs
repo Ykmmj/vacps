@@ -75,10 +75,7 @@ await test('host.nowMs', () => {
 await test('host.platform', () => {
   const p = host.platform();
   assert(typeof p === 'string' && p.length > 0, 'platform non-empty string');
-  assert(
-    /^(linux|darwin)-(x86_64|aarch64)-(musl|gnu|unknown)$/.test(p),
-    'platform format: ' + p,
-  );
+  assert(/^(linux|darwin)-(x86_64|aarch64)-(musl|gnu|unknown)$/.test(p), 'platform format: ' + p);
 });
 
 // ── vacps:log ─────────────────────────────────────────────────────
@@ -484,15 +481,12 @@ await test('http.request rejects bad url', async () => {
 });
 
 await test('http.request uses one absolute timeout and recovers', async () => {
-  const server = new http.Server(
-    { host: '127.0.0.1', port: 0 },
-    async (request) => {
-      if (request.url === '/slow') {
-        await process.run('/bin/sleep', ['0.1']);
-      }
-      return { status: 200, body: request.url };
-    },
-  );
+  const server = new http.Server({ host: '127.0.0.1', port: 0 }, async (request) => {
+    if (request.url === '/slow') {
+      await process.run('/bin/sleep', ['0.1']);
+    }
+    return { status: 200, body: request.url };
+  });
 
   try {
     const address = await server.listen();

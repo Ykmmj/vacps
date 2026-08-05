@@ -77,12 +77,10 @@ describe('createInboundRequestAdapter', () => {
   });
 
   it('falls back when x-request-id is empty or whitespace-only', () => {
-    expect(adapt(inbound({ url: '/', headers: { 'x-request-id': '' } })).requestId).toBe(
-      'req-1',
+    expect(adapt(inbound({ url: '/', headers: { 'x-request-id': '' } })).requestId).toBe('req-1');
+    expect(adapt(inbound({ url: '/', headers: { 'x-request-id': '   ' } })).requestId).toBe(
+      'req-2',
     );
-    expect(
-      adapt(inbound({ url: '/', headers: { 'x-request-id': '   ' } })).requestId,
-    ).toBe('req-2');
   });
 
   it('isolates sequence across adapter instances', () => {

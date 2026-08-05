@@ -36,20 +36,20 @@ src/
 └── main.cpp
 ```
 
-| 层 | 类型 | 职责 |
-| --- | --- | --- |
-| 入口 | `main.cpp` → `vacps-agent` | argv→`parse_command_line`；help/version 直接退出；run → process_init → `Application(Options)` → `initialize` + `run()` |
-| Host | `parse_command_line`、`Application`、`EntryModule` | CLI→Options；组合 Runtime、catalog、信号、入口 ESM |
-| 门面 | `vacps::Runtime` | 生命周期、post_to_owner、evaluate、await_value、executors、稳定能力引用 |
-| 实现 | `Runtime::Impl` | 主 `io_context`、worker pool、phase、job pump、关机、能力对象 |
-| 引擎 | `JsEngine` | `JSRuntime`/`JSContext`；专属 mimalloc backing heap；求值与 pending job |
-| 能力 | `Runtime::Script` / `Async` / `Callbacks` | 模块求值；Promise / run_blocking；native→JS callback await |
-| 同步 binding | 当前 QuickJS turn 内直接执行 | `create_function` / ClassBuilder；无 per-callback Runtime 门闸 |
-| Promise | `PromiseCapability`、`Runtime::await_value` | 正向 native Promise；反向 JS thenable（Callbacks 复用此路径） |
-| 原语 | `qjs::OwnedValue`、`ScopedCString` | 唯一 JS 值 / CString 拥有层 |
-| DSL | `ModuleBuilder`、`ClassBuilder`、`create_function` / `create_async_function` | 直接使用 `qjs::OwnedValue` |
-| 模块 | `ModuleCatalog` + crypto/host/log/timer/store/fs/http/process | 见上 |
-| 域库 | crypto / url / text / fs / http / … | 纯 C++；未进 catalog 则无 JS 导出 |
+| 层           | 类型                                                                         | 职责                                                                                                                   |
+| ------------ | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 入口         | `main.cpp` → `vacps-agent`                                                   | argv→`parse_command_line`；help/version 直接退出；run → process_init → `Application(Options)` → `initialize` + `run()` |
+| Host         | `parse_command_line`、`Application`、`EntryModule`                           | CLI→Options；组合 Runtime、catalog、信号、入口 ESM                                                                     |
+| 门面         | `vacps::Runtime`                                                             | 生命周期、post_to_owner、evaluate、await_value、executors、稳定能力引用                                                |
+| 实现         | `Runtime::Impl`                                                              | 主 `io_context`、worker pool、phase、job pump、关机、能力对象                                                          |
+| 引擎         | `JsEngine`                                                                   | `JSRuntime`/`JSContext`；专属 mimalloc backing heap；求值与 pending job                                                |
+| 能力         | `Runtime::Script` / `Async` / `Callbacks`                                    | 模块求值；Promise / run_blocking；native→JS callback await                                                             |
+| 同步 binding | 当前 QuickJS turn 内直接执行                                                 | `create_function` / ClassBuilder；无 per-callback Runtime 门闸                                                         |
+| Promise      | `PromiseCapability`、`Runtime::await_value`                                  | 正向 native Promise；反向 JS thenable（Callbacks 复用此路径）                                                          |
+| 原语         | `qjs::OwnedValue`、`ScopedCString`                                           | 唯一 JS 值 / CString 拥有层                                                                                            |
+| DSL          | `ModuleBuilder`、`ClassBuilder`、`create_function` / `create_async_function` | 直接使用 `qjs::OwnedValue`                                                                                             |
+| 模块         | `ModuleCatalog` + crypto/host/log/timer/store/fs/http/process                | 见上                                                                                                                   |
+| 域库         | crypto / url / text / fs / http / …                                          | 纯 C++；未进 catalog 则无 JS 导出                                                                                      |
 
 依赖：Runtime 与 Binding 均直接依赖 `vacps::qjs`。禁止在 run_blocking / worker 边界携带 JS 拥有 RAII。
 
@@ -134,34 +134,34 @@ C++ 进程旋钮**仅**来自 CLI（`host::parse_command_line` → `Application:
 
 ## 4. 有意未做
 
-| 项 | 说明 |
-| --- | --- |
-| `napi_compat` / 完整 N-API v9 / Node addon 兼容 | **不存在**；surface 保持 QuickJS-native binding DSL |
-| HTTP product routes / JSON 错误体 | 属 script；native `vacps:http` 仅为 binary transport |
+| 项                                              | 说明                                                 |
+| ----------------------------------------------- | ---------------------------------------------------- |
+| `napi_compat` / 完整 N-API v9 / Node addon 兼容 | **不存在**；surface 保持 QuickJS-native binding DSL  |
+| HTTP product routes / JSON 错误体               | 属 script；native `vacps:http` 仅为 binary transport |
 
 已编译 catalog：`vacps:crypto` / `host` / `log` / `timer` / `store` / `fs` / `http` / `process`。以 `CMakeLists.txt` 与 `ModuleCatalog` 构造函数为准。
 
 ## 5. 所有权与线程
 
-| 规则 | 内容 |
-| --- | --- |
-| JS 线程 | `initialize` 成功后的调用线程；之后所有 QuickJS API 仅此线程 |
-| Runtime 析构 | owner 建立后必须在 owner 线程销毁 |
-| QuickJS allocator | `JsEngine` 独占 mimalloc heap；outlive `JSRuntime`；不使用 `mi_heap_destroy` 隐藏 live allocation |
-| C++ allocator | 唯一 bootstrap TU 覆盖全局 `new/delete`（TSan 除外）；C `malloc/free` 保持 musl |
-| Worker / run_blocking | 禁止 `JSContext*` / `JSValue` / `qjs::OwnedValue` / `ScopedCString` / `PromiseCapability` |
-| `post_to_owner` | 成功则 callable 在 owner 销毁；失败则在调用线程销毁；callable 不得抛异常 |
-| JSContext opaque | `vacps::Runtime*`（若保留该槽；Host/modules 不得覆盖） |
-| JSRuntime opaque | catalog 拥有的 `RuntimeModuleComposition*` |
-| ModuleCatalog | Host 拥有；非 process-static；**noncopyable + immovable**；outlive `JSRuntime` |
-| Runtime 能力 | Runtime::Impl 拥有稳定 Async/Callbacks/Script；应用/测试组合根只持非拥有指针；无 adapter / 无 optional 副本 |
-| ProcessRuntime | Host 拥有；`main_executor` + `ProcessBudget`；outlive Runtime/QuickJS teardown；catalog 持非拥有指针 |
-| Env / NativeSlot / Composition | 非拥有 `Runtime::Async*` / `Runtime::Callbacks*` / `ProcessRuntime*`（纯同步路径可仅持 `JSContext*`） |
-| EntryModule | 非拥有 `JSModuleDef*`；API 接受 `vacps::Runtime&` |
-| 无业务 registry | Host 不维护 File/Store/Server 表；无 JS-handle shutdown cleanup registry |
-| Runtime stop | 唯一 runtime-wide `std::stop_source`；async/reverse-await 内部取 `stop_token` |
-| Daemon work_guard | 唯一人工 keepalive；`begin_shutdown` 时释放；之后靠真实 outstanding work |
-| `request_stop` | 任意线程、幂等；sticky intent + post `begin_shutdown`；调用线程不碰 QuickJS；不 `main_io_.stop()` |
+| 规则                           | 内容                                                                                                        |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| JS 线程                        | `initialize` 成功后的调用线程；之后所有 QuickJS API 仅此线程                                                |
+| Runtime 析构                   | owner 建立后必须在 owner 线程销毁                                                                           |
+| QuickJS allocator              | `JsEngine` 独占 mimalloc heap；outlive `JSRuntime`；不使用 `mi_heap_destroy` 隐藏 live allocation           |
+| C++ allocator                  | 唯一 bootstrap TU 覆盖全局 `new/delete`（TSan 除外）；C `malloc/free` 保持 musl                             |
+| Worker / run_blocking          | 禁止 `JSContext*` / `JSValue` / `qjs::OwnedValue` / `ScopedCString` / `PromiseCapability`                   |
+| `post_to_owner`                | 成功则 callable 在 owner 销毁；失败则在调用线程销毁；callable 不得抛异常                                    |
+| JSContext opaque               | `vacps::Runtime*`（若保留该槽；Host/modules 不得覆盖）                                                      |
+| JSRuntime opaque               | catalog 拥有的 `RuntimeModuleComposition*`                                                                  |
+| ModuleCatalog                  | Host 拥有；非 process-static；**noncopyable + immovable**；outlive `JSRuntime`                              |
+| Runtime 能力                   | Runtime::Impl 拥有稳定 Async/Callbacks/Script；应用/测试组合根只持非拥有指针；无 adapter / 无 optional 副本 |
+| ProcessRuntime                 | Host 拥有；`main_executor` + `ProcessBudget`；outlive Runtime/QuickJS teardown；catalog 持非拥有指针        |
+| Env / NativeSlot / Composition | 非拥有 `Runtime::Async*` / `Runtime::Callbacks*` / `ProcessRuntime*`（纯同步路径可仅持 `JSContext*`）       |
+| EntryModule                    | 非拥有 `JSModuleDef*`；API 接受 `vacps::Runtime&`                                                           |
+| 无业务 registry                | Host 不维护 File/Store/Server 表；无 JS-handle shutdown cleanup registry                                    |
+| Runtime stop                   | 唯一 runtime-wide `std::stop_source`；async/reverse-await 内部取 `stop_token`                               |
+| Daemon work_guard              | 唯一人工 keepalive；`begin_shutdown` 时释放；之后靠真实 outstanding work                                    |
+| `request_stop`                 | 任意线程、幂等；sticky intent + post `begin_shutdown`；调用线程不碰 QuickJS；不 `main_io_.stop()`           |
 
 ## 6. 关机顺序
 

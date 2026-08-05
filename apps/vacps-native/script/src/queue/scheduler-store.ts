@@ -329,8 +329,7 @@ export class SchedulerStore {
 
     const results = await this.db.transaction(steps);
     const first = results[0];
-    const changes =
-      first != null && !Array.isArray(first) ? first.changes : 0;
+    const changes = first != null && !Array.isArray(first) ? first.changes : 0;
     if (changes !== 1) {
       return {
         claimed: false,
@@ -345,8 +344,7 @@ export class SchedulerStore {
     const insertedSlots: ClaimEnqueueSlot[] = [];
     for (let i = 0; i < plannedSlots.length; i++) {
       const stepResult = results[i + 1];
-      const inserted =
-        stepResult != null && !Array.isArray(stepResult) ? stepResult.changes : 0;
+      const inserted = stepResult != null && !Array.isArray(stepResult) ? stepResult.changes : 0;
       if (inserted === 1) {
         insertedSlots.push(plannedSlots[i]!);
       }

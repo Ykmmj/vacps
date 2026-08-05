@@ -7,10 +7,7 @@ export type InboundServerRequest = ServerRequest;
 
 export type InboundRequestAdapter = (req: ServerRequest) => HostRequest;
 
-function findHeader(
-  headers: Readonly<Record<string, string>>,
-  name: string,
-): string | undefined {
+function findHeader(headers: Readonly<Record<string, string>>, name: string): string | undefined {
   const want = name.toLowerCase();
   const direct = headers[want];
   if (direct !== undefined) return direct;
@@ -43,9 +40,7 @@ export function createInboundRequestAdapter(): InboundRequestAdapter {
     const idHeader = findHeader(req.headers, 'x-request-id');
     const trimmedId = idHeader?.trim();
     const requestId =
-      trimmedId !== undefined && trimmedId.length > 0
-        ? trimmedId
-        : `req-${++fallbackRequestIdSeq}`;
+      trimmedId !== undefined && trimmedId.length > 0 ? trimmedId : `req-${++fallbackRequestIdSeq}`;
 
     const body = new TextDecoder('utf-8').decode(req.body);
 

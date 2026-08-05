@@ -28,11 +28,7 @@ export interface LivenessHealthInput extends LiveHealthState {
 export function deriveLiveHealthState(input: DeriveLiveHealthStateInput): LiveHealthState {
   const loopsInstalled = input.hasControlLoop && input.hasWorkerLoop;
   const workerRunning =
-    input.ready &&
-    !input.stopping &&
-    loopsInstalled &&
-    !input.hasLoopFailure &&
-    !input.closing;
+    input.ready && !input.stopping && loopsInstalled && !input.hasLoopFailure && !input.closing;
   // ok tracks the same live-worker contract (stopping or missing loops ⇒ not ok).
   const ok = workerRunning;
   return { ok, workerRunning };

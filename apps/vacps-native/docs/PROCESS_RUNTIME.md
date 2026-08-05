@@ -24,14 +24,14 @@ pool, never another `io_context`).
 
 ## Lifecycle
 
-| API | Behavior |
-| --- | --- |
-| `start` | Acquire budget slot, spawn with `setpgid(0,0)`, arm timeout, drain stdout/stderr, `async_execute` reap |
-| `wait` | Join until process exit **and** both stream drains; returns captured data while the handle is open. Does **not** release buffers itself. |
+| API                        | Behavior                                                                                                                                                                                                                                                                                     |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start`                    | Acquire budget slot, spawn with `setpgid(0,0)`, arm timeout, drain stdout/stderr, `async_execute` reap                                                                                                                                                                                       |
+| `wait`                     | Join until process exit **and** both stream drains; returns captured data while the handle is open. Does **not** release buffers itself.                                                                                                                                                     |
 | `async_close` / JS `close` | SIGKILL process group, cancel pipes, await real reap + drain barrier, then release slot/buffers (invalidates native capture). Idempotent; concurrent callers join. An outstanding concurrent `wait` may fail after close. close-before-start → Closed immediately. Never stops the executor. |
-| `dispose` / `~Process` | Non-blocking finalizer: post group SIGKILL + cancel onto owner executor. Does not forge exit/eof flags. State self-retains until completions. |
-| `terminate` | Signal group; resolves after the request (not after exit). Unknown signal names rejected synchronously at the binding. |
-| `run` | create → start (stdin ignore by default) → wait → async_close |
+| `dispose` / `~Process`     | Non-blocking finalizer: post group SIGKILL + cancel onto owner executor. Does not forge exit/eof flags. State self-retains until completions.                                                                                                                                                |
+| `terminate`                | Signal group; resolves after the request (not after exit). Unknown signal names rejected synchronously at the binding.                                                                                                                                                                       |
+| `run`                      | create → start (stdin ignore by default) → wait → async_close                                                                                                                                                                                                                                |
 
 ## Limits
 

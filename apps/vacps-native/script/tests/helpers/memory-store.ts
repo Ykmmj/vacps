@@ -15,19 +15,13 @@ import type {
 
 function checkExpectedChanges(exp: ExpectedChanges, changes: number): void {
   if ('exactly' in exp && changes !== exp.exactly) {
-    throw new Error(
-      `store.transaction: expectedChanges exactly ${exp.exactly} but got ${changes}`,
-    );
+    throw new Error(`store.transaction: expectedChanges exactly ${exp.exactly} but got ${changes}`);
   }
   if ('atLeast' in exp && changes < exp.atLeast) {
-    throw new Error(
-      `store.transaction: expectedChanges atLeast ${exp.atLeast} but got ${changes}`,
-    );
+    throw new Error(`store.transaction: expectedChanges atLeast ${exp.atLeast} but got ${changes}`);
   }
   if ('atMost' in exp && changes > exp.atMost) {
-    throw new Error(
-      `store.transaction: expectedChanges atMost ${exp.atMost} but got ${changes}`,
-    );
+    throw new Error(`store.transaction: expectedChanges atMost ${exp.atMost} but got ${changes}`);
   }
 }
 

@@ -83,24 +83,24 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 
 ## Architecture (current)
 
-| Piece | Status |
-| --- | --- |
-| Docker toolchain (+ proxy) | done |
-| CMake presets | done |
-| Boost 1.91.0 | Asio / Beast / Process v2 |
-| OpenSSL (apk static) | Ed25519 / RAND / SHA-256 / TLS |
-| SQLite 3.53.4 amalgamation | C++ 域库（`src/storage`）+ **`vacps:store` 模块** |
-| spdlog 1.17.0 | stderr；CLI `--log-level` |
-| nlohmann/json 3.12.0 | JSON |
-| QuickJS 2026-06-04 | 经 `Runtime` / `JsEngine`；owner 线程 only；专属 mimalloc heap |
-| mimalloc 3.4.4 | QuickJS 专属 heap + 全局 C++ `new/delete`（TSan 除外）；不覆盖 C `malloc/free` |
-| Runtime | phase 机、job pump、`await_value`、shutdown；内部 Runtime::Impl |
+| Piece                               | Status                                                                                                                                                |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Docker toolchain (+ proxy)          | done                                                                                                                                                  |
+| CMake presets                       | done                                                                                                                                                  |
+| Boost 1.91.0                        | Asio / Beast / Process v2                                                                                                                             |
+| OpenSSL (apk static)                | Ed25519 / RAND / SHA-256 / TLS                                                                                                                        |
+| SQLite 3.53.4 amalgamation          | C++ 域库（`src/storage`）+ **`vacps:store` 模块**                                                                                                     |
+| spdlog 1.17.0                       | stderr；CLI `--log-level`                                                                                                                             |
+| nlohmann/json 3.12.0                | JSON                                                                                                                                                  |
+| QuickJS 2026-06-04                  | 经 `Runtime` / `JsEngine`；owner 线程 only；专属 mimalloc heap                                                                                        |
+| mimalloc 3.4.4                      | QuickJS 专属 heap + 全局 C++ `new/delete`（TSan 除外）；不覆盖 C `malloc/free`                                                                        |
+| Runtime                             | phase 机、job pump、`await_value`、shutdown；内部 Runtime::Impl                                                                                       |
 | Runtime::Async / Callbacks / Script | JS→native Promise + `run_blocking`；native event→JS callback→await sync/thenable；host 模块求值。同步 binding 在 owner-thread QuickJS turn 内直接执行 |
-| Binding DSL + `qjs::OwnedValue` | `create_function` / `create_async_function` / `ClassBuilder` (`async_method` / `static_async_function` / `ClassJsEdges`) |
-| ModuleCatalog | **immovable**；注册 `vacps:crypto` / `vacps:host` / `vacps:log` / **`vacps:store`** / **`vacps:fs`** / **`vacps:http`** |
-| Globals | `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` |
-| Application + EntryModule | 组合根；信号；入口 ESM `initialize`/`shutdown` |
-| 业务 script（ESM） | CLI `--script`（或默认路径候选）；产品路由在 JS |
+| Binding DSL + `qjs::OwnedValue`     | `create_function` / `create_async_function` / `ClassBuilder` (`async_method` / `static_async_function` / `ClassJsEdges`)                              |
+| ModuleCatalog                       | **immovable**；注册 `vacps:crypto` / `vacps:host` / `vacps:log` / **`vacps:store`** / **`vacps:fs`** / **`vacps:http`**                               |
+| Globals                             | `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder`                                                                                             |
+| Application + EntryModule           | 组合根；信号；入口 ESM `initialize`/`shutdown`                                                                                                        |
+| 业务 script（ESM）                  | CLI `--script`（或默认路径候选）；产品路由在 JS                                                                                                       |
 
 **`vacps:store`：** 仅导出 class `Store`（`Store.open`、只读 `path`/`closed`，async `exec`/`run`/`query`/`transaction`/`close`）。固定 `query(sql, params?, options?)`；`transaction` 在单个 worker 作业内复用重复 SQL 的 prepared VM。所有权：`ClassHolder` + `shared_ptr`；显式 `close` awaitable；finalizer 只丢 holder。详见 [`docs/NATIVE_MODULES.md`](docs/NATIVE_MODULES.md) 与 [`docs/NATIVE_RESOURCE_OWNERSHIP.md`](docs/NATIVE_RESOURCE_OWNERSHIP.md)。
 
@@ -134,19 +134,19 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 
 C++ 启动配置**仅**接受命令行（`host::parse_command_line` → `Application::Options`）。不读 `VACPS_DATA_DIR` / `VACPS_LOG_LEVEL` / `VACPS_SCRIPT` / `VACPS_CA_BUNDLE` / `VACPS_JS_*`。
 
-| 项 | 说明 |
-| --- | --- |
-| `--help` / `-h` | 打印用法并退出（须单独使用） |
-| `--version` / `-V` | 打印版本并退出（须单独使用） |
-| `--script PATH` | 入口 ESM；省略时尝试 `script/dist/vacps.mjs` 等默认候选 |
-| `--data-dir DIR` | Host → `vacps:host` `dataDir()`（默认 `data`） |
-| `--log-level LEVEL` | spdlog canonical：trace, debug, info, warn, error, critical, off（默认 info） |
-| `--ca-bundle PATH` | module composition CA（`vacps:http` TLS；非 JS 选项） |
-| `--js-heap-limit-bytes N` | QuickJS heap（`N > 0`） |
-| `--js-stack-limit-bytes N` | QuickJS stack（`N > 0`） |
-| `--js-time-budget-ms N` | JS time budget（`N >= 0`；`0` 关闭 watchdog） |
-| `--lifecycle-timeout-ms N` | 入口 initialize/shutdown 超时（`N > 0`；默认 30000） |
-| 产品策略 env | **仍**由 script 经 `host.getenv` 自读（listen、auth、控制面密钥、`PATH`/`HOME` 等） |
+| 项                         | 说明                                                                                |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `--help` / `-h`            | 打印用法并退出（须单独使用）                                                        |
+| `--version` / `-V`         | 打印版本并退出（须单独使用）                                                        |
+| `--script PATH`            | 入口 ESM；省略时尝试 `script/dist/vacps.mjs` 等默认候选                             |
+| `--data-dir DIR`           | Host → `vacps:host` `dataDir()`（默认 `data`）                                      |
+| `--log-level LEVEL`        | spdlog canonical：trace, debug, info, warn, error, critical, off（默认 info）       |
+| `--ca-bundle PATH`         | module composition CA（`vacps:http` TLS；非 JS 选项）                               |
+| `--js-heap-limit-bytes N`  | QuickJS heap（`N > 0`）                                                             |
+| `--js-stack-limit-bytes N` | QuickJS stack（`N > 0`）                                                            |
+| `--js-time-budget-ms N`    | JS time budget（`N >= 0`；`0` 关闭 watchdog）                                       |
+| `--lifecycle-timeout-ms N` | 入口 initialize/shutdown 超时（`N > 0`；默认 30000）                                |
+| 产品策略 env               | **仍**由 script 经 `host.getenv` 自读（listen、auth、控制面密钥、`PATH`/`HOME` 等） |
 
 Smoke after build（需业务 bundle 与其依赖的模块 surface 齐全时）：
 

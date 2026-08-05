@@ -49,10 +49,7 @@ declare module 'vacps:store' {
    * Exactly one key must be present: exactly | atLeast | atMost
    * (nonnegative safe integer). Checked after each run step's changes().
    */
-  export type ExpectedChanges =
-    | { exactly: number }
-    | { atLeast: number }
-    | { atMost: number };
+  export type ExpectedChanges = { exactly: number } | { atLeast: number } | { atMost: number };
 
   /**
    * One step inside Store.transaction() — whole array is one atomic unit.
@@ -112,11 +109,7 @@ declare module 'vacps:store' {
      * Second argument is always params (omit/null/undefined → no binds);
      * third is QueryOptions. There is no query(sql, options) form.
      */
-    query(
-      sql: string,
-      params?: readonly SqlParam[],
-      options?: QueryOptions,
-    ): Promise<Row[]>;
+    query(sql: string, params?: readonly SqlParam[], options?: QueryOptions): Promise<Row[]>;
 
     /**
      * Atomic multi-step unit: BEGIN IMMEDIATE + steps + COMMIT.

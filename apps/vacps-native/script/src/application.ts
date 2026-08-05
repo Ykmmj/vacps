@@ -287,9 +287,7 @@ export class Application {
           /* close fulfilled; shutdown prefers saved loopFailure */
         },
         (closeError: unknown) => {
-          log.error(
-            `product close after ${name} loop failure: ${toError(closeError).message}`,
-          );
+          log.error(`product close after ${name} loop failure: ${toError(closeError).message}`);
         },
       );
       // First failure only: EntryModule shutdown; saved loopFailure → nonzero exit.

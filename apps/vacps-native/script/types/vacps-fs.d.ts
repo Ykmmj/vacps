@@ -18,12 +18,7 @@ declare module 'vacps:fs' {
    * - "append-read"  — create/append read-write
    */
   export type FileOpenMode =
-    | 'read'
-    | 'read-write'
-    | 'write'
-    | 'write-new'
-    | 'append'
-    | 'append-read';
+    'read' | 'read-write' | 'write' | 'write-new' | 'append' | 'append-read';
 
   export interface FileOpenOptions {
     mode: FileOpenMode;

@@ -2,13 +2,13 @@
 
 ## 0. 效力、范围与冲突
 
-| 项 | 规则 |
-| --- | --- |
-| **效力** | 本文件是 `apps/vacps-native/` **唯一规范开发标准**（normative）。所有人工与代理改动 **MUST** 遵守。 |
-| **范围** | 递归适用于 `apps/vacps-native/**`（C++、binding、script、tests、docker/CMake、本目录文档）。 |
-| **代理合同** | 自动化代理另见**本项目级** [`../AGENTS.md`](../AGENTS.md)（即 `apps/vacps-native/AGENTS.md`，**不是**仓库根 `AGENTS.md`）。`AGENTS.md` 规定作业流程，**不**削弱本文件的技术约束。 |
-| **架构现状** | 分层、模块 surface、资源所有权、进程运行时的**当前事实**见链接文档；本文件写**目标规则**与写法，**不**重复易变清单。 |
-| **冲突** | 产品/协议语义以已发布契约与架构文档为准；代码写法、错误模型、构建与代理流程以**本文件**为准。实现尚未完全合规时，**MUST** 按本文件的目标规则演进，**MUST NOT** 把“现状未做到”写成永久例外。 |
+| 项           | 规则                                                                                                                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **效力**     | 本文件是 `apps/vacps-native/` **唯一规范开发标准**（normative）。所有人工与代理改动 **MUST** 遵守。                                                                                         |
+| **范围**     | 递归适用于 `apps/vacps-native/**`（C++、binding、script、tests、docker/CMake、本目录文档）。                                                                                                |
+| **代理合同** | 自动化代理另见**本项目级** [`../AGENTS.md`](../AGENTS.md)（即 `apps/vacps-native/AGENTS.md`，**不是**仓库根 `AGENTS.md`）。`AGENTS.md` 规定作业流程，**不**削弱本文件的技术约束。           |
+| **架构现状** | 分层、模块 surface、资源所有权、进程运行时的**当前事实**见链接文档；本文件写**目标规则**与写法，**不**重复易变清单。                                                                        |
+| **冲突**     | 产品/协议语义以已发布契约与架构文档为准；代码写法、错误模型、构建与代理流程以**本文件**为准。实现尚未完全合规时，**MUST** 按本文件的目标规则演进，**MUST NOT** 把“现状未做到”写成永久例外。 |
 
 ### 0.1 管辖原则（Governing principle）
 
@@ -25,10 +25,10 @@
 
 #### 定义
 
-| 合同 | 接受的输入 | 语义上无效的业务数据 | 前置条件 / 违约语义 |
-| --- | --- | --- | --- |
-| **Wide** | 参数类型几乎可表示的**一切**输入；可依赖**普遍**语言/对象有效性（例如引用指代存活对象），**优先**由类型编码 | **期望结果**：按边界与合同报告（校验错误 / `Result` error / JS 异常 / Promise rejection 等） | **MUST NOT** 再附加有意义的业务/状态/线程/生命周期 precondition。若调用方还须建立**类型域之外**的此类条件 → **分类为 Narrow** |
-| **Narrow** | **仅**满足显式 precondition 的输入 | 若该条件已列为 precondition，则**不是**可恢复业务错误 | 违反显式 precondition = **调用方/程序员错误**；实现不重复检查，且无恢复保证 |
+| 合同       | 接受的输入                                                                                                  | 语义上无效的业务数据                                                                         | 前置条件 / 违约语义                                                                                                           |
+| ---------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **Wide**   | 参数类型几乎可表示的**一切**输入；可依赖**普遍**语言/对象有效性（例如引用指代存活对象），**优先**由类型编码 | **期望结果**：按边界与合同报告（校验错误 / `Result` error / JS 异常 / Promise rejection 等） | **MUST NOT** 再附加有意义的业务/状态/线程/生命周期 precondition。若调用方还须建立**类型域之外**的此类条件 → **分类为 Narrow** |
+| **Narrow** | **仅**满足显式 precondition 的输入                                                                          | 若该条件已列为 precondition，则**不是**可恢复业务错误                                        | 违反显式 precondition = **调用方/程序员错误**；实现不重复检查，且无恢复保证                                                   |
 
 - **Wide contract**：函数接受其参数类型几乎能表示的全部输入。可依赖**普遍**语言/对象有效性要求（例如引用指代存活对象），**优先**用类型编码；**MUST NOT** 再要求调用方建立有意义的业务/状态/线程/生命周期 precondition。**语义上无效的业务数据**是期望结果，须按边界与合同报告（`Result` / validation error / JS exception / Promise rejection 等），不得崩溃或 silent UB。若 API 需要类型域之外的额外语义/状态/线程/生命周期条件，**MUST** 归类为 **Narrow**（或拆成独立 API）。
 - **Narrow contract**：函数只接受满足**显式前置条件**的输入；违反 precondition 是 caller/programmer error，**无**恢复保证。实现体不再动态复查前置条件；误用造成的自然 terminate、crash / undefined result 均可接受。
@@ -62,12 +62,12 @@
 
 ## 相关架构文档（勿在本文件复制易变清单）
 
-| 文档 | 内容 |
-| --- | --- |
-| [`RUNTIME_LAYERING.md`](./RUNTIME_LAYERING.md) | Runtime 门面、能力束、分层与源码树 |
-| [`NATIVE_MODULES.md`](./NATIVE_MODULES.md) | 当前 `vacps:*` / globals JS surface |
+| 文档                                                             | 内容                                |
+| ---------------------------------------------------------------- | ----------------------------------- |
+| [`RUNTIME_LAYERING.md`](./RUNTIME_LAYERING.md)                   | Runtime 门面、能力束、分层与源码树  |
+| [`NATIVE_MODULES.md`](./NATIVE_MODULES.md)                       | 当前 `vacps:*` / globals JS surface |
 | [`NATIVE_RESOURCE_OWNERSHIP.md`](./NATIVE_RESOURCE_OWNERSHIP.md) | JS 业务资源 vs C++ RAII / finalizer |
-| [`PROCESS_RUNTIME.md`](./PROCESS_RUNTIME.md) | 子进程域与 `ProcessRuntime` |
+| [`PROCESS_RUNTIME.md`](./PROCESS_RUNTIME.md)                     | 子进程域与 `ProcessRuntime`         |
 
 ---
 
@@ -77,32 +77,32 @@
 
 ### 1.1 外部 / 边界输入错误（通常 Wide）
 
-| | |
-| --- | --- |
-| **来源** | 不可信 JS 参数、用户/配置/协议输入、Converter 可判定的类型/范围错误 |
-| **合同** | 典型 **Wide** 边界；语义无效业务数据是**期望结果**，不是崩溃理由 |
-| **处理** | **MUST** 映射为 `TypeError` / `RangeError`，或项目约定的**结构化校验错误**（在 binding/域边界一致）；纯 C++ Wide API 则用 `Result` / 校验错误类型 |
-| **时机** | **MUST** 在副作用之前完成 decode/validate |
-| **Narrow 对照** | 若 API 为 **Narrow** 且文档已要求调用方只传已校验值，则同类条件归 §1.3，**MUST NOT** 再假装成边界校验错误 |
+|                 |                                                                                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **来源**        | 不可信 JS 参数、用户/配置/协议输入、Converter 可判定的类型/范围错误                                                                               |
+| **合同**        | 典型 **Wide** 边界；语义无效业务数据是**期望结果**，不是崩溃理由                                                                                  |
+| **处理**        | **MUST** 映射为 `TypeError` / `RangeError`，或项目约定的**结构化校验错误**（在 binding/域边界一致）；纯 C++ Wide API 则用 `Result` / 校验错误类型 |
+| **时机**        | **MUST** 在副作用之前完成 decode/validate                                                                                                         |
+| **Narrow 对照** | 若 API 为 **Narrow** 且文档已要求调用方只传已校验值，则同类条件归 §1.3，**MUST NOT** 再假装成边界校验错误                                         |
 
 ### 1.2 可预期运行结果与失败（Expected operational / domain outcomes）
 
-| | |
-| --- | --- |
-| **来源** | I/O 失败、超时、取消、对端关闭、资源暂时不可用、以及合同下作为**域结果**建模的业务结局（例如子进程退出状态、校验失败、域名否定结果等） |
-| **正常域结果** | 合同将某结局定义为**期望的成功路径数据**时（例如返回子进程 exit code/signal），**MUST** 以**正常返回值**或 **fulfilled Promise**（或等价成功完成）交付，**MUST NOT** 仅因“非零/否定”就改走错误通道 |
-| **合同内失败** | **仅当**所选合同将该结局定义为失败时，**MUST** 使用域 / runtime / binding 的 `Result` 错误（或 `vacps::Result` / `std::expected`）、JS 异常、或 **Promise rejection**（或等价的 `Task` 错误完成） |
-| **禁止** | **MUST NOT** 用异常做常规业务控制流；**MUST NOT** 静默吞掉并返回魔法值；**MUST NOT** 把一切“可预期结局”一律写成 rejection / `Result` error |
+|                  |                                                                                                                                                                                                                         |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **来源**         | I/O 失败、超时、取消、对端关闭、资源暂时不可用、以及合同下作为**域结果**建模的业务结局（例如子进程退出状态、校验失败、域名否定结果等）                                                                                  |
+| **正常域结果**   | 合同将某结局定义为**期望的成功路径数据**时（例如返回子进程 exit code/signal），**MUST** 以**正常返回值**或 **fulfilled Promise**（或等价成功完成）交付，**MUST NOT** 仅因“非零/否定”就改走错误通道                      |
+| **合同内失败**   | **仅当**所选合同将该结局定义为失败时，**MUST** 使用域 / runtime / binding 的 `Result` 错误（或 `vacps::Result` / `std::expected`）、JS 异常、或 **Promise rejection**（或等价的 `Task` 错误完成）                       |
+| **禁止**         | **MUST NOT** 用异常做常规业务控制流；**MUST NOT** 静默吞掉并返回魔法值；**MUST NOT** 把一切“可预期结局”一律写成 rejection / `Result` error                                                                              |
 | **子进程退出码** | **MUST NOT** 把“子进程非零退出”**普遍**写成 operational error。是否为错误取决于 **API 合同**：常见是期望的成功返回数据（exit code/signal）；仅在该 API 明确将某类退出定义为失败时才走错误路径。按合同建模，禁止一刀切。 |
 
 ### 1.3 内部契约违反（Internal contract violations / programmer misuse）
 
-| | |
-| --- | --- |
-| **来源** | 错误 QuickJS 线程/context、错误生命周期阶段、所有权/opaque 违约、在禁止处 use-after-close、在 worker 持有 JS 句柄、**违反 Narrow API 的显式 precondition** 等**程序员错误** |
-| **处理** | **MUST** 在 API 文档中写明 precondition，并由调用方建立；被调实现 **MUST NOT** 动态复查；违约后无行为保证 |
-| **禁止** | **MUST NOT** 将此类错误建模为可恢复 `Result` 或向 JS 抛 `InternalError` 后继续当作健康运行时 |
-| **与 Wide 的边界** | 无效业务数据**仅**在 **Wide**（或文档明确的期望失败）下是 §1.1/§1.2；同一条件在 **Narrow** 下可以是 §1.3 |
+|                    |                                                                                                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **来源**           | 错误 QuickJS 线程/context、错误生命周期阶段、所有权/opaque 违约、在禁止处 use-after-close、在 worker 持有 JS 句柄、**违反 Narrow API 的显式 precondition** 等**程序员错误** |
+| **处理**           | **MUST** 在 API 文档中写明 precondition，并由调用方建立；被调实现 **MUST NOT** 动态复查；违约后无行为保证                                                                   |
+| **禁止**           | **MUST NOT** 将此类错误建模为可恢复 `Result` 或向 JS 抛 `InternalError` 后继续当作健康运行时                                                                                |
+| **与 Wide 的边界** | 无效业务数据**仅**在 **Wide**（或文档明确的期望失败）下是 §1.1/§1.2；同一条件在 **Narrow** 下可以是 §1.3                                                                    |
 
 ### 1.4 边界与异常（C ABI / noexcept）
 
@@ -140,23 +140,23 @@
 
 ### 2.3 错误层转换
 
-| 层 | 表示 |
-| --- | --- |
-| 域库纯 C++ | `Result` / `error_code` / 小型 `vacps::Error`（合同决定哪些是数据/错误） |
-| Runtime 异步 | `Task` 错误完成 → **仅**经 `Runtime::Async` settle 为 Promise reject |
-| Binding 同步 | Wide 边界输入错误 → JS `TypeError`/`RangeError`；合同内运行失败 → 抛映射后的 JS 异常 |
-| Binding 异步 | 见 §4：Wide 准入/合同内可恢复失败可 pre-Promise 抛；合同内失败 post-Promise reject；Narrow 违约 ≠ 友好 JS 错误 |
-| 日志/HTTP 对外 | 稳定字段；**MUST NOT** 向客户端泄露内部路径/SQL/堆栈 |
+| 层             | 表示                                                                                                           |
+| -------------- | -------------------------------------------------------------------------------------------------------------- |
+| 域库纯 C++     | `Result` / `error_code` / 小型 `vacps::Error`（合同决定哪些是数据/错误）                                       |
+| Runtime 异步   | `Task` 错误完成 → **仅**经 `Runtime::Async` settle 为 Promise reject                                           |
+| Binding 同步   | Wide 边界输入错误 → JS `TypeError`/`RangeError`；合同内运行失败 → 抛映射后的 JS 异常                           |
+| Binding 异步   | 见 §4：Wide 准入/合同内可恢复失败可 pre-Promise 抛；合同内失败 post-Promise reject；Narrow 违约 ≠ 友好 JS 错误 |
+| 日志/HTTP 对外 | 稳定字段；**MUST NOT** 向客户端泄露内部路径/SQL/堆栈                                                           |
 
 ### 2.4 命名
 
-| 项 | 约定 |
-| --- | --- |
-| 类型 | `PascalCase` |
-| 函数 / 变量 | `snake_case` |
-| 常量 | `kCamel`；宏少用 `ALL_CAPS` |
-| 命名空间 | `vacps` / `vacps::runtime` / `vacps::binding` / `vacps::qjs` / … |
-| 文件名 | **`snake_case`**（如 `runtime_async.hpp`、`process_runtime.cpp`） |
+| 项          | 约定                                                              |
+| ----------- | ----------------------------------------------------------------- |
+| 类型        | `PascalCase`                                                      |
+| 函数 / 变量 | `snake_case`                                                      |
+| 常量        | `kCamel`；宏少用 `ALL_CAPS`                                       |
+| 命名空间    | `vacps` / `vacps::runtime` / `vacps::binding` / `vacps::qjs` / …  |
+| 文件名      | **`snake_case`**（如 `runtime_async.hpp`、`process_runtime.cpp`） |
 
 - 名称 **MUST** 表达语义；**MUST NOT** 堆砌冗余作用域词。
 - **MUST NOT** 无正当理由使用 `Core` / `Impl` / `Manager` / `Adapter` / `Interface` 等后缀（既有 `Runtime::Impl` 等历史名不作为新代码样板随意扩散）。
@@ -173,15 +173,15 @@
 
 **文本与格式（C++ / 项目源，Markdown 另有说明）：**
 
-| 项 | 规则 |
-| --- | --- |
-| 编码 | **UTF-8** |
-| 换行 | **LF only**（不使用 CRLF） |
-| 文件尾 | **MUST** 以最终换行（final newline）结束 |
-| 缩进 | **空格**，**2-space** indent；**MUST NOT** 使用 Tab 缩进 |
-| 行尾空白 | **MUST** trim trailing whitespace（Markdown 中有意的硬换行例外除外） |
-| 行宽 | **优先**保持约 **100 列**可读性；为对齐、长字符串、宏或清晰度 **MAY** 正当超列或提前断行 |
-| 大括号 | **MUST** 匹配既有 C++ 代码的 opening-brace 风格（与周围文件一致） |
+| 项           | 规则                                                                                                                    |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| 编码         | **UTF-8**                                                                                                               |
+| 换行         | **LF only**（不使用 CRLF）                                                                                              |
+| 文件尾       | **MUST** 以最终换行（final newline）结束                                                                                |
+| 缩进         | **空格**，**2-space** indent；**MUST NOT** 使用 Tab 缩进                                                                |
+| 行尾空白     | **MUST** trim trailing whitespace（Markdown 中有意的硬换行例外除外）                                                    |
+| 行宽         | **优先**保持约 **100 列**可读性；为对齐、长字符串、宏或清晰度 **MAY** 正当超列或提前断行                                |
+| 大括号       | **MUST** 匹配既有 C++ 代码的 opening-brace 风格（与周围文件一致）                                                       |
 | clang-format | **当前仓库无**项目级 clang-format 配置；**MUST** 匹配周围代码与本表规则；**MUST NOT** 借机做无关的大规模重排/全树格式化 |
 
 **C++ 具体风格：**
@@ -279,10 +279,10 @@
 
 ## 6. 架构边界
 
-| 侧 | 职责 |
-| --- | --- |
+| 侧      | 职责                                                                                                                                     |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | **C++** | Runtime、binding、transport、域能力（crypto/fs/http/store/process/…）；以及为**正确性所必需**的 transport / resource / domain **状态机** |
-| **JS** | 产品策略、路由、工作流、业务编排与业务资源关闭顺序 |
+| **JS**  | 产品策略、路由、工作流、业务编排与业务资源关闭顺序                                                                                       |
 
 补充规则：
 
@@ -301,17 +301,17 @@
 
 版本与获取方式 **MUST** 以 `cmake/VacpsDeps.cmake`、CMake options、以及 `Dockerfile` / 镜像内容为准（URL + SHA256 或 apk 钉死）。**MUST NOT** 在代码或文档中把未使用的库写成依赖。
 
-| 依赖 | 用途（摘要） |
-| --- | --- |
-| **Boost** Asio / Beast / Process v2 | 事件循环、HTTP、子进程 |
-| **QuickJS** | JS 引擎（owner 线程） |
-| **mimalloc** | QuickJS 专属 backing heap + 全局 C++ `new/delete`（TSan 配置由 sanitizer 拦截器接管）；不覆盖 C `malloc/free` |
-| **OpenSSL** | TLS / 加密原语 |
-| **SQLite** amalgamation | 本地存储 |
-| **spdlog** | 日志 |
-| **Ada** | WHATWG URL |
-| **simdutf** | TextEncoder / TextDecoder |
-| **liburing** | `vacps:fs` Asio 文件后端（epoll 仍为网络默认 reactor） |
+| 依赖                                | 用途（摘要）                                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Boost** Asio / Beast / Process v2 | 事件循环、HTTP、子进程                                                                                        |
+| **QuickJS**                         | JS 引擎（owner 线程）                                                                                         |
+| **mimalloc**                        | QuickJS 专属 backing heap + 全局 C++ `new/delete`（TSan 配置由 sanitizer 拦截器接管）；不覆盖 C `malloc/free` |
+| **OpenSSL**                         | TLS / 加密原语                                                                                                |
+| **SQLite** amalgamation             | 本地存储                                                                                                      |
+| **spdlog**                          | 日志                                                                                                          |
+| **Ada**                             | WHATWG URL                                                                                                    |
+| **simdutf**                         | TextEncoder / TextDecoder                                                                                     |
+| **liburing**                        | `vacps:fs` Asio 文件后端（epoll 仍为网络默认 reactor）                                                        |
 
 - **没有** nlohmann/json，也 **MUST NOT** 重新引入，除非经过正式依赖评审并写入 `VacpsDeps`。
 - **MUST NOT** “随便最新”；改版本 = 改钉扎输入并走完整验证。
@@ -339,9 +339,9 @@
 
 性能任务在实施前 **MUST** 先分类为以下两者之一，不得混合汇报：
 
-| 类型 | 定义 | 允许的结论 |
-| --- | --- | --- |
-| **原路径热点优化** | 保持被测公共 API、可观测语义与工作负载不变，优化同一条执行路径 | 可以声称原 API / 原热路径提速 |
+| 类型                     | 定义                                                                       | 允许的结论                                                |
+| ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------- |
+| **原路径热点优化**       | 保持被测公共 API、可观测语义与工作负载不变，优化同一条执行路径             | 可以声称原 API / 原热路径提速                             |
 | **新能力或工作负载改造** | 新增 batch/coalescing API、减少返回结果、改变操作数量/数据分布，或放宽保证 | 只能单独报告新 API / 新工作负载的结果，不得算作原路径优化 |
 
 #### 不可变比较条件
@@ -390,17 +390,17 @@
 
 ## 9. 编译与构建（不可协商）
 
-| 规则 | 要求 |
-| --- | --- |
-| **唯一编译入口** | **MUST** 仅通过 `apps/vacps-native/docker/build.sh` |
-| **禁止** | 主机本地直接 CMake/Ninja、临时 `clang++`、或其它 ad hoc 编译当作正式验证 |
-| **并行度** | **最多 4 核**；`CMAKE_BUILD_PARALLEL_LEVEL=4` 或更低（脚本默认更保守并硬封顶 4） |
-| `release` | **完整验证**（script 构建/测试 + native 构建 + 生命周期 smoke） |
-| `asan` / `tsan` | 内存/寿命/并发相关改动的要求配置 |
-| `--native-only` | **仅编译**产品二进制；**MUST NOT** 报告为 full validation |
-| 主机运行 | 允许运行**由该脚本产出**的二进制（如 `--version` 或本地冒烟） |
-| 镜像 | **仅** Docker/工具链变更时 `--rebuild-image`；日常代码改动复用镜像 |
-| 产物 | **MUST NOT** 提交 `build/`、`_deps` 缓存等 |
+| 规则             | 要求                                                                             |
+| ---------------- | -------------------------------------------------------------------------------- |
+| **唯一编译入口** | **MUST** 仅通过 `apps/vacps-native/docker/build.sh`                              |
+| **禁止**         | 主机本地直接 CMake/Ninja、临时 `clang++`、或其它 ad hoc 编译当作正式验证         |
+| **并行度**       | **最多 4 核**；`CMAKE_BUILD_PARALLEL_LEVEL=4` 或更低（脚本默认更保守并硬封顶 4） |
+| `release`        | **完整验证**（script 构建/测试 + native 构建 + 生命周期 smoke）                  |
+| `asan` / `tsan`  | 内存/寿命/并发相关改动的要求配置                                                 |
+| `--native-only`  | **仅编译**产品二进制；**MUST NOT** 报告为 full validation                        |
+| 主机运行         | 允许运行**由该脚本产出**的二进制（如 `--version` 或本地冒烟）                    |
+| 镜像             | **仅** Docker/工具链变更时 `--rebuild-image`；日常代码改动复用镜像               |
+| 产物             | **MUST NOT** 提交 `build/`、`_deps` 缓存等                                       |
 
 警告级别：`-Wall -Wextra -Wpedantic`（及 CMake 中已有 flag）；新增警告 **SHOULD** 当错误清理。
 

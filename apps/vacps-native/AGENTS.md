@@ -18,9 +18,9 @@ Technical rules are normative in [`docs/CODING_STANDARDS.md`](docs/CODING_STANDA
 
 ## Roles
 
-| Role | Responsibility |
-| --- | --- |
-| **Codex** | Owns planning, architecture, implementation, and review for core framework work |
+| Role          | Responsibility                                                                                  |
+| ------------- | ----------------------------------------------------------------------------------------------- |
+| **Codex**     | Owns planning, architecture, implementation, and review for core framework work                 |
 | **Pi / Grok** | Implements only explicitly delegated, bounded non-core work from a detailed Codex specification |
 
 Core framework work includes Runtime, QuickJS integration, Binding DSL foundations,
@@ -85,13 +85,13 @@ VACPS-NATIVE AGENT GATE (mandatory):
 
 ## Verification (proportionate)
 
-| Change risk | Expectation |
-| --- | --- |
-| Docs-only | No build required; still run doc consistency checks and report skips |
-| Logic / API | Build and run relevant JavaScript through the product binary |
-| Full product confidence | `docker/build.sh release` |
-| Memory / lifetime | `docker/build.sh asan` plus relevant JavaScript when applicable |
-| Concurrency | `docker/build.sh tsan` plus relevant JavaScript when applicable |
+| Change risk             | Expectation                                                          |
+| ----------------------- | -------------------------------------------------------------------- |
+| Docs-only               | No build required; still run doc consistency checks and report skips |
+| Logic / API             | Build and run relevant JavaScript through the product binary         |
+| Full product confidence | `docker/build.sh release`                                            |
+| Memory / lifetime       | `docker/build.sh asan` plus relevant JavaScript when applicable      |
+| Concurrency             | `docker/build.sh tsan` plus relevant JavaScript when applicable      |
 
 Hard rules:
 

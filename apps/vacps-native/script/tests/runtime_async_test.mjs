@@ -127,12 +127,12 @@ export async function initialize() {
       assertEq(handled, count, 'all handlers completed');
       for (let index = 0; index < responses.length; index += 1) {
         assertEq(responses[index].status, 200, `response ${index} status`);
+        assertEq(responses[index].headers['x-runtime-async'], 'ok', `response ${index} header`);
         assertEq(
-          responses[index].headers['x-runtime-async'],
-          'ok',
-          `response ${index} header`,
+          decoder.decode(responses[index].body),
+          `/request/${index}`,
+          `response ${index} body`,
         );
-        assertEq(decoder.decode(responses[index].body), `/request/${index}`, `response ${index} body`);
       }
     } finally {
       await server.close();

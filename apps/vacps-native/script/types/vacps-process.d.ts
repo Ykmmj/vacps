@@ -45,11 +45,7 @@ declare module 'vacps:process' {
    * JS object is the resource handle (no registry id).
    */
   export class Process {
-    constructor(
-      command: string,
-      args?: readonly string[],
-      options?: ProcessOptions,
-    );
+    constructor(command: string, args?: readonly string[], options?: ProcessOptions);
 
     start(): Promise<void>;
     write(data: string | ArrayBuffer | ArrayBufferView): Promise<number>;

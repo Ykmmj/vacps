@@ -395,10 +395,8 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         stderr_bytes: stderrMeta.totalBytes,
         stdoutBytes: stdoutMeta.totalBytes,
         stderrBytes: stderrMeta.totalBytes,
-        stdout_truncated:
-          stdoutMeta.nativeTruncated || stdoutClipped || stdoutPreviewEmptyClip,
-        stderr_truncated:
-          stderrMeta.nativeTruncated || stderrClipped || stderrPreviewEmptyClip,
+        stdout_truncated: stdoutMeta.nativeTruncated || stdoutClipped || stdoutPreviewEmptyClip,
+        stderr_truncated: stderrMeta.nativeTruncated || stderrClipped || stderrPreviewEmptyClip,
         stdout_complete: isTerminalTaskStatus(task.status),
         stderr_complete: isTerminalTaskStatus(task.status),
       },
@@ -876,8 +874,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         },
       });
     }
-    const loadUserEnvironment =
-      shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
     let numeric: ReturnType<typeof parseExecNumericOptions>;
     try {
       numeric = parseExecNumericOptions(body);
@@ -1171,9 +1168,10 @@ function readOptionalIntField(
   const value = body[field];
   if (value === undefined) return defaultValue;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
-    const error = new Error(
-      `${field} must be an integer in range ${min}..${max}.`,
-    ) as Error & { code: string; statusCode: number };
+    const error = new Error(`${field} must be an integer in range ${min}..${max}.`) as Error & {
+      code: string;
+      statusCode: number;
+    };
     error.code = 'validation_error';
     error.statusCode = 400;
     throw error;

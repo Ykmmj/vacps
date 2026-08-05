@@ -13,10 +13,7 @@ export interface RunResult {
   readonly lastInsertRowid: number | bigint;
 }
 
-export type ExpectedChanges =
-  | { exactly: number }
-  | { atLeast: number }
-  | { atMost: number };
+export type ExpectedChanges = { exactly: number } | { atLeast: number } | { atMost: number };
 
 export interface QueryOptions {
   /** Max rows returned; default 10_000. Exceeded → reject. */
@@ -52,9 +49,7 @@ export class Store {
   }
 
   static open(_path: string, _options?: StoreOpenOptions): Promise<Store> {
-    throw new Error(
-      'vacps:store Store.open is not available in unit tests; use openMemoryStore()',
-    );
+    throw new Error('vacps:store Store.open is not available in unit tests; use openMemoryStore()');
   }
 
   readonly path!: string;
@@ -66,11 +61,7 @@ export class Store {
   run(_sql: string, _params?: readonly SqlParam[]): Promise<RunResult> {
     throw new Error('unreachable');
   }
-  query(
-    _sql: string,
-    _params?: readonly SqlParam[],
-    _options?: QueryOptions,
-  ): Promise<Row[]> {
+  query(_sql: string, _params?: readonly SqlParam[], _options?: QueryOptions): Promise<Row[]> {
     throw new Error('unreachable');
   }
   transaction(_steps: readonly TransactionStep[]): Promise<TransactionResult[]> {

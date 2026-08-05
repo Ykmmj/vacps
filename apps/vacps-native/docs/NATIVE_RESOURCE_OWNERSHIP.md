@@ -131,9 +131,9 @@ JS 对象不可达
 
 ## 五、析构强制清理
 
-| 路径 | 语义 |
-| --- | --- |
-| 显式 `close()` | 完整、可等待、可 run_blocking、可向 JS 报告错误 |
+| 路径                                   | 语义                                                                             |
+| -------------------------------------- | -------------------------------------------------------------------------------- |
+| 显式 `close()`                         | 完整、可等待、可 run_blocking、可向 JS 报告错误                                  |
 | `~T`（如 `~Store` / domain `~Server`） | `noexcept`、不可等待、best effort、不泄漏 OS 资源；**不**调用业务 `close()` 方法 |
 
 对 `Store`：`~Store` 在最后一个 `StoreNative` 引用消失且无合法在途作业时置 `closed` 并 `db_.reset()`——与显式 `close()` 同类的连接释放，但是析构兜底，不是对 JS `close` 的二次编排。
@@ -249,14 +249,14 @@ Binding **不**负责业务关闭编排、全局资源登记、路径/访问策�
 
 ## 十二、Promise / 线程（与所有权交叉）
 
-| 规则 | 内容 |
-| --- | --- |
-| JS 线程 | Runtime owner 唯一触碰 QuickJS |
-| Worker | 只跑纯 C++；禁止 JS 拥有 RAII |
-| 正向 Promise | 仅 `Runtime::Async` |
-| 反向 await | `Runtime::await_value`（`Runtime::Callbacks` 复用）；同时监听调用方与 runtime-wide shutdown `stop_token`；owner/context/value 归属是不动态检查的 Narrow 调用方前置条件 |
-| native→JS 回调 | `Runtime::Callbacks::call_and_await`；根由 binding 状态 + `ClassJsEdges` 管理；同上 owning 线程契约 |
-| normal shutdown | 释放 daemon work_guard + runtime stop；`main_io_.run()` natural drain；引擎仅在 drain 后关闭；无 abandon / cleanup registry / deadline force-close |
+| 规则            | 内容                                                                                                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| JS 线程         | Runtime owner 唯一触碰 QuickJS                                                                                                                                         |
+| Worker          | 只跑纯 C++；禁止 JS 拥有 RAII                                                                                                                                          |
+| 正向 Promise    | 仅 `Runtime::Async`                                                                                                                                                    |
+| 反向 await      | `Runtime::await_value`（`Runtime::Callbacks` 复用）；同时监听调用方与 runtime-wide shutdown `stop_token`；owner/context/value 归属是不动态检查的 Narrow 调用方前置条件 |
+| native→JS 回调  | `Runtime::Callbacks::call_and_await`；根由 binding 状态 + `ClassJsEdges` 管理；同上 owning 线程契约                                                                    |
+| normal shutdown | 释放 daemon work_guard + runtime stop；`main_io_.run()` natural drain；引擎仅在 drain 后关闭；无 abandon / cleanup registry / deadline force-close                     |
 
 详见 [`RUNTIME_LAYERING.md`](./RUNTIME_LAYERING.md)。
 
