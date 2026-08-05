@@ -3,7 +3,7 @@
  *
  * Inbound: native transport raises each request into a JS onRequest callback.
  * Product routing / JSON policy stay in script — Server has zero business routes.
- * Outbound: one-shot request() on Runtime::Async / host Asio.
+ * Outbound: pooled request() on Runtime::Async / host Asio.
  */
 declare module 'vacps:http' {
   // ── Inbound Server ──────────────────────────────────────────────
@@ -117,13 +117,17 @@ declare module 'vacps:http' {
   }
 
   /**
-   * One-shot outbound HTTP/HTTPS request.
+   * Pooled outbound HTTP/HTTPS request. HTTP/1.1 connections are reused by
+   * origin; one connection carries one active request at a time. The native
+   * client bounds per-origin and global concurrency plus retained idle
+   * descriptors.
    * Options are decoded synchronously before the Promise is created.
    * Runs on Runtime::Async / host Asio (direct path, not worker run_blocking).
    * Binary response body as ArrayBuffer. stop-token cancellation;
    * one timeoutMs budget; maxResponseBytes cap.
    * HTTPS: verify_peer + SNI + hostname verification; CA path from host
-   * bootstrap composition (not a JS option). Does not follow redirects.
+   * bootstrap composition (not a JS option). A failed stale connection is
+   * discarded without transparent request replay. Does not follow redirects.
    */
   export function request(options: HttpRequest): Promise<HttpResponse>;
 }

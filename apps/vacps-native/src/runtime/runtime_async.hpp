@@ -21,29 +21,28 @@
  * are caller obligations and are not dynamically rechecked; there is no
  * recoverable JS InternalError / Result path for wrong thread, wrong context,
  * use-after-Runtime, or phase.
- * Synchronous native setup exceptions (task-state allocation, callable
+ * Synchronous native setup exceptions (coroutine/handler allocation, callable
  * materialization, co_spawn initiation) are not recoverable Promise
  * failures: promise() / promise_void() are noexcept and fail fast.
  *
  * Ownership:
  *   - Runtime::Async is Impl-owned. Holds a non-owning Runtime::Impl*.
- *   - PromiseTaskState is operation-local shared ownership (coroutine frame
- *     and co_spawn completion handler share the capability).
- *   - Handlers capture non-owning Async pointers plus shared_ptr to
- *     operation state; never shared ownership of the whole Runtime.
+ *   - The coroutine frame owns Start / Encode and returns only
+ *     Result<qjs::OwnedValue>. The co_spawn completion handler exclusively
+ *     owns PromiseCapability and performs the single settlement.
+ *   - Coroutine and handler capture a non-owning Async pointer under the
+ *     Runtime lifetime contract; never shared ownership of the whole Runtime.
  *   - Managed Start receives Impl's runtime-wide shutdown stop_token by
  *     value (cooperative cancellation under natural drain).
  *
  * Error paths:
  *   - JS_NewPromiseCapability failure → return JS_EXCEPTION unchanged.
- *   - Result errors from Start/Encode and successful resolve each settle
- *     once on the owner thread, then schedule the job pump exactly once.
- *     Pump scheduling is explicit on those paths (no destructor/scope-exit
- *     pump) so coroutine exception unwinding cannot double-schedule.
- *   - Uncaught Start/Encode exceptions after the coroutine is armed →
- *     co_spawn completion (exception_ptr) maps once via
- *     error_from_exception_ptr and rejects once, then schedules the pump
- *     exactly once. Native std::bad_alloc on that path terminates.
+ *   - Start/Encode Result errors and successful encoded values are returned
+ *     to the co_spawn completion handler, which settles once and schedules
+ *     the job pump once.
+ *   - Uncaught Start/Encode exceptions after the coroutine is armed arrive at
+ *     the same completion handler as exception_ptr and are mapped once via
+ *     error_from_exception_ptr. Native std::bad_alloc terminates.
  *   - Natural drain keeps QuickJS open until every co_spawn operation and
  *     its completion handler finish; settlement does not probe phase,
  *     engine-open, or capability-alive state.
@@ -66,7 +65,6 @@
 #include <concepts>
 #include <exception>
 #include <functional>
-#include <memory>
 #include <stop_token>
 #include <type_traits>
 #include <utility>
@@ -136,18 +134,6 @@ struct promise_void_start {
   }
 };
 
-/**
- * One native Promise task. Shared only so the coroutine body and the
- * co_spawn completion handler can both reach the capability. The engine
- * outlives this state under Runtime natural drain.
- */
-struct PromiseTaskState {
-  explicit PromiseTaskState(PromiseCapability capability) noexcept
-      : capability(std::move(capability)) {}
-
-  PromiseCapability capability;
-};
-
 }  // namespace detail
 
 }  // namespace vacps::runtime
@@ -159,6 +145,28 @@ using runtime::PromiseStart;
 
 class Runtime::Async {
  public:
+  /**
+   * Per-resource serialized worker lane.
+   *
+   * Copies retain the identity of the same Asio strand. The lane does not own
+   * the Runtime worker pool; Runtime must outlive every submitted operation.
+   */
+  class SerialWorker {
+   public:
+    SerialWorker(const SerialWorker&) = default;
+    SerialWorker& operator=(const SerialWorker&) = default;
+    SerialWorker(SerialWorker&&) noexcept = default;
+    SerialWorker& operator=(SerialWorker&&) noexcept = default;
+
+   private:
+    friend class Async;
+
+    explicit SerialWorker(runtime::asio::any_io_executor executor) noexcept
+        : executor_(std::move(executor)) {}
+
+    runtime::asio::any_io_executor executor_;
+  };
+
   /**
    * Non-owning reference to the owning Runtime::Impl. Valid for the full Runtime
    * lifetime under the documented Narrow contract.
@@ -203,6 +211,30 @@ class Runtime::Async {
   template <runtime::BlockingCallable Fn>
   [[nodiscard]] auto run_blocking(std::stop_token stop, Fn&& fn);
 
+  /**
+   * Create an independent FIFO lane over the Runtime worker pool.
+   *
+   * Contract: Narrow
+   * Preconditions: owning Runtime outlives the lane and all work submitted
+   *                 through it
+   * Errors: allocation/setup exceptions are not operational Result failures
+   * Threading: create and submit from the Runtime owner executor
+   * Lifetime: returned lane is non-owning with respect to Runtime
+   */
+  [[nodiscard]] SerialWorker make_serial_worker() const;
+
+  /**
+   * Run pure C++ work on a per-resource FIFO worker lane.
+   *
+   * Contract: Narrow — the lane came from this live Runtime::Async; Fn obeys
+   * the same worker ownership and cancellation contract as run_blocking().
+   */
+  template <runtime::BlockingCallable Fn>
+  [[nodiscard]] auto run_blocking(
+      const SerialWorker& worker,
+      std::stop_token stop,
+      Fn&& fn);
+
   [[nodiscard]] runtime::asio::any_io_executor executor() const;
 
  private:
@@ -216,6 +248,10 @@ class Runtime::Async {
   void settle_or_report(
       runtime::PromiseCapability& capability,
       runtime::Error err) noexcept;
+  void complete_promise(
+      runtime::PromiseCapability& capability,
+      std::exception_ptr ep,
+      runtime::Result<vacps::qjs::OwnedValue> result) noexcept;
 
   Impl& impl_;
 };
@@ -236,11 +272,6 @@ JSValue Runtime::Async::promise(JSContext* ctx, Start&& start, Encode&& encode) 
   vacps::qjs::OwnedValue holder{owner_ctx, raw_promise};
   runtime::PromiseCapability capability{owner_ctx, resolving[0], resolving[1]};
 
-  // Direct construction: setup allocation failure is not a recoverable
-  // Promise rejection (noexcept boundary → terminate on unexpected throw).
-  auto task_state = std::make_shared<runtime::detail::PromiseTaskState>(
-      std::move(capability));
-
   // Capture the runtime-wide shutdown token by value for cooperative Start
   // cancellation. Natural drain keeps the engine live until this operation
   // and its completion handler finish.
@@ -251,51 +282,31 @@ JSValue Runtime::Async::promise(JSContext* ctx, Start&& start, Encode&& encode) 
 
   // Materialize Start/Encode exactly once into the coroutine frame via the
   // constrained forwarding construction. No broad setup try/catch: expected
-  // domain failures use Result; post-launch exceptions use co_spawn's
-  // exception_ptr completion path; native setup throws fail fast.
+  // domain failures are returned to the completion handler; post-launch
+  // exceptions use co_spawn's exception_ptr path; native setup throws fail
+  // fast.
   runtime::asio::co_spawn(
       executor(),
       [self = this,
-       task_state,
        stop = std::move(stop),
        start = StartType(std::forward<Start>(start)),
        encode = EncodeType(std::forward<Encode>(encode))]() mutable
-      -> runtime::asio::awaitable<void> {
+      -> runtime::Task<vacps::qjs::OwnedValue> {
         runtime::Result<T> result =
             co_await runtime::detail::invoke_start<T>(start, std::move(stop));
 
         if (!result) {
-          self->settle_or_report(task_state->capability, result.error());
-          self->schedule_job_pump();
-          co_return;
+          co_return std::unexpected(std::move(result.error()));
         }
 
-        runtime::Result<vacps::qjs::OwnedValue> encoded = std::invoke(
+        co_return std::invoke(
             encode, self->owner_context(), std::move(*result));
-
-        if (!encoded) {
-          self->settle_or_report(task_state->capability, encoded.error());
-          self->schedule_job_pump();
-          co_return;
-        }
-        auto resolved = task_state->capability.resolve(encoded->get());
-        if (!resolved) {
-          self->report_error(resolved.error());
-        }
-        self->schedule_job_pump();
       },
-      [self = this, task_state](std::exception_ptr ep) noexcept {
-        if (ep == nullptr) {
-          return;
-        }
-        // Exception completion path: reject once and schedule the pump once.
-        // Native std::bad_alloc terminates inside error_from_exception_ptr.
-        const runtime::Error err = runtime::error_from_exception_ptr(
-            std::move(ep),
-            runtime::Errc::native_failure,
-            "unknown exception in async task");
-        self->settle_or_report(task_state->capability, err);
-        self->schedule_job_pump();
+      [self = this, capability = std::move(capability)](
+          std::exception_ptr ep,
+          runtime::Result<vacps::qjs::OwnedValue> result) mutable noexcept {
+        self->complete_promise(
+            capability, std::move(ep), std::move(result));
       });
   return holder.release();
 }
@@ -319,9 +330,26 @@ auto Runtime::Async::run_blocking(std::stop_token stop, Fn&& fn) {
       !runtime::detail::is_js_thread_confined_v<
           runtime::detail::worker_value_result_t<Function>>,
       "Runtime::Async::run_blocking must not return JS-thread-confined types");
-  // No whole-Runtime lifetime pin. Frame owns callable + BlockingWorkerState.
+  // No whole-Runtime lifetime pin. Asio transports the typed worker outcome
+  // back to this coroutine's associated owner executor.
   return runtime::detail::run_blocking_coro<Function>(
       worker_executor(),
+      stop,
+      Function(std::forward<Fn>(fn)));
+}
+
+template <runtime::BlockingCallable Fn>
+auto Runtime::Async::run_blocking(
+    const SerialWorker& worker,
+    std::stop_token stop,
+    Fn&& fn) {
+  using Function = std::decay_t<Fn>;
+  static_assert(
+      !runtime::detail::is_js_thread_confined_v<
+          runtime::detail::worker_value_result_t<Function>>,
+      "Runtime::Async::run_blocking must not return JS-thread-confined types");
+  return runtime::detail::run_blocking_coro<Function>(
+      worker.executor_,
       stop,
       Function(std::forward<Fn>(fn)));
 }

@@ -2,40 +2,38 @@
 
 #include "app/error.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace vacps::crypto {
 
+/** Fixed 32-byte SHA-256 digest value (no heap). */
+using Sha256Digest = std::array<std::uint8_t, 32>;
+
 /** Cryptographically secure random (OpenSSL RAND_bytes). */
 [[nodiscard]] Result<std::vector<std::uint8_t>> random_bytes(std::size_t n);
 
-/** SHA-256 digest (32 bytes, OpenSSL EVP). */
-[[nodiscard]] std::vector<std::uint8_t> sha256(std::string_view data);
-[[nodiscard]] std::vector<std::uint8_t> sha256(const std::vector<std::uint8_t>& data);
+// Contract: Wide
+// Preconditions: none beyond type-representable arguments (any byte sequence)
+// Errors: Result error on OpenSSL digest failure (operational)
+// Threading: any
+// Lifetime: caller owns returned digest; input viewed only for the call
+/** One-shot SHA-256 over `data` (OpenSSL EVP_Digest + EVP_sha256). */
+[[nodiscard]] Result<Sha256Digest> sha256(std::span<const std::uint8_t> data);
 
-/** Incremental SHA-256 (for streaming files / large buffers). */
-class Sha256 {
- public:
-  Sha256();
-  Sha256(const Sha256&) = delete;
-  Sha256& operator=(const Sha256&) = delete;
-  Sha256(Sha256&&) noexcept;
-  Sha256& operator=(Sha256&&) noexcept;
-  ~Sha256();
+// Contract: Wide
+// Preconditions: none beyond type-representable arguments
+// Errors: none
+// Threading: any
+// Lifetime: caller owns returned string; input viewed only for the call
+/** Lowercase hex encoding of arbitrary bytes (no intermediate vector required). */
+[[nodiscard]] std::string to_hex(std::span<const std::uint8_t> bytes);
 
-  void update(const std::uint8_t* data, std::size_t len);
-  void update(std::string_view data);
-  [[nodiscard]] std::vector<std::uint8_t> finalize();
-
- private:
-  void* ctx_{nullptr};  // EVP_MD_CTX*
-};
-
-[[nodiscard]] std::string to_hex(const std::vector<std::uint8_t>& bytes);
 [[nodiscard]] Result<std::vector<std::uint8_t>> from_hex(std::string_view hex);
 
 /**

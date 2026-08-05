@@ -2,10 +2,91 @@
 
 #include "qjs/scoped_cstring.hpp"
 
+#include <mimalloc.h>
+
+#include <cstddef>
 #include <string>
 #include <utility>
 
 namespace vacps::runtime {
+namespace {
+
+// QuickJS 2026-06-04 uses an eight-byte allocator overhead on Linux when
+// enforcing JS_SetMemoryLimit. Custom allocators must preserve that accounting.
+constexpr std::size_t kQuickJsMallocOverhead{8};
+
+[[nodiscard]] mi_heap_t* allocator_heap(JSMallocState* state) noexcept {
+  return static_cast<mi_heap_t*>(state->opaque);
+}
+
+void* quickjs_malloc(JSMallocState* state, std::size_t size) noexcept {
+  if (state->malloc_size + size > state->malloc_limit) {
+    return nullptr;
+  }
+
+  void* ptr = mi_heap_malloc(allocator_heap(state), size);
+  if (ptr == nullptr) {
+    return nullptr;
+  }
+
+  ++state->malloc_count;
+  state->malloc_size += mi_usable_size(ptr) + kQuickJsMallocOverhead;
+  return ptr;
+}
+
+void quickjs_free(JSMallocState* state, void* ptr) noexcept {
+  if (ptr == nullptr) {
+    return;
+  }
+
+  --state->malloc_count;
+  state->malloc_size -= mi_usable_size(ptr) + kQuickJsMallocOverhead;
+  mi_free(ptr);
+}
+
+void* quickjs_realloc(
+    JSMallocState* state,
+    void* ptr,
+    std::size_t size) noexcept {
+  if (ptr == nullptr) {
+    if (size == 0) {
+      return nullptr;
+    }
+    return quickjs_malloc(state, size);
+  }
+
+  const std::size_t old_size = mi_usable_size(ptr);
+  if (size == 0) {
+    --state->malloc_count;
+    state->malloc_size -= old_size + kQuickJsMallocOverhead;
+    mi_free(ptr);
+    return nullptr;
+  }
+  if (state->malloc_size + size - old_size > state->malloc_limit) {
+    return nullptr;
+  }
+
+  void* resized = mi_heap_realloc(allocator_heap(state), ptr, size);
+  if (resized == nullptr) {
+    return nullptr;
+  }
+
+  state->malloc_size += mi_usable_size(resized) - old_size;
+  return resized;
+}
+
+std::size_t quickjs_malloc_usable_size(const void* ptr) noexcept {
+  return mi_usable_size(ptr);
+}
+
+const JSMallocFunctions kQuickJsMimallocFunctions{
+    .js_malloc = &quickjs_malloc,
+    .js_free = &quickjs_free,
+    .js_realloc = &quickjs_realloc,
+    .js_malloc_usable_size = &quickjs_malloc_usable_size,
+};
+
+}  // namespace
 
 JsEngine::~JsEngine() noexcept {
   if (is_open()) {
@@ -14,9 +95,16 @@ JsEngine::~JsEngine() noexcept {
 }
 
 VoidResult JsEngine::open(const EngineOptions& options) {
-  runtime_ = JS_NewRuntime();
+  allocator_heap_ = mi_heap_new();
+  if (allocator_heap_ == nullptr) {
+    return std::unexpected(Error::internal("mi_heap_new failed"));
+  }
+
+  runtime_ = JS_NewRuntime2(&kQuickJsMimallocFunctions, allocator_heap_);
   if (runtime_ == nullptr) {
-    return std::unexpected(Error::internal("JS_NewRuntime failed"));
+    mi_heap_delete(allocator_heap_);
+    allocator_heap_ = nullptr;
+    return std::unexpected(Error::internal("JS_NewRuntime2 failed"));
   }
 
   if (options.heap_limit_bytes > 0) {
@@ -33,6 +121,8 @@ VoidResult JsEngine::open(const EngineOptions& options) {
     JS_SetInterruptHandler(runtime_, nullptr, nullptr);
     JS_FreeRuntime(runtime_);
     runtime_ = nullptr;
+    mi_heap_delete(allocator_heap_);
+    allocator_heap_ = nullptr;
     return std::unexpected(Error::internal("JS_NewContext failed"));
   }
   return {};
@@ -46,6 +136,8 @@ void JsEngine::close() noexcept {
   context_ = nullptr;
   JS_FreeRuntime(runtime_);
   runtime_ = nullptr;
+  mi_heap_delete(allocator_heap_);
+  allocator_heap_ = nullptr;
 }
 
 int JsEngine::interrupt_handler(JSRuntime* /*rt*/, void* opaque) noexcept {

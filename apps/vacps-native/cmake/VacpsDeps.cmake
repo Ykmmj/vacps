@@ -139,6 +139,50 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(spdlog)
 message(STATUS "Using spdlog ${VACPS_SPDLOG_VERSION}")
 
+# ── mimalloc 3.4.4 (QuickJS backing heap only) ─────────────────────
+set(VACPS_MIMALLOC_VERSION 3.4.4)
+set(VACPS_MIMALLOC_URL
+  "https://github.com/microsoft/mimalloc/archive/refs/tags/v${VACPS_MIMALLOC_VERSION}.tar.gz")
+set(VACPS_MIMALLOC_SHA256
+  "8ba991a7266983bd5eefc36e140c24734f720fd9b1fd79ddaeff44ea85d16760")
+
+message(STATUS "Fetching mimalloc ${VACPS_MIMALLOC_VERSION} ...")
+set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MI_LIBC_MUSL ON CACHE BOOL "" FORCE)
+set(MI_TRACK_ASAN ${VACPS_ENABLE_ASAN} CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+  mimalloc
+  URL ${VACPS_MIMALLOC_URL}
+  URL_HASH SHA256=${VACPS_MIMALLOC_SHA256}
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+FetchContent_GetProperties(mimalloc)
+if(NOT mimalloc_POPULATED)
+  FetchContent_Populate(mimalloc)
+endif()
+if(NOT TARGET mimalloc-static)
+  add_subdirectory(
+    "${mimalloc_SOURCE_DIR}"
+    "${mimalloc_BINARY_DIR}"
+    EXCLUDE_FROM_ALL
+  )
+endif()
+set_target_properties(mimalloc-static PROPERTIES
+  POSITION_INDEPENDENT_CODE OFF
+)
+target_compile_options(mimalloc-static PRIVATE
+  $<$<COMPILE_LANG_AND_ID:C,Clang,GNU>:-w>
+)
+message(STATUS "Using mimalloc ${VACPS_MIMALLOC_VERSION}")
+
 # ── QuickJS (bellard 2026-06-04) ───────────────────────────────────
 set(VACPS_QUICKJS_VERSION 2026-06-04)
 set(VACPS_QUICKJS_URL

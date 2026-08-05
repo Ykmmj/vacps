@@ -4,10 +4,10 @@
  * ModuleCatalog registers this specifier and exports only class Store
  * (static open; no free open(); no begin/commit/rollback).
  *
- * Ownership: JS opaque is ClassHolder → shared_ptr<Store>; async method
- * frames / workers retain shared_ptr. Explicit close() is the awaitable,
+ * Ownership: JS opaque is ClassHolder → shared_ptr<module-private StoreNative>;
+ * async frames / workers retain that owner. Explicit close() is the awaitable,
  * run_blocking, reportable path. ClassBuilder finalizer only deletes the
- * holder (drops one shared_ptr); ~Store is a noexcept best-effort RAII
+ * holder (drops one shared_ptr); domain ~Store is a noexcept best-effort RAII
  * fallback and does not call QuickJS or invoke close() as a business method.
  */
 declare module 'vacps:store' {

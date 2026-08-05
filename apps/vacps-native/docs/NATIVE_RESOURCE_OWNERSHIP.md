@@ -56,7 +56,7 @@ ProcessRuntime/budget、catalog 必须 outlive `JSRuntime` 拆解。
 ```text
 JavaScript object
 └── opaque ClassHolder (heap)
-    └── shared_ptr<T>          # 例如 shared_ptr<storage::Store> / ServerNative
+    └── shared_ptr<T>          # 例如 shared_ptr<StoreNative> / ServerNative
 ```
 
 资源不由 Host 预创建，也不通过全局整数 ID 暴露。正常关闭顺序由 JS 表达：
@@ -70,7 +70,7 @@ export async function shutdown(): Promise<void> {
 
 Host 只调用统一生命周期入口，不维护 `FileRegistry` / `StoreRegistry` / `stopAll()` 之类业务表。
 
-**`vacps:store`：** 仅导出 class `Store`；`Store.open` → 新 `shared_ptr<Store>` 经 class-aware wrap 交给 JS。无进程级 Store 单例。
+**`vacps:store`：** 仅导出 class `Store`；`Store.open` → 新 module-private `shared_ptr<StoreNative>` 经 class-aware wrap 交给 JS；`StoreNative` 唯一拥有 domain `Store` 与 per-instance `Runtime::Async::SerialWorker`。无进程级 Store 单例。
 
 **`vacps:http` `Server`：** 显式 `new Server(options, onRequest)` → module-private `ServerNative`（非公开域类型）经 class-aware wrap 交给 JS。见下文「Server 生命周期」。
 
@@ -95,9 +95,11 @@ interface ClosableResource {
 
 每个对象管理自己的子资源（acceptor/sessions、child/pipes、sqlite 连接、fd）。
 
-对 `Store`：显式 `close()` 是业务关闭路径——在 Store 锁下标记 `closed` 并释放 `Database`/sqlite 连接；经 `ClassBuilder::async_method` 进入 `Runtime::Async`。
+对 `Store`：显式 `close()` 是业务关闭路径——作为该实例 FIFO `SerialWorker` 上的完整作业标记 `closed` 并释放 `Database`/sqlite 连接；经 `ClassBuilder::async_method` 进入 `Runtime::Async`。
 
 对 `Server`：显式 `close()` 是业务关闭路径——await domain `async_close` drain 后，在 owner 线程 `drop_on_request()`；经 `ClassBuilder::async_method` 进入 `Runtime::Async`。
+
+对 outbound `Client`：它是 `vacps:http` 模块级 transport 基础设施，不是 JS 业务资源，因此不暴露 `close()`。模块函数 slot 持有 `shared_ptr<Client>`，已启动的 async frame 又持有该函数 callable；在最后一个请求自然 drain 前，pool 不会析构。最后一个所有者释放时，idle socket 由 RAII 同步关闭，不注册 Runtime cleanup hook。
 
 对 `Process`：显式 `close()` 是业务关闭路径——await domain `async_close`（SIGKILL 进程组 + 取消管道 + 真实 reap/drain 屏障）后释放 slot/buffer；经 `ClassBuilder::async_method` 进入 `Runtime::Async`。finalizer/`dispose` 仅 post 非阻塞 kill/cancel，不伪造 exit/eof。详见 [`PROCESS_RUNTIME.md`](./PROCESS_RUNTIME.md)。
 
@@ -134,7 +136,7 @@ JS 对象不可达
 | 显式 `close()` | 完整、可等待、可 run_blocking、可向 JS 报告错误 |
 | `~T`（如 `~Store` / domain `~Server`） | `noexcept`、不可等待、best effort、不泄漏 OS 资源；**不**调用业务 `close()` 方法 |
 
-对 `Store`：`~Store` 在锁下置 `closed` 并 `db_.reset()`——与显式 `close()` 同类的连接释放，但是析构兜底，不是对 JS `close` 的二次编排。
+对 `Store`：`~Store` 在最后一个 `StoreNative` 引用消失且无合法在途作业时置 `closed` 并 `db_.reset()`——与显式 `close()` 同类的连接释放，但是析构兜底，不是对 JS `close` 的二次编排。
 
 对 domain `http::Server`：析构 / `dispose()` **只 post 非阻塞取消**到 owner executor，不 join、不 `stop()` executor；State 自持有直到 accept loop 与 sessions drain 至 Closed。
 
@@ -166,7 +168,7 @@ http::ServerHandler ──weak_ptr<ServerNative>──▶   # 无 self-root / �
 
 ## 六、异步延长生命周期
 
-异步操作（含 `Store.open` / `exec` / `run` / `query` / `transaction` / `close`，`Server.listen` / `Server.close`，以及 `Process.start` / `write` / `wait` / `terminate` / `close`）在 **call-entry** unwrap 后把 **non-null `shared_ptr<T>` 移入方法协程帧**；run_blocking/worker 只碰 C++，靠该 `shared_ptr`（或等价共享 state）续命。Process 域工作不经 `Runtime::Async::run_blocking`。
+异步操作（含 `Store.open` / `exec` / `run` / `query` / `transaction` / `close`，`Server.listen` / `Server.close`，以及 `Process.start` / `write` / `wait` / `terminate` / `close`）在 **call-entry** unwrap 后把 **non-null `shared_ptr<T>` 移入方法协程帧**；run_blocking/worker 只碰 C++，靠该 `shared_ptr`（或等价共享 state）续命。Store 的 `T` 是 module-private `StoreNative`（唯一拥有 domain Store + serial worker）。Process 域工作不经 `Runtime::Async::run_blocking`。
 
 - **禁止**裸 `this` 跨 `co_await` / 跨 worker 边界。
 - JS 对象被 GC、finalizer 已 drop holder 后，只要帧内仍持有 `shared_ptr`，进行中的 native operation 仍须安全完成；最后一份 `shared_ptr` 释放时才跑 `~T`。
@@ -180,7 +182,7 @@ http::ServerHandler ──weak_ptr<ServerNative>──▶   # 无 self-root / �
 
 - 同一 File / Store / Server / Process 的操作由该对象自己串行化或状态机约束。
 
-`Store`：域内 `mutex_` 包住每一次 Database/sqlite 使用；多 worker 上的 run_blocking 作业也不会在同一连接上交错 SQL。
+`Store`：module-private `StoreNative` 持有 per-instance `Runtime::Async::SerialWorker`；完整 Database/sqlite 作业按 JS 提交顺序 FIFO 串行，domain Store 不再用第二把 mutex 调度。SQLite 连接以 `SQLITE_OPEN_NOMUTEX` 打开，依赖该外部串行契约。
 
 ---
 

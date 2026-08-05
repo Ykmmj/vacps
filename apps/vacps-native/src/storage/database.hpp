@@ -31,7 +31,7 @@ struct QueryResult {
 };
 
 /**
- * SQLite open mode — maps 1:1 to sqlite3_open_v2 flags (plus FULLMUTEX).
+ * SQLite open mode — maps 1:1 to sqlite3_open_v2 flags (plus NOMUTEX).
  *  - ReadOnly         → SQLITE_OPEN_READONLY
  *  - ReadWrite        → SQLITE_OPEN_READWRITE          (file must exist)
  *  - ReadWriteCreate  → SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
@@ -45,6 +45,13 @@ enum class OpenMode {
 /**
  * SQLite connection infrastructure only (used by vacps:store).
  * No domain tables or task logic.
+ *
+ * Contract: Narrow
+ * Preconditions: calls using one Database connection never overlap; Store's
+ *                per-instance SerialWorker establishes this invariant
+ * Errors: expected SQLite failures use Result
+ * Threading: sequential calls may execute on different worker threads
+ * Lifetime: Database owns and closes exactly one sqlite3 connection
  *
  * Transaction control (BEGIN/COMMIT/ROLLBACK) is not public product API —
  * use with_transaction / run_transaction so work cannot straddle awaits.
@@ -61,13 +68,12 @@ class Database {
    * Open a SQLite connection at `path`.
    * Does not create parent directories — callers (e.g. Store::open) must ensure
    * the parent path exists when creating a new file.
-   * Always includes SQLITE_OPEN_FULLMUTEX.
+   * Uses SQLITE_OPEN_NOMUTEX; caller-provided serialization is required.
    */
   [[nodiscard]] static Result<Database> open(
       std::string path,
       OpenMode mode = OpenMode::ReadWriteCreate);
 
-  [[nodiscard]] bool ok() const { return db_ != nullptr; }
   [[nodiscard]] const std::string& path() const { return path_; }
 
   /** Multi-statement script (no parameters). */

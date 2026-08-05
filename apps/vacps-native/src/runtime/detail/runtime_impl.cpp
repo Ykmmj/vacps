@@ -144,8 +144,10 @@ void Runtime::Impl::report_error(const runtime::Error& error) noexcept {
 
 void Runtime::Impl::schedule_job_pump() noexcept {
   // Narrow: natural drain keeps the engine live for every posted turn. Only
-  // coalesce duplicate schedules.
-  if (job_pump_scheduled_) {
+  // coalesce duplicate schedules. On the single owner thread, a false pending
+  // check cannot race a foreign QuickJS queue mutation; later native
+  // settlement schedules again when it actually enqueues a reaction job.
+  if (job_pump_scheduled_ || !engine_.has_pending_jobs()) {
     return;
   }
   job_pump_scheduled_ = true;

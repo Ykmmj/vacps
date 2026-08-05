@@ -191,8 +191,11 @@ int initialize_http(JSContext* ctx, JSModuleDef* m) noexcept {
     binding::Env env{ctx, async};
     binding::ModuleBuilder mod{env};
 
-    // Snapshot host-wired CA bundle at init (empty → platform defaults later).
-    std::string ca_bundle = composition_from_context(ctx).ca_bundle;
+    // One runtime-scoped outbound client. The function slot and every in-flight
+    // async call share ownership, so the pool naturally outlives its requests.
+    auto client = std::make_shared<vacps::http::Client>(
+        async->executor(),
+        composition_from_context(ctx).ca_bundle);
 
     auto export_async = [&](const char* name, auto fn, int length) -> bool {
       qjs::OwnedValue func = binding::create_async_function(
@@ -202,16 +205,14 @@ int initialize_http(JSContext* ctx, JSModuleDef* m) noexcept {
 
     // request(options) → Promise<{ status, headers, body: ArrayBuffer }>
     // Options decode (Converter) is synchronous before Promise creation.
-    // caBundle is not a JS field; composition injects ca_bundle here.
     if (!export_async(
             "request",
-            [ca_bundle](
+            [client](
                 std::stop_token stop,
-                vacps::http::ClientRequest req) mutable
+                vacps::http::ClientRequest req)
                 -> runtime::Task<vacps::http::ClientResponse> {
-              req.ca_bundle = ca_bundle;
               co_return map_http_result(
-                  co_await vacps::http::async_request(stop, std::move(req)));
+                  co_await client->request(stop, std::move(req)));
             },
             1)) {
       return -1;

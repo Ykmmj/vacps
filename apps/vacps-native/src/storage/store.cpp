@@ -40,14 +40,15 @@ Store::Store(std::unique_ptr<Database> db, std::string path)
     : db_(std::move(db)), path_(std::move(path)) {}
 
 Store::~Store() noexcept {
-  // No mutex_: the last shared_ptr drop already guarantees no in-flight legal
-  // operation retains this Store. Finalizer must not block on mutex_ and must
-  // not call close() (explicit close is JS run_blocking and mutex-serialized).
+  // The StoreNative lifetime contract guarantees no legal in-flight operation.
+  // The finalizer only drops its holder; it does not call business close().
   closed_.store(true, std::memory_order_relaxed);
   db_.reset();
 }
 
-Result<std::shared_ptr<Store>> Store::open(std::string path, OpenOptions options) {
+Result<std::unique_ptr<Store>> Store::open(
+    std::string path,
+    OpenOptions options) {
   const OpenMode mode = resolve_open_mode(options);
   if (auto dirs = ensure_parent_dirs(path, mode); !dirs) {
     return std::unexpected(std::move(dirs.error()));
@@ -56,7 +57,7 @@ Result<std::shared_ptr<Store>> Store::open(std::string path, OpenOptions options
   if (!db) {
     return std::unexpected(std::move(db.error()));
   }
-  auto store = std::shared_ptr<Store>(new Store(
+  auto store = std::unique_ptr<Store>(new Store(
       std::make_unique<Database>(std::move(*db)), std::move(path)));
   return store;
 }
@@ -66,7 +67,7 @@ bool Store::closed() const noexcept {
 }
 
 VoidResult Store::ensure_open() const {
-  if (db_ == nullptr || !db_->ok()) {
+  if (db_ == nullptr) {
     return unexpected_closed();
   }
   return {};
@@ -97,7 +98,6 @@ VoidResult Store::check_expected_changes(const ExpectedChanges& exp, std::int64_
 }
 
 VoidResult Store::exec(std::string_view sql) {
-  std::lock_guard lock(mutex_);
   if (auto o = ensure_open(); !o) {
     return o;
   }
@@ -105,7 +105,6 @@ VoidResult Store::exec(std::string_view sql) {
 }
 
 Result<RunResult> Store::run(std::string_view sql, const std::vector<SqlValue>& params) {
-  std::lock_guard lock(mutex_);
   if (auto o = ensure_open(); !o) {
     return std::unexpected(std::move(o.error()));
   }
@@ -120,7 +119,6 @@ Result<QueryResult> Store::query(
     const std::vector<SqlValue>& params,
     std::size_t max_rows,
     std::optional<std::size_t> max_bytes) {
-  std::lock_guard lock(mutex_);
   if (auto o = ensure_open(); !o) {
     return std::unexpected(std::move(o.error()));
   }
@@ -130,12 +128,11 @@ Result<QueryResult> Store::query(
 
 Result<std::vector<TransactionResult>> Store::transaction(
     const std::vector<TransactionStep>& steps) {
-  std::lock_guard lock(mutex_);
   if (auto o = ensure_open(); !o) {
     return std::unexpected(std::move(o.error()));
   }
 
-  // Entire unit under mutex_ so no other Store method interleaves this connection.
+  // Entire unit is one SerialWorker operation; no Store method can interleave.
   // with_transaction: BEGIN IMMEDIATE … COMMIT; any step error → ROLLBACK.
   // expectedChanges is checked after EACH Run step; Query steps ignore it.
   return db_->with_transaction([&](Database& self) -> Result<std::vector<TransactionResult>> {
@@ -174,9 +171,7 @@ Result<std::vector<TransactionResult>> Store::transaction(
 }
 
 VoidResult Store::close() {
-  std::lock_guard lock(mutex_);
-  // Publish closed before releasing the connection so closed() is true for the
-  // remainder of teardown (and for concurrent observers) once we own mutex_.
+  // Publish closed before releasing the connection for concurrent observers.
   closed_.store(true, std::memory_order_relaxed);
   db_.reset();
   return {};

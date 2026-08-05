@@ -185,9 +185,11 @@ async function storeBenchmarks() {
 
 async function httpBenchmarks() {
   let handled = 0;
+  const peers = new Set();
   const server = new http.Server(
     { host: '127.0.0.1', port: 0, handlerTimeoutMs: 10_000 },
     async (request) => {
+      peers.add(request.remoteAddress);
       if (request.url.startsWith('/native/')) {
         assert(await fs.exists('stress/fixture.bin'), 'handler native FS await');
       } else {
@@ -207,6 +209,17 @@ async function httpBenchmarks() {
     const origin = `http://${address.host}:${address.port}`;
     const latency = [];
 
+    await benchmark('HTTP loopback sequential pooled connection', 1_000, async () => {
+      for (let index = 0; index < 1_000; index += 1) {
+        const response = await http.request({
+          url: `${origin}/sequential/${index}`,
+          timeoutMs: 10_000,
+        });
+        assertEq(response.status, 200, 'sequential HTTP status');
+      }
+    });
+    assertEq(peers.size, 1, 'sequential benchmark reused one connection');
+
     await benchmark('HTTP loopback async JS handler (concurrency 64)', 2_000, async () => {
       await runPool(2_000, 64, async (index) => {
         const started = host.nowMs();
@@ -222,6 +235,7 @@ async function httpBenchmarks() {
     });
 
     latency.sort((left, right) => left - right);
+    assert(peers.size <= 16, `per-origin connection cap exceeded: ${peers.size}`);
     log.info(
       `[latency] HTTP loopback ms: p50=${percentile(latency, 0.50)} ` +
         `p95=${percentile(latency, 0.95)} p99=${percentile(latency, 0.99)}`,
@@ -237,7 +251,7 @@ async function httpBenchmarks() {
       });
     });
 
-    assertEq(handled, 3_000, 'all HTTP handlers completed');
+    assertEq(handled, 4_000, 'all HTTP handlers completed');
   } finally {
     await server.close();
   }

@@ -10,8 +10,7 @@
  * fail-fast (terminate) — not a runtime::Error / Promise rejection.
  * QuickJS C API allocation failure remains JS_EXCEPTION and is distinct from
  * native OOM. Errc::allocation_failure is retained for explicitly modeled
- * paths outside this helper (and the forward-Promise completion path that
- * uses it).
+ * paths outside this helper.
  */
 
 #include "app/error.hpp"

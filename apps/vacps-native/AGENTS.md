@@ -20,10 +20,20 @@ Technical rules are normative in [`docs/CODING_STANDARDS.md`](docs/CODING_STANDA
 
 | Role | Responsibility |
 | --- | --- |
-| **Codex** | Plans and reviews |
-| **Pi / Grok** | Implements edits |
+| **Codex** | Owns planning, architecture, implementation, and review for core framework work |
+| **Pi / Grok** | Implements only explicitly delegated, bounded non-core work from a detailed Codex specification |
 
-## Mandatory gate for every Pi / Grok coding prompt
+Core framework work includes Runtime, QuickJS integration, Binding DSL foundations,
+allocator/engine ownership, concurrency, asynchronous control flow, shutdown/lifetime
+semantics, and build-system changes that affect those areas. Codex **MUST** implement
+these changes directly rather than delegating them to Pi/Grok.
+
+Pi/Grok delegation is optional, not the default implementation path. It is appropriate
+for isolated mechanical edits, leaf modules, documentation synchronization, or other
+tasks whose architecture and contracts have already been fixed. Codex remains
+responsible for reviewing every delegated diff before verification.
+
+## Mandatory gate when Pi / Grok is used
 
 Every Pi/Grok coding or edit prompt **MUST** explicitly contain all of the following. **If any item is omitted, stop before editing**, restate the gate, and apply it.
 

@@ -51,6 +51,37 @@ template <class T>
 }
 
 /**
+ * Module-private JS resource owner.
+ *
+ * ClassHolder and async frames share this object. It uniquely owns the domain
+ * Store and one per-instance worker strand, so complete SQLite operations are
+ * FIFO without making the storage domain depend on Runtime.
+ */
+class StoreNative final {
+ public:
+  StoreNative(
+      std::unique_ptr<storage::Store> store,
+      Runtime::Async::SerialWorker worker) noexcept
+      : store_(std::move(store)), worker_(std::move(worker)) {}
+
+  StoreNative(const StoreNative&) = delete;
+  StoreNative& operator=(const StoreNative&) = delete;
+  StoreNative(StoreNative&&) = delete;
+  StoreNative& operator=(StoreNative&&) = delete;
+
+  [[nodiscard]] storage::Store& store() noexcept { return *store_; }
+  [[nodiscard]] const storage::Store& store() const noexcept { return *store_; }
+
+  [[nodiscard]] const Runtime::Async::SerialWorker& worker() const noexcept {
+    return worker_;
+  }
+
+ private:
+  std::unique_ptr<storage::Store> store_;
+  Runtime::Async::SerialWorker worker_;
+};
+
+/**
  * Module init (phase 2): ClassBuilder commit + JS_SetModuleExport("Store").
  * No C++ exception may escape this C callback.
  *
@@ -66,14 +97,13 @@ int initialize_store(JSContext* ctx, JSModuleDef* m) noexcept {
     // Capture non-owning Runtime::Async* (stable for Runtime lifetime).
     // Do not capture JS handles. Runtime::Async is the sole Promise owner.
 
-    using Store = storage::Store;
-    using StoreBuilder = binding::ClassBuilder<Store>;
+    using StoreBuilder = binding::ClassBuilder<StoreNative>;
 
     auto committed =
         StoreBuilder{env, "Store"}
             .constructor(
                 [](const binding::CallbackInfo&)
-                    -> binding::Result<std::shared_ptr<Store>> {
+                    -> binding::Result<std::shared_ptr<StoreNative>> {
                   return std::unexpected(binding::Error::type(
                       "Store cannot be constructed with new; "
                       "use Store.open(path, options?)"));
@@ -85,40 +115,47 @@ int initialize_store(JSContext* ctx, JSModuleDef* m) noexcept {
                     std::stop_token stop,
                     std::string path,
                     storage::OpenOptions options) mutable
-                    -> runtime::Task<std::shared_ptr<Store>> {
+                    -> runtime::Task<std::shared_ptr<StoreNative>> {
                   // Decode already finished; run_blocking pure C++ only.
-                  co_return co_await async->run_blocking(
+                  auto opened = co_await async->run_blocking(
                       stop,
                       [path = std::move(path),
                        options = std::move(options)]() mutable {
                         return map_store_result(
-                            Store::open(std::move(path), std::move(options)));
+                            storage::Store::open(
+                                std::move(path), std::move(options)));
                       });
+                  if (!opened) {
+                    co_return std::unexpected(std::move(opened.error()));
+                  }
+                  co_return std::make_shared<StoreNative>(
+                      std::move(*opened), async->make_serial_worker());
                 },
                 1)
             .readonly(
                 "path",
-                [](const Store& self) -> std::string {
+                [](const StoreNative& self) -> std::string {
                   // By value: copy out of the native instance.
-                  return self.path();
+                  return self.store().path();
                 })
             .readonly(
                 "closed",
-                [](const Store& self) -> bool {
-                  // Non-blocking atomic flag; does not take mutex_.
-                  return self.closed();
+                [](const StoreNative& self) -> bool {
+                  return self.store().closed();
                 })
             .async_method(
                 "exec",
                 [async](
                     std::stop_token stop,
-                    std::shared_ptr<Store> self,
+                    std::shared_ptr<StoreNative> self,
                     std::string sql) mutable -> runtime::Task<void> {
+                  auto worker = self->worker();
                   co_return co_await async->run_blocking(
+                      worker,
                       stop,
                       [self = std::move(self),
                        sql = std::move(sql)]() mutable {
-                        return map_store_void(self->exec(sql));
+                        return map_store_void(self->store().exec(sql));
                       });
                 },
                 1)
@@ -126,16 +163,19 @@ int initialize_store(JSContext* ctx, JSModuleDef* m) noexcept {
                 "run",
                 [async](
                     std::stop_token stop,
-                    std::shared_ptr<Store> self,
+                    std::shared_ptr<StoreNative> self,
                     std::string sql,
                     std::vector<storage::SqlValue> params) mutable
                     -> runtime::Task<storage::RunResult> {
+                  auto worker = self->worker();
                   co_return co_await async->run_blocking(
+                      worker,
                       stop,
                       [self = std::move(self),
                        sql = std::move(sql),
                        params = std::move(params)]() mutable {
-                        return map_store_result(self->run(sql, params));
+                        return map_store_result(
+                            self->store().run(sql, params));
                       });
                 },
                 1)
@@ -143,7 +183,7 @@ int initialize_store(JSContext* ctx, JSModuleDef* m) noexcept {
                 "query",
                 [async](
                     std::stop_token stop,
-                    std::shared_ptr<Store> self,
+                    std::shared_ptr<StoreNative> self,
                     std::string sql,
                     std::vector<storage::SqlValue> params,
                     store_module::QueryOptions options) mutable
@@ -151,13 +191,15 @@ int initialize_store(JSContext* ctx, JSModuleDef* m) noexcept {
                   // Fixed shape only: query(sql, params?, options?).
                   // Missing trailing args arrive as JS_UNDEFINED and are
                   // defaulted by Converter (no query(sql, options) path).
+                  auto worker = self->worker();
                   co_return co_await async->run_blocking(
+                      worker,
                       stop,
                       [self = std::move(self),
                        sql = std::move(sql),
                        params = std::move(params),
                        options = std::move(options)]() mutable {
-                        return map_store_result(self->query(
+                        return map_store_result(self->store().query(
                             sql,
                             params,
                             options.max_rows,
@@ -169,15 +211,18 @@ int initialize_store(JSContext* ctx, JSModuleDef* m) noexcept {
                 "transaction",
                 [async](
                     std::stop_token stop,
-                    std::shared_ptr<Store> self,
+                    std::shared_ptr<StoreNative> self,
                     std::vector<storage::TransactionStep> steps) mutable
                     -> runtime::Task<
                         std::vector<storage::TransactionResult>> {
+                  auto worker = self->worker();
                   co_return co_await async->run_blocking(
+                      worker,
                       stop,
                       [self = std::move(self),
                        steps = std::move(steps)]() mutable {
-                        return map_store_result(self->transaction(steps));
+                        return map_store_result(
+                            self->store().transaction(steps));
                       });
                 },
                 1)
@@ -185,13 +230,14 @@ int initialize_store(JSContext* ctx, JSModuleDef* m) noexcept {
                 "close",
                 [async](
                     std::stop_token stop,
-                    std::shared_ptr<Store> self) mutable
+                    std::shared_ptr<StoreNative> self) mutable
                     -> runtime::Task<void> {
-                  // Explicit close is mutex-serialized inside Store::close and
-                  // run_blocking here. GC finalizer does not call close().
+                  auto worker = self->worker();
                   co_return co_await async->run_blocking(
-                      stop, [self = std::move(self)]() mutable {
-                        return map_store_void(self->close());
+                      worker,
+                      stop,
+                      [self = std::move(self)]() mutable {
+                        return map_store_void(self->store().close());
                       });
                 },
                 0)

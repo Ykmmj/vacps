@@ -8,11 +8,11 @@ Native 侧以 **`vacps::Runtime`** 为公共门面：内部唯一实现对象 **
 
 - **公共门面**：`vacps::Runtime`（**不是** `vacps::runtime::Runtime`）；noncopyable / nonmovable，地址稳定。
 - **方向性能力**（由 `Runtime::Impl` 直接拥有；`async()` / `callbacks()` / `script()` 返回引用；互不替代）：
-  - **`Runtime::Async`**：JS → native `Task` → JS Promise / worker `run_blocking`；**唯一** C++→JS Promise 与异步生命周期拥有者。
+  - **`Runtime::Async`**：JS → native `Task` → JS Promise / worker `run_blocking`；可为有序业务资源创建 `SerialWorker` strand；**唯一** C++→JS Promise 与异步生命周期拥有者。
   - **`Runtime::Callbacks`**：native event → JS callback → await 同步值或 thenable（委托 `await_value`；不自建第二套 Promise；不拥有 callback 根）。
   - **`Runtime::Script`**：host 模块求值 / 导出调用。
 - **同步 binding**：`create_function` / ClassBuilder 同步方法在 **当前 owner-thread QuickJS turn 内直接** decode/invoke/encode。真正的 Runtime 入口已建立 owner-thread / live-context / lifecycle 不变量；**无** per-callback Runtime 门闸或同步能力 facade。
-- **实现对象**：`Runtime::Impl`（`unique_ptr` 独有；能力对象与 Impl 同寿）。**永不**经 `Runtime::core()` / `state()` 或其它产品 accessor 暴露。仅操作局部状态（`PromiseTaskState` / `AwaitState` / `BlockingWorkerState` 等）在确有共享寿命时使用 `shared_ptr`。
+- **实现对象**：`Runtime::Impl`（`unique_ptr` 独有；能力对象与 Impl 同寿）。**永不**经 `Runtime::core()` / `state()` 或其它产品 accessor 暴露。Promise capability 由 `co_spawn` completion handler 独占，`run_blocking` 通过 Asio completion 传回 typed outcome；仅 `AwaitState` 等确有跨 JS callback 共享寿命的操作局部状态使用 `shared_ptr`。
 - **`Application` + `EntryModule`**：生产进程组合根。Host 拥有 **`ModuleCatalog`**（须活过 `Runtime` / `JSRuntime` 拆解）。Async/Callbacks/Script 由 **`Runtime::Impl`** 拥有；向 `Env`、`NativeSlot`、`RuntimeModuleComposition` 传递非拥有 `Runtime::Async*` / `Runtime::Callbacks*`（指向 Impl 内稳定对象，随 Runtime 寿命有效）。
 - **Binding DSL**（`vacps::binding`）+ **`qjs::OwnedValue`**：类型安全导出；JS 值唯一拥有层在 `vacps::qjs`。有状态 class 可经 **`ClassJsEdges`** 向 GC mark/release native 拥有的 JS 边。
 - **Catalog 当前注册**：`vacps:crypto`（同步）、`vacps:host`（`version` / `platform` / `dataDir` / `nowMs` / `getenv`）、`vacps:log`（含 async `flush` → `Runtime::Async::run_blocking`）、`vacps:store`（class `Store`）、`vacps:fs`（class `File` + 路径操作）、`vacps:http`（outbound `request` + inbound class `Server`）。
@@ -41,7 +41,7 @@ src/
 | Host | `parse_command_line`、`Application`、`EntryModule` | CLI→Options；组合 Runtime、catalog、信号、入口 ESM |
 | 门面 | `vacps::Runtime` | 生命周期、post_to_owner、evaluate、await_value、executors、稳定能力引用 |
 | 实现 | `Runtime::Impl` | 主 `io_context`、worker pool、phase、job pump、关机、能力对象 |
-| 引擎 | `JsEngine` | `JSRuntime`/`JSContext`；求值与 pending job |
+| 引擎 | `JsEngine` | `JSRuntime`/`JSContext`；专属 mimalloc backing heap；求值与 pending job |
 | 能力 | `Runtime::Script` / `Async` / `Callbacks` | 模块求值；Promise / run_blocking；native→JS callback await |
 | 同步 binding | 当前 QuickJS turn 内直接执行 | `create_function` / ClassBuilder；无 per-callback Runtime 门闸 |
 | Promise | `PromiseCapability`、`Runtime::await_value` | 正向 native Promise；反向 JS thenable（Callbacks 复用此路径） |
@@ -62,7 +62,8 @@ src/
 - API：`initialize` → `run(startup)` → `request_stop`；`async()` / `callbacks()` / `script()`（引用）；`post_to_owner` / `context` / `evaluate` / `await_value` / main executor。
 - **无**公共 `core()` / 内部状态 accessor。
 - **主线程**唯一驱动 `main_io` 并触碰 QuickJS；**worker 仅纯 C++**。
-- 有界 job pump；`post_to_owner` 任意线程投递到 JS owner 线程（仅 `initialized`/`running` 接新工作）。posted callable **不得**抛异常（owner handler 为 `noexcept`）。
+- `JsEngine` 经 `JS_NewRuntime2` 为 QuickJS 创建独立 mimalloc heap；不覆盖全进程 allocator。关闭顺序固定为 `JS_FreeContext` → `JS_FreeRuntime` → `mi_heap_delete`，确保 allocator outlive 所有 QuickJS 分配。
+- 有界 job pump；仅 QuickJS 确有 pending job 时 post，并合并重复调度。`post_to_owner` 任意线程投递到 JS owner 线程（仅 `initialized`/`running` 接新工作）。posted callable **不得**抛异常（owner handler 为 `noexcept`）。
 - owner 建立后 Runtime 析构必须在 owner 线程（Narrow 寿命合同）。
 - **Wide/Narrow（摘要）**：owner/context/lifecycle 前置条件由调用方建立。Narrow 实现体不重复检查，也不把同一亲和性包装成可恢复 `Result`。
   - `initialize`：Narrow（`created`、只调一次）；`Result` 仅表示引擎/分配失败。
@@ -79,7 +80,7 @@ src/
 - **`qjs::ScopedCString`**：`JS_ToCStringLen` RAII。
 - `Runtime::Script`：owner 上 ESM `evaluate_module` / `invoke_export`。
 - **同步 binding**：`create_function` / ClassBuilder 同步路径在当前 owner-thread QuickJS turn 内直接 decode/invoke/encode；不经 Runtime 同步能力 facade。
-- **`Runtime::Async`**：唯一 C++→JS Promise 入口与公共 `run_blocking`。Start/Encode 在 JS 线程；worker 只携纯 C++。
+- **`Runtime::Async`**：唯一 C++→JS Promise 入口与公共 `run_blocking`。Start/Encode 在 JS 线程；worker 只携纯 C++。`make_serial_worker()` 为需要 FIFO 的单个业务资源创建独立 worker strand；它不拥有 Runtime，复制后仍指向同一条 lane。
 - **`Runtime::Callbacks`**：native event→JS 函数→await sync/thenable。`call_and_await` 仅借用 callable 做同步 `JS_Call`，不跨挂起保留根；参数 `OwnedValue` 在首次挂起前释放。thenable 结算 / 超时 / 调用方与 runtime `stop_token` 取消全部走既有 `await_value`。不维护 JS-handle shutdown cleanup registry。
 
 ### 3.3 Promise
@@ -140,6 +141,7 @@ C++ 进程旋钮**仅**来自 CLI（`host::parse_command_line` → `Application:
 | --- | --- |
 | JS 线程 | `initialize` 成功后的调用线程；之后所有 QuickJS API 仅此线程 |
 | Runtime 析构 | owner 建立后必须在 owner 线程销毁 |
+| QuickJS allocator | `JsEngine` 独占 mimalloc heap；outlive `JSRuntime`；不使用 `mi_heap_destroy` 隐藏 live allocation |
 | Worker / run_blocking | 禁止 `JSContext*` / `JSValue` / `qjs::OwnedValue` / `ScopedCString` / `PromiseCapability` |
 | `post_to_owner` | 成功则 callable 在 owner 销毁；失败则在调用线程销毁；callable 不得抛异常 |
 | JSContext opaque | `vacps::Runtime*`（若保留该槽；Host/modules 不得覆盖） |

@@ -67,6 +67,15 @@ class Decoder final {
   /**
    * Decode bytes to a UTF-8 string.
    *
+   * Contract: Wide
+   * Preconditions: none beyond type-representable arguments
+   * Errors: when fatal is set, invalid input is a domain Result error;
+   *         otherwise every byte sequence is accepted and invalid sequences
+   *         become U+FFFD replacement output
+   * Threading: distinct instances may be used concurrently; calls mutating
+   *            the same instance follow the ordinary C++ data-race rules
+   * Lifetime: does not retain `input` after return
+   *
    * @param input  Next chunk (may be empty).
    * @param stream If true, incomplete trailing sequences are kept in the
    *               internal remainder for the next call. If false, remainder

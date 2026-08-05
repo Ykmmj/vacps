@@ -2,6 +2,8 @@
 
 #include "runtime/detail/runtime_impl.hpp"
 
+#include <boost/asio/strand.hpp>
+
 #include <utility>
 
 namespace vacps {
@@ -24,6 +26,10 @@ runtime::asio::any_io_executor Runtime::Async::worker_executor() const {
   return impl_.worker_executor();
 }
 
+Runtime::Async::SerialWorker Runtime::Async::make_serial_worker() const {
+  return SerialWorker{runtime::asio::make_strand(worker_executor())};
+}
+
 void Runtime::Async::schedule_job_pump() noexcept {
   impl_.schedule_job_pump();
 }
@@ -41,6 +47,31 @@ void Runtime::Async::settle_or_report(
   if (!rejected) {
     impl_.report_error(rejected.error());
   }
+}
+
+void Runtime::Async::complete_promise(
+    runtime::PromiseCapability& capability,
+    std::exception_ptr ep,
+    runtime::Result<vacps::qjs::OwnedValue> result) noexcept {
+  // Sole post-coroutine settlement point. co_spawn delivers either an
+  // exception_ptr or the returned Result on the owner executor.
+  if (ep != nullptr) {
+    settle_or_report(
+        capability,
+        runtime::error_from_exception_ptr(
+            std::move(ep),
+            runtime::Errc::native_failure,
+            "unknown exception in async task"));
+  } else if (!result) {
+    settle_or_report(capability, std::move(result.error()));
+  } else {
+    auto resolved = capability.resolve(result->get());
+    if (!resolved) {
+      report_error(resolved.error());
+    }
+  }
+
+  schedule_job_pump();
 }
 
 }  // namespace vacps

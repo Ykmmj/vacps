@@ -50,36 +50,38 @@ Result<std::string> utf8_to_well_formed(
     return std::unexpected(Error{"The encoded data was not valid"});
   }
 
-  std::vector<char16_t> utf16;
-  utf16.reserve(len);
+  // One UTF-16 unit per input byte is a safe upper bound (ASCII, multi-byte
+  // scalar values, and one U+FFFD per bad/incomplete byte all fit).
+  std::vector<char16_t> utf16(len);
+  std::size_t out_units = 0;
   std::size_t pos = 0;
   while (pos < len) {
     const char* chunk = data + pos;
     const std::size_t remain = len - pos;
-    const std::size_t budget = simdutf::utf16_length_from_utf8(chunk, remain);
-    std::vector<char16_t> tmp(budget == 0 ? 1 : budget);
+    char16_t* dst = utf16.data() + out_units;
     const simdutf::result res =
-        simdutf::convert_utf8_to_utf16le_with_errors(chunk, remain, tmp.data());
+        simdutf::convert_utf8_to_utf16le_with_errors(chunk, remain, dst);
     if (res.error == simdutf::error_code::SUCCESS) {
-      utf16.insert(utf16.end(), tmp.data(), tmp.data() + res.count);
+      out_units += res.count;
       break;
     }
     // res.count = index of first invalid byte (or start of truncated seq).
     const std::size_t err_at = res.count;
     if (err_at > 0) {
       const std::size_t written =
-          simdutf::convert_utf8_to_utf16le(chunk, err_at, tmp.data());
-      utf16.insert(utf16.end(), tmp.data(), tmp.data() + written);
+          simdutf::convert_utf8_to_utf16le(chunk, err_at, dst);
+      out_units += written;
       pos += err_at;
     }
     // Skip one bad byte (or incomplete lead) and insert U+FFFD.
-    utf16.push_back(u'\uFFFD');
+    utf16[out_units++] = u'\uFFFD';
     if (pos < len) {
       ++pos;
     } else {
       break;
     }
   }
+  utf16.resize(out_units);
 
   const std::size_t out_budget =
       simdutf::utf8_length_from_utf16le(utf16.data(), utf16.size());
@@ -332,19 +334,26 @@ std::string_view Decoder::encoding() const noexcept {
 Result<std::string> Decoder::decode(
     std::span<const std::uint8_t> input,
     bool stream) {
-  std::vector<std::uint8_t> buf;
-  buf.reserve(remainder_.size() + input.size());
-  buf.insert(buf.end(), remainder_.begin(), remainder_.end());
-  buf.insert(buf.end(), input.begin(), input.end());
-  remainder_.clear();
+  // Fast path: no pending remainder — decode the caller span directly.
+  std::span<const std::uint8_t> data = input;
+  std::vector<std::uint8_t> aggregate;
+  if (!remainder_.empty()) {
+    // Reuse remainder_ storage as the aggregate buffer, append this chunk
+    // once, then let decode_* write any new trailing remainder back into
+    // remainder_ (by copy) before aggregate goes out of scope.
+    aggregate = std::move(remainder_);
+    remainder_.clear();
+    aggregate.insert(aggregate.end(), input.begin(), input.end());
+    data = aggregate;
+  }
 
   switch (encoding_) {
     case Encoding::utf8:
-      return decode_utf8(buf, stream);
+      return decode_utf8(data, stream);
     case Encoding::utf16le:
-      return decode_utf16(buf, stream, /*little_endian=*/true);
+      return decode_utf16(data, stream, /*little_endian=*/true);
     case Encoding::utf16be:
-      return decode_utf16(buf, stream, /*little_endian=*/false);
+      return decode_utf16(data, stream, /*little_endian=*/false);
   }
   return std::unexpected(Error{"TextDecoder: unknown encoding"});
 }

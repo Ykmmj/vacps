@@ -222,9 +222,14 @@ run_docker run --rm \
     elif [[ -f script/dist/vacps.mjs ]]; then
       echo '==> script load smoke'
       rm -f /tmp/vacps-script-run.log
+      smoke_timeout_seconds=3
+      if [[ '$PRESET' == asan || '$PRESET' == tsan ]]; then
+        smoke_timeout_seconds=15
+      fi
       set +e
       # Smoke has no CP key; production installs must set CONTROL_PLANE_PUBLIC_KEY.
-      VACPS_ALLOW_INSECURE_NO_AUTH=1 VACPS_LISTEN_PORT=18793 timeout 3 \"\$BIN\" \
+      VACPS_ALLOW_INSECURE_NO_AUTH=1 VACPS_LISTEN_PORT=18793 \
+        timeout -s INT \"\$smoke_timeout_seconds\" \"\$BIN\" \
         --script script/dist/vacps.mjs --data-dir /tmp/vacps-script-smoke \
         >/tmp/vacps-script-run.log 2>&1
       rc=\$?

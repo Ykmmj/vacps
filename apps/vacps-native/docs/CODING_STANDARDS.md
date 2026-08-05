@@ -219,7 +219,7 @@
 
 ### 3.2 Promise 与 run_blocking
 
-1. **`Runtime::Async` 是唯一的** C++→JS Promise 生命周期拥有者与 settle 入口，并提供内部 `run_blocking`（worker 上的纯 C++ 阻塞工作）。
+1. **`Runtime::Async` 是唯一的** C++→JS Promise 生命周期拥有者与 settle 入口，并提供内部 `run_blocking`（worker 上的纯 C++ 阻塞工作）。需要单资源 FIFO 时使用其 per-resource `SerialWorker` strand；不得用 worker mutex 竞争冒充提交顺序。
 2. Workers **MUST** 为纯 C++：**MUST NOT** 携带 `JSContext*` / `JSValue` / `qjs::OwnedValue` / `ScopedCString` / `PromiseCapability`。
 3. Worker 完成后 **MUST** 经 Asio 完成路径回到 owner 再碰 JS（`post(fn, worker_executor, use_awaitable)`）。
 4. **MUST NOT** 阻塞 owner 循环（accept、job pump、JS 执行）。长 CPU / 阻塞 I/O 走 `Runtime::Async::run_blocking` 或域内 Asio 异步路径（如 Process 域既有规则）。
@@ -303,6 +303,7 @@
 | --- | --- |
 | **Boost** Asio / Beast / Process v2 | 事件循环、HTTP、子进程 |
 | **QuickJS** | JS 引擎（owner 线程） |
+| **mimalloc** | QuickJS 专属 backing heap（显式 API；不覆盖全进程 allocator） |
 | **OpenSSL** | TLS / 加密原语 |
 | **SQLite** amalgamation | 本地存储 |
 | **spdlog** | 日志 |
@@ -363,9 +364,11 @@
 
 ---
 
-## 10. 强制 Pi + Grok 提示词模板
+## 10. 可选 Pi + Grok 委派与强制提示词模板
 
-**Codex** 负责计划与审查；**Pi / Grok** 负责实现修改。任何委派给 Pi/Grok 的编码/编辑任务 **MUST** 在提示词中显式包含下列门闸。**缺门闸 = 不得编辑。**
+**Codex** 对核心框架工作直接负责计划、架构、实现与审查。核心框架包括 Runtime、QuickJS 集成、Binding DSL 基础、allocator / engine 所有权、并发与异步控制流、shutdown / lifetime 语义，以及影响这些领域的构建系统改动；这些工作 **MUST NOT** 委派给 Pi/Grok 实现。
+
+Pi/Grok 不是默认实现路径，只可用于 Codex 已经固定架构与合同后的、显式委派且边界清晰的非核心任务，例如机械性改动、叶子模块或文档同步。Codex **MUST** 在验证前审查所有委派 diff。任何实际委派给 Pi/Grok 的编码/编辑任务 **MUST** 在提示词中显式包含下列门闸。**缺门闸 = 不得编辑。**
 
 ### 10.1 必含门闸（复制使用）
 

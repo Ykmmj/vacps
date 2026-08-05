@@ -3,8 +3,8 @@
 /**
  * Module-local JS ↔ C++ convert for vacps:http (request + Server).
  *
- * ClientRequest.from_js decodes the public options bag only. ca_bundle is not
- * a JS field — module composition injects it into ClientRequest after decode.
+ * ClientRequest.from_js decodes the public options bag only. TLS composition
+ * belongs to the module-scoped Client and is never request data or a JS field.
  *
  * ClientResponse.to_js → { status: number, headers: object, body: ArrayBuffer }.
  * Duplicate response header names: last value wins (sequential SetProperty).
@@ -352,7 +352,6 @@ struct Converter<vacps::http::ClientRequest> {
           static_cast<std::size_t>(http_detail::k_default_max_response_bytes);
     }
 
-    // ca_bundle intentionally not read from JS.
     return req;
   }
 };

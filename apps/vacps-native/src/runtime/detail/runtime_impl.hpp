@@ -19,9 +19,11 @@
  * does not keep AsyncScope / ReverseAwaitTracker / JS cleanup registries /
  * late-completion drains / shutdown deadlines.
  *
- * Does NOT use shared ownership of the whole Runtime/Impl. Operation-local
- * shared state (PromiseTaskState, AwaitState, BlockingWorkerState, …) is
- * separate. Capabilities hold non-owning Impl references.
+ * Does NOT use shared ownership of the whole Runtime/Impl. Promise completion
+ * lives in its completion handler, and run_blocking transports typed outcomes
+ * through Asio completion; only reverse-await state shared with JS callbacks
+ * uses operation-local shared ownership. Capabilities hold non-owning Impl
+ * references.
  *
  * JS_SetContextOpaque stores the stable public Runtime* facade
  * (Host / modules must not overwrite).
@@ -219,9 +221,9 @@ struct Runtime::Impl {
       int flags);
 
   /**
-   * Post one non-recursive job-pump turn onto main_io when needed.
-   * Already-scheduled is success (no-op). Narrow: engine stays live until
-   * main_io naturally drains all posted turns — no phase/engine probes.
+   * Post one non-recursive job-pump turn onto main_io when QuickJS has work.
+   * No pending job or already-scheduled is a no-op. Narrow: engine stays live
+   * until main_io naturally drains all posted turns — no phase/engine probes.
    */
   void schedule_job_pump() noexcept;
   void report_error(const runtime::Error& error) noexcept;

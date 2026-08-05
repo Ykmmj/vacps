@@ -160,6 +160,30 @@ await test('store transaction rollback on expectedChanges miss', async () => {
   await db.close();
 });
 
+await test('store concurrent submissions are FIFO through close', async () => {
+  const db = await Store.open(host.dataDir() + '/js_api_store_fifo.db');
+  await db.exec(
+    'DROP TABLE IF EXISTS fifo; CREATE TABLE fifo (id INTEGER PRIMARY KEY, v INTEGER);',
+  );
+
+  const writes = [];
+  for (let i = 0; i < 256; ++i) {
+    writes.push(db.run('INSERT INTO fifo(v) VALUES(?);', [i]));
+  }
+  const rowsPromise = db.query('SELECT v FROM fifo ORDER BY id;');
+  const closePromise = db.close();
+
+  await Promise.all(writes);
+  const rows = await rowsPromise;
+  await closePromise;
+
+  assertEq(rows.length, 256, 'FIFO query observes every earlier write');
+  for (let i = 0; i < rows.length; ++i) {
+    assertEq(rows[i].v, i, `FIFO row ${i}`);
+  }
+  assert(db.closed === true, 'FIFO close runs after prior operations');
+});
+
 // ── vacps:fs (File.open + namespace ops only; bytes-first) ─────────
 
 const fsTextEncoder = new TextEncoder();
@@ -431,6 +455,64 @@ await test('http.request rejects bad url', async () => {
     threw = true;
   }
   assert(threw, 'expected reject for bad url');
+});
+
+await test('http.request reuses connections, bounds concurrency, and recovers', async () => {
+  const peers = new Set();
+  let handled = 0;
+  const server = new http.Server(
+    { host: '127.0.0.1', port: 0, maxResponseBytes: 1024 * 1024 },
+    async (request) => {
+      peers.add(request.remoteAddress);
+      handled += 1;
+      await Promise.resolve();
+      if (request.url === '/head') {
+        return { status: 200, body: 'head-payload-is-not-sent' };
+      }
+      if (request.url === '/large') {
+        return { status: 200, body: new Uint8Array(4096) };
+      }
+      return { status: 200, body: request.url };
+    },
+  );
+
+  try {
+    const address = await server.listen();
+    const origin = `http://${address.host}:${address.port}`;
+
+    for (let index = 0; index < 32; index += 1) {
+      const response = await http.request({ url: `${origin}/sequential/${index}` });
+      assertEq(response.status, 200, `sequential ${index} status`);
+    }
+    assertEq(peers.size, 1, 'sequential requests reuse one TCP connection');
+
+    const responses = await Promise.all(
+      Array.from({ length: 64 }, (_, index) =>
+        http.request({ url: `${origin}/concurrent/${index}`, timeoutMs: 5_000 }),
+      ),
+    );
+    assertEq(responses.length, 64, 'all concurrent requests completed');
+    assert(peers.size <= 16, `per-origin connection cap exceeded: ${peers.size}`);
+
+    const head = await http.request({ url: `${origin}/head`, method: 'HEAD' });
+    assertEq(head.status, 200, 'HEAD status');
+    assertEq(head.body.byteLength, 0, 'HEAD body is empty despite Content-Length');
+
+    let bodyLimitRejected = false;
+    try {
+      await http.request({ url: `${origin}/large`, maxResponseBytes: 16 });
+    } catch {
+      bodyLimitRejected = true;
+    }
+    assert(bodyLimitRejected, 'body limit rejects while reading');
+
+    const recovered = await http.request({ url: `${origin}/recovered` });
+    assertEq(recovered.status, 200, 'request after discarded connection succeeds');
+    assertEq(fsTextDecoder.decode(recovered.body), '/recovered', 'recovery body');
+    assertEq(handled, 99, 'all server handlers ran');
+  } finally {
+    await server.close();
+  }
 });
 
 // ── summary ───────────────────────────────────────────────────────

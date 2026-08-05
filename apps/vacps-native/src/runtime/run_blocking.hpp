@@ -21,7 +21,9 @@
  *   - Fn runs on the worker pool; completion resumes on the coroutine's
  *     associated executor (owner/main_io).
  * Lifetime:
- *   - Shared typed worker state lives until owner-side mapping completes.
+ *   - The posted function owns Fn and returns a typed C++ outcome through
+ *     Asio's non-void post completion. The coroutine consumes that outcome
+ *     after resuming on its associated owner executor.
  *   - No whole-Runtime shared_ptr / keep_alive pin.
  *
  * Cancellation (honest):
@@ -49,7 +51,6 @@
 #include <boost/asio/use_awaitable.hpp>
 
 #include <exception>
-#include <memory>
 #include <optional>
 #include <stop_token>
 #include <type_traits>
@@ -62,14 +63,11 @@ namespace asio = boost::asio;
 namespace detail {
 
 /**
- * Shared typed state for one run_blocking submission.
- * Allocated on the owner side before post; filled on the worker; read after
- * native post resumes on the associated (owner) executor.
+ * Pure-C++ result transported from the worker function to the coroutine's
+ * associated owner executor by Asio's non-void post completion.
  */
-template <class Function, class Value>
-struct BlockingWorkerState {
-  Function fn;
-  std::stop_token stop;
+template <class Value>
+struct BlockingWorkerOutcome {
   std::exception_ptr exception{};
   std::optional<Result<Value>> result{};
 };
@@ -80,8 +78,9 @@ struct BlockingWorkerState {
  * Posts a noexcept wrapper to worker_executor; completion resumes on the
  * caller's associated executor via asio::use_awaitable.
  *
- * The coroutine frame owns only its callable, stop token, worker executor, and
- * shared_ptr<BlockingWorkerState>. No whole-Runtime lifetime pin.
+ * The posted function owns its callable and stop token. Its typed outcome is
+ * moved back to the coroutine without operation-local shared allocation or a
+ * whole-Runtime lifetime pin.
  */
 template <class Function>
 asio::awaitable<Result<worker_value_result_t<Function>>> run_blocking_coro(
@@ -97,27 +96,22 @@ asio::awaitable<Result<worker_value_result_t<Function>>> run_blocking_coro(
     co_return std::unexpected(Error::cancelled());
   }
 
-  auto state = std::make_shared<BlockingWorkerState<Function, Value>>(
-      BlockingWorkerState<Function, Value>{
-          std::move(fn),
-          stop,
-          {},
-          std::nullopt,
-      });
-
   // Exact lambda submitted to thread_pool: must be noexcept so exceptions
-  // never reach the pool (which would std::terminate).
-  co_await asio::post(
-      [state]() noexcept {
-        if (state->stop.stop_requested()) {
-          return;
+  // never reach the pool (which would std::terminate). Non-void post moves the
+  // returned outcome to use_awaitable's associated owner executor.
+  BlockingWorkerOutcome<Value> outcome = co_await asio::post(
+      [fn = std::move(fn), stop]() mutable noexcept
+      -> BlockingWorkerOutcome<Value> {
+        BlockingWorkerOutcome<Value> worker_outcome;
+        if (stop.stop_requested()) {
+          return worker_outcome;
         }
         try {
-          Function local_fn = std::move(state->fn);
-          state->result.emplace(invoke_blocking(local_fn, state->stop));
+          worker_outcome.result.emplace(invoke_blocking(fn, stop));
         } catch (...) {
-          state->exception = std::current_exception();
+          worker_outcome.exception = std::current_exception();
         }
+        return worker_outcome;
       },
       worker_executor,
       asio::use_awaitable);
@@ -126,13 +120,13 @@ asio::awaitable<Result<worker_value_result_t<Function>>> run_blocking_coro(
   if (stop.stop_requested()) {
     co_return std::unexpected(Error::cancelled());
   }
-  if (state->exception != nullptr) {
+  if (outcome.exception != nullptr) {
     co_return std::unexpected(error_from_exception_ptr(
-        std::move(state->exception),
+        std::move(outcome.exception),
         Errc::native_failure,
         "unknown exception in run_blocking"));
   }
-  co_return std::move(*state->result);
+  co_return std::move(*outcome.result);
 }
 
 }  // namespace detail

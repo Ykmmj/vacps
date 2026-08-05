@@ -101,7 +101,7 @@ TS 声明见 `script/types/url.d.ts` 等（只声明已实现面）。
 域实现：`vacps::storage::Store`（`src/storage`）；JS 绑定经 `ClassBuilder` + `store_convert`（`src/modules`）。
 TS 声明：`script/types/vacps-store.d.ts`。
 
-每次 `Store.open` 创建**独立**连接与 JS 实例（非进程单例）。同一 Store 上的 SQLite I/O 在域内串行；所有会碰连接的方法均为 **async**（`static_async_function` / `async_method` → `Runtime::Async`，worker `run_blocking` 只跑纯 C++）。
+每次 `Store.open` 创建**独立**连接与 JS 实例（非进程单例）。绑定对象为每个 Store 持有独立 `Runtime::Async::SerialWorker` strand；完整 SQLite 作业按 JS 提交顺序 FIFO 执行，不靠 mutex 竞争决定顺序。所有会碰连接的方法均为 **async**（`static_async_function` / `async_method` → `Runtime::Async`，worker 只跑纯 C++）。
 
 ### 静态 / 只读属性
 
@@ -165,7 +165,7 @@ type ExpectedChanges =
   | { atMost: number };
 ```
 
-- 整段在同一连接、同一把 Store 锁下执行；无独立 begin/commit/rollback API。
+- 整段作为同一连接 FIFO lane 上的一个不可交错作业执行；无独立 begin/commit/rollback API。
 - **空 steps 数组**（`transaction([])`）在绑定 decode 期同步拒绝。
 - 每个 **run** 步在 `sqlite3_changes` 后立即校验 `expectedChanges`；不匹配 → 整段 rollback，后续步骤不执行。
 - **交叉字段校验（绑定 decode 同步拒绝）**：
@@ -176,9 +176,9 @@ type ExpectedChanges =
 
 ### 所有权（摘要）
 
-JS opaque 为堆上 `ClassHolder` → `shared_ptr<Store>`；async 方法帧 / worker 侧再保留 `shared_ptr`，不依赖 JS 包装续命。
+JS opaque 为堆上 `ClassHolder` → `shared_ptr<StoreNative>`；module-private `StoreNative` 唯一拥有 domain `Store` 与该实例的 `SerialWorker`。async 方法帧 / worker 侧保留 `shared_ptr<StoreNative>`，不依赖 JS 包装续命。
 显式 `close()` 是业务关闭路径（awaitable / run_blocking / 可报告）。
-`ClassBuilder` finalizer **只** `delete` holder（释放一次 `shared_ptr`），**不**把 `close()` 当业务方法调用；`~Store` 为 `noexcept` best-effort RAII 兜底（释放连接，不触 QuickJS）。详见 [`NATIVE_RESOURCE_OWNERSHIP.md`](./NATIVE_RESOURCE_OWNERSHIP.md)。
+`ClassBuilder` finalizer **只** `delete` holder（释放一次 `shared_ptr<StoreNative>`），**不**把 `close()` 当业务方法调用；其唯一拥有的 `~Store` 为 `noexcept` best-effort RAII 兜底（释放连接，不触 QuickJS）。详见 [`NATIVE_RESOURCE_OWNERSHIP.md`](./NATIVE_RESOURCE_OWNERSHIP.md)。
 
 ---
 
@@ -226,7 +226,7 @@ TS 声明：`script/types/vacps-fs.d.ts`。
 ## `vacps:http`（outbound `request` + inbound `Server`）
 
 **ModuleCatalog** 注册 `vacps:http`。导出 **`request`** 与显式 greenfield class **`Server`**。
-域实现：`vacps::http::async_request` + `vacps::http::Server`（`src/http`，纯 transport）；JS 绑定经 binding DSL + `http_convert`（`src/modules/http.cpp` / `http_convert.hpp` / `http_server_native.hpp`）。
+域实现：`vacps::http::Client` + `vacps::http::Server`（`src/http`，纯 transport）；JS 绑定经 binding DSL + `http_convert`（`src/modules/http.cpp` / `http_convert.hpp` / `http_server_native.hpp`）。
 这是 **QuickJS-native DSL** surface，**不是**完整 N-API / `napi_compat` / Node addon 兼容层。
 TS 声明：`script/types/vacps-http.d.ts`。
 
@@ -234,7 +234,7 @@ TS 声明：`script/types/vacps-http.d.ts`。
 
 | API | 说明 |
 | --- | --- |
-| `request(options)` | `Promise<HttpResponse>` — one-shot outbound HTTP/HTTPS |
+| `request(options)` | `Promise<HttpResponse>` — pooled outbound HTTP/HTTPS |
 | `class Server` | `new Server(options, onRequest)`；`listen()` / `close()`；只读 `listening` / `address` |
 
 ---
@@ -242,12 +242,16 @@ TS 声明：`script/types/vacps-http.d.ts`。
 ### Outbound `request`
 
 - **绑定 DSL：** `create_async_function`；`Converter<ClientRequest>` 在 **Promise 创建前同步**解码 options；非法 options 同步抛错。
-- **执行路径：** `Runtime::Async` 协程直挂 host Asio / `async_request`（非 worker `run_blocking`）。
+- **执行路径：** `Runtime::Async` 协程直挂 host Asio / module-scoped `Client`（非 worker `run_blocking`）。
+- **连接复用：** 按 `(scheme, host, port)` origin 复用 HTTP/1.1 持久连接；每条连接同时只有一个请求，并保留 Beast read buffer。新建物理连接才做 DNS / TCP / TLS；不伪造无 TTL 语义的 DNS cache。
+- **并发与 FD 上限：** 每个 origin 最多 16 条 active 连接，全局最多 64 条 active 连接；全局最多保留 32 条 idle 连接。复用时丢弃 idle 超过 30s 的连接；idle 满额时先清理过期项，再淘汰全局最久未使用的连接。空 origin pool 会随最后一个请求回收。超额请求在 Asio channel 上异步等待，不创建额外 socket。
 - **请求 body：** `string` / `ArrayBuffer` / `TypedArray`；响应 `body` 为 `ArrayBuffer`。
 - **timeoutMs：** 整段请求**一个**绝对 wall budget；范围 `[1, 3600000]`，默认 `30000`；超时 → `ETIMEDOUT`。
 - **取消：** `std::stop_token`（runtime/shutdown → `ECANCELED`）。
 - **maxResponseBytes：** 读响应时 Beast `body_limit`；范围 `[1, 67108864]`（64 MiB），默认 8 MiB；超额失败且不全量缓冲。
 - **TLS：** HTTPS `verify_peer` + SNI + hostname verification（TLS ≥ 1.2）。CA 路径由 **host composition** 注入（`RuntimeModuleComposition::ca_bundle` ← CLI `--ca-bundle` / `Application::Options::ca_bundle`）；空则 platform defaults；fail-closed。**无** JS `caBundle` 选项。
+- **TLS context：** 首个 HTTPS 请求时 lazy 初始化，CA bundle 每个 `Client` 只解析和加载一次；后续新 TLS 连接共享 context。
+- **stale 连接：** 复用连接的 I/O 失败会丢弃该连接，不在 transport 内自动重试；避免在请求字节可能已到达对端时重放 POST/PUT/PATCH。
 - **重定向：** **不**跟随；3xx 原样返回给调用方。
 
 #### `request` options

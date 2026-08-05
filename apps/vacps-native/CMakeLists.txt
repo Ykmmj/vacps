@@ -237,6 +237,9 @@ target_link_libraries(vacps_runtime PUBLIC
   vacps_globals
   vacps_modules
 )
+target_link_libraries(vacps_runtime PRIVATE
+  mimalloc-static
+)
 
 # ── Bootstrap (process initialization only; no domain policy) ──────
 vacps_layer(vacps_bootstrap

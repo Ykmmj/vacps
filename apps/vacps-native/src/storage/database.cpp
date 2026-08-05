@@ -44,7 +44,7 @@ Result<Database> Database::open(std::string path, OpenMode mode) {
   // Parent directories are the caller's responsibility (Store::open creates them
   // for ReadWriteCreate). Keeping this layer free of mkdir side effects.
 
-  int flags = SQLITE_OPEN_FULLMUTEX;
+  int flags = SQLITE_OPEN_NOMUTEX;
   switch (mode) {
     case OpenMode::ReadOnly:
       flags |= SQLITE_OPEN_READONLY;
@@ -97,9 +97,6 @@ VoidResult Database::apply_pragmas(OpenMode mode) {
 }
 
 VoidResult Database::exec(std::string_view sql) {
-  if (db_ == nullptr) {
-    return std::unexpected(Error{"database not open"});
-  }
   if (sql.empty()) {
     return {};
   }
@@ -117,9 +114,6 @@ VoidResult Database::exec(std::string_view sql) {
 }
 
 Result<sqlite3_stmt*> Database::prepare(std::string_view sql) {
-  if (db_ == nullptr) {
-    return std::unexpected(Error{"database not open"});
-  }
   sqlite3_stmt* stmt = nullptr;
   const int rc = sqlite3_prepare_v2(db_, sql.data(), static_cast<int>(sql.size()), &stmt, nullptr);
   if (rc != SQLITE_OK) {
@@ -325,11 +319,11 @@ Result<std::vector<Database::TxStepResult>> Database::run_transaction(
 }
 
 std::int64_t Database::last_insert_rowid() const {
-  return db_ != nullptr ? static_cast<std::int64_t>(sqlite3_last_insert_rowid(db_)) : 0;
+  return static_cast<std::int64_t>(sqlite3_last_insert_rowid(db_));
 }
 
 std::int64_t Database::changes() const {
-  return db_ != nullptr ? static_cast<std::int64_t>(sqlite3_changes(db_)) : 0;
+  return static_cast<std::int64_t>(sqlite3_changes(db_));
 }
 
 }  // namespace vacps::storage

@@ -15,6 +15,8 @@
 #include <string_view>
 #include <utility>
 
+struct mi_heap_s;
+
 namespace vacps::runtime {
 
 struct EngineOptions {
@@ -35,9 +37,18 @@ class JsEngine {
   JsEngine(const JsEngine&) = delete;
   JsEngine& operator=(const JsEngine&) = delete;
 
+  // Contract: Narrow
+  // Preconditions: engine is closed; called on its future owner thread
+  // Errors: native/QuickJS allocation or engine initialization failure
+  // Threading: establishes the QuickJS owner thread
+  // Lifetime: the engine owns its runtime, context, and allocator until close
   [[nodiscard]] VoidResult open(const EngineOptions& options);
 
-  /** Narrow: engine is open and caller is the owner thread. */
+  // Contract: Narrow
+  // Preconditions: engine is open; caller is the owner thread
+  // Errors: none
+  // Threading: owner only
+  // Lifetime: destroys context, runtime, then the backing allocator heap
   void close() noexcept;
 
   [[nodiscard]] bool is_open() const noexcept {
@@ -72,6 +83,7 @@ class JsEngine {
 
   JSRuntime* runtime_{nullptr};
   JSContext* context_{nullptr};
+  mi_heap_s* allocator_heap_{nullptr};
   std::chrono::steady_clock::time_point interrupt_deadline_{};
   bool interrupt_armed_{false};
 };

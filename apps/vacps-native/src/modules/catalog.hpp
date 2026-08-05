@@ -54,7 +54,8 @@ struct RuntimeModuleComposition {
   std::string data_dir;
   /**
    * Host CA bundle path for vacps:http outbound TLS (injected into
-   * ClientRequest; not exposed to JavaScript). Empty → platform defaults.
+   * module-scoped HTTP Client; not exposed to JavaScript). Empty → platform
+   * defaults.
    */
   std::string ca_bundle;
 

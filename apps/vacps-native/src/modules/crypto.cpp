@@ -84,14 +84,28 @@ int initialize_crypto(JSContext* ctx, JSModuleDef* m) noexcept {
     }
     if (!export_fn(
             "sha256",
-            [](Bytes data) { return vacps::crypto::sha256(data); },
+            [](Bytes data) -> binding::Result<Bytes> {
+              auto digest = vacps::crypto::sha256(data);
+              if (!digest) {
+                return std::unexpected(
+                    binding::Error::from_domain(digest.error()));
+              }
+              // One heap vector required by the existing ArrayBuffer converter.
+              return Bytes(digest->begin(), digest->end());
+            },
             1)) {
       return -1;
     }
     if (!export_fn(
             "sha256Hex",
-            [](Bytes data) {
-              return vacps::crypto::to_hex(vacps::crypto::sha256(data));
+            [](Bytes data) -> binding::Result<std::string> {
+              auto digest = vacps::crypto::sha256(data);
+              if (!digest) {
+                return std::unexpected(
+                    binding::Error::from_domain(digest.error()));
+              }
+              // Hex-encode the fixed digest directly (no intermediate vector).
+              return vacps::crypto::to_hex(*digest);
             },
             1)) {
       return -1;

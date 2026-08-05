@@ -12,7 +12,8 @@
  *
  * The engine and JSContext outlive this capability by Runtime's natural-drain
  * contract: FreeContext runs only after main_io_.run() returns with no
- * outstanding work, so every managed PromiseTaskState has already settled.
+ * outstanding work, so every co_spawn completion handler has already settled
+ * and released its capability.
  */
 
 #include "runtime/error.hpp"
