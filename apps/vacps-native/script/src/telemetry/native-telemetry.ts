@@ -5,6 +5,7 @@ import * as process from 'vacps:process';
 
 import type { AgentConfig } from '../config';
 import type { TaskStore } from '../storage/task-store';
+import type { LiveHealthState } from './liveness-health';
 
 interface CpuSample {
   idle: number;
@@ -18,11 +19,20 @@ interface NetSample {
 }
 
 const textDecoder = new TextDecoder();
+/** Explicit bound for /proc and /sys text snapshots (no silent prefix-as-whole). */
+const TELEMETRY_TEXT_FILE_MAX_BYTES = 1024 * 1024;
 
 async function readTextFile(path: string): Promise<string> {
   const f = await File.open(path, { mode: 'read' });
   try {
-    return textDecoder.decode(await f.read());
+    // Read max+1 so oversized files fail instead of decoding a truncated prefix.
+    const bytes = await f.read(TELEMETRY_TEXT_FILE_MAX_BYTES + 1);
+    if (bytes.byteLength > TELEMETRY_TEXT_FILE_MAX_BYTES) {
+      throw new Error(
+        `telemetry text file exceeds ${TELEMETRY_TEXT_FILE_MAX_BYTES} bytes: ${path}`,
+      );
+    }
+    return textDecoder.decode(bytes);
   } finally {
     await f.close();
   }
@@ -46,14 +56,18 @@ export class NativeTelemetryCollector {
     return Math.max(0, Math.floor((host.nowMs() - this.startedMs) / 1000));
   }
 
-  async collect(): Promise<BackendStatus> {
+  /**
+   * Expensive diagnostics for authenticated /status and control-plane telemetry.
+   * Health ok/worker.running must reflect the supplied live Application state.
+   */
+  async collect(live: LiveHealthState): Promise<BackendStatus> {
     const [cpu, memory, disk, network, system, queue] = await Promise.all([
       this.cpuMetrics(),
       this.memoryMetrics(),
       this.diskMetrics(),
       this.networkMetrics(),
       this.systemInfo(),
-      Promise.resolve(await this.queueMetrics()),
+      this.queueMetrics(),
     ]);
 
     const metrics: BackendMetrics = {
@@ -66,11 +80,11 @@ export class NativeTelemetryCollector {
 
     return {
       health: {
-        ok: true,
+        ok: live.ok,
         backendId: this.config.BACKEND_ID,
         version: host.version().slice(0, 48) || '0.1.0',
         uptimeSeconds: this.uptimeSeconds(),
-        worker: { running: true, concurrency: 1 },
+        worker: { running: live.workerRunning, concurrency: 1 },
         redis: { connected: false },
         pi: { available: false },
       },

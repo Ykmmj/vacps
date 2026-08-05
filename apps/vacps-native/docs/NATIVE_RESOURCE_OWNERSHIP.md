@@ -4,7 +4,7 @@
 
 > JavaScript 创建并拥有业务资源；C++ 实现能力与资源对象；Host 只管理共享基础设施与 JS 引擎生命周期，不管理 JavaScript 创建的业务对象集合。
 
-当前已编译的 JS surface 含无状态自由函数、全局值类型，以及有状态 native class **`vacps:store` → `Store`**、**`vacps:fs` → `File`**、**`vacps:http` → `Server`**、**`vacps:process` → `Process`**（另有 `vacps:crypto` / `vacps:host` / `vacps:log`，`URL` / `Text*`）。下列规则约束 **Host / Runtime / Binding** 边界，并直接适用于已接入 catalog 的有状态 native class。
+当前已编译的 JS surface 含无状态自由函数、全局值类型，以及有状态 native class **`vacps:store` → `Store`**、**`vacps:fs` → `File`**、**`vacps:http` → `Server`**、**`vacps:process` → `Process`**（另有 `vacps:crypto` / `vacps:host` / `vacps:log` / `vacps:timer`，`URL` / `Text*`）。下列规则约束 **Host / Runtime / Binding** 边界，并直接适用于已接入 catalog 的有状态 native class。
 
 ---
 
@@ -208,7 +208,7 @@ ModuleCatalog / globals 安装
 约束：所有可能被 finalizer 触碰的 native 后端，必须活到 `JS_FreeContext` 完成之后。
 `ProcessRuntime`、`ModuleCatalog` 因此排在 Runtime 之后销毁。能力随 Runtime/Impl 寿命存活；FreeContext 期间 composition 指针仍有效。
 
-JS `shutdown()` **MUST** 显式关闭其创建的业务资源。Runtime **不**在 JS 失败或不协作时 force-close 引擎或替 JS 编排第二套业务关闭。未关闭资源与未完成 outstanding work 可诚实阻止 `main_io_.run()` 返回；仅 natural drain 结束后才 FreeContext，随后 finalizer release edge + drop holder，析构 RAII / post dispose 兜底。
+JS `shutdown()` **MUST** 先请求产品循环停止并关闭 ingress，在释放循环依赖的 Process/Store 等资源前等待循环退出。`vacps:timer` 只是通用等待能力，不替 Host 建立产品 tick。Runtime **不**在 JS 失败或不协作时 force-close 引擎或替 JS 编排第二套业务关闭。未关闭资源与未完成 outstanding work 可诚实阻止 `main_io_.run()` 返回；仅 natural drain 结束后才 FreeContext，随后 finalizer release edge + drop holder，析构 RAII / post dispose 兜底。
 
 ---
 

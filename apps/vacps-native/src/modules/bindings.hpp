@@ -3,7 +3,7 @@
 /**
  * C module loaders for vacps:* (registered via ModuleCatalog).
  * Runtime-core ships pure modules (crypto, host) plus async-capable log,
- * store, fs, http, and process.
+ * timer, store, fs, http, and process.
  *
  * Loaders recover runtime-scoped composition (Runtime::Async /
  * Runtime::Callbacks /
@@ -26,6 +26,7 @@ namespace vacps::js {
 JSModuleDef* init_module_crypto(JSContext* ctx, const char* name);
 JSModuleDef* init_module_host(JSContext* ctx, const char* name);
 JSModuleDef* init_module_log(JSContext* ctx, const char* name);
+JSModuleDef* init_module_timer(JSContext* ctx, const char* name);
 JSModuleDef* init_module_store(JSContext* ctx, const char* name);
 JSModuleDef* init_module_fs(JSContext* ctx, const char* name);
 JSModuleDef* init_module_http(JSContext* ctx, const char* name);

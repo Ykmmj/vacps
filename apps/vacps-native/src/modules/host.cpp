@@ -5,6 +5,7 @@
 #include "binding/env.hpp"
 #include "binding/function.hpp"
 #include "binding/module.hpp"
+#include "host/application.hpp"
 #include "modules/catalog.hpp"
 #include "qjs/owned_value.hpp"
 
@@ -30,6 +31,7 @@ constexpr const char* k_host_exports[] = {
     "dataDir",
     "nowMs",
     "getenv",
+    "requestStop",
 };
 
 /**
@@ -100,6 +102,14 @@ int initialize_host(JSContext* ctx, JSModuleDef* m) noexcept {
               return env.string(raw);
             },
             1)) {
+      return -1;
+    }
+    if (!export_fn(
+            "requestStop",
+            [application = &composition_from_context(ctx).application]() {
+              application->request_stop();
+            },
+            0)) {
       return -1;
     }
 

@@ -1,5 +1,6 @@
 import type { TaskDispatch, TaskError, TaskStatus } from '@vacps/contracts';
 import { isTerminalTaskStatus } from '@vacps/contracts';
+import * as host from 'vacps:host';
 import type { Store } from 'vacps:store';
 
 import { migrateAgentDb } from './schema';
@@ -333,7 +334,7 @@ export class TaskStore {
   }
 
   async claimNonce(nonce: string, ttlSeconds = 600): Promise<boolean> {
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(host.nowMs() / 1000);
     const results = await this.db.transaction([
       { sql: 'DELETE FROM request_nonces WHERE expires_at < ?;', params: [now] },
       {
@@ -365,6 +366,99 @@ export class TaskStore {
       active: (await one('running')) + (await one('starting')),
       failed: await one('failed'),
     };
+  }
+
+  /**
+   * Bounded retention pass: expire terminal task outputs, then delete old terminal rows.
+   * At most 128 output prunes and 128 metadata deletions per call.
+   * Contract: Narrow — trusted DB rows; corrupt internal JSON must surface, not be swallowed.
+   */
+  async pruneRetention(nowMs: number): Promise<{ outputsPruned: number; tasksDeleted: number }> {
+    const outputBatch = 128;
+    const deleteBatch = 128;
+    const nowSec = Math.floor(nowMs / 1000);
+    const terminalIn = `('succeeded','failed','cancelled','timed_out','dispatch_failed')`;
+
+    // Exact expiry in SQL so long-retention old rows cannot starve newer due rows.
+    const candidates = await this.db.query(
+      `SELECT id, input_json, result_json, finished_at
+       FROM tasks
+       WHERE output_pruned_at IS NULL
+         AND finished_at IS NOT NULL
+         AND status IN ${terminalIn}
+         AND unixepoch(finished_at)
+             + CAST(json_extract(input_json, '$.output.retention_seconds') AS INTEGER)
+             <= ?
+       ORDER BY
+         unixepoch(finished_at)
+           + CAST(json_extract(input_json, '$.output.retention_seconds') AS INTEGER) ASC,
+         finished_at ASC
+       LIMIT ?;`,
+      [nowSec, outputBatch],
+    );
+
+    let outputsPruned = 0;
+    for (const row of candidates) {
+      const id = String(row['id']);
+      // Trusted Narrow rows: malformed JSON must surface, not be swallowed.
+      JSON.parse(String(row['input_json']));
+      const raw = row['result_json']
+        ? (JSON.parse(String(row['result_json'])) as unknown)
+        : undefined;
+      const r =
+        raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      const expiredSummary = {
+        kind: 'process',
+        exit_code: r['exitCode'] ?? r['exit_code'] ?? null,
+        signal: r['signal'] ?? null,
+        timed_out: r['timedOut'] ?? r['timed_out'] ?? false,
+        output_state: 'expired',
+      };
+      const nowIso = new Date(nowMs).toISOString();
+
+      const results = await this.db.transaction([
+        {
+          sql: 'DELETE FROM task_logs WHERE task_id = ?;',
+          params: [id],
+        },
+        {
+          sql: `UPDATE tasks SET
+                  result_json = ?,
+                  output_pruned_at = ?,
+                  updated_at = ?
+                WHERE id = ? AND output_pruned_at IS NULL;`,
+          params: [JSON.stringify(expiredSummary), nowIso, nowIso, id],
+        },
+      ]);
+      const update = results[1];
+      if (update != null && !Array.isArray(update) && update.changes === 1) {
+        outputsPruned += 1;
+      }
+    }
+
+    const deleteBoundIso = new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const oldRows = await this.db.query(
+      `SELECT id FROM tasks
+       WHERE finished_at IS NOT NULL
+         AND finished_at <= ?
+         AND status IN ${terminalIn}
+       ORDER BY finished_at ASC
+       LIMIT ?;`,
+      [deleteBoundIso, deleteBatch],
+    );
+
+    let tasksDeleted = 0;
+    if (oldRows.length > 0) {
+      const ids = oldRows.map((r) => String(r['id']));
+      const placeholders = ids.map(() => '?').join(', ');
+      const result = await this.db.run(
+        `DELETE FROM tasks WHERE id IN (${placeholders}) AND status IN ${terminalIn};`,
+        ids,
+      );
+      tasksDeleted = Number(result.changes);
+    }
+
+    return { outputsPruned, tasksDeleted };
   }
 }
 

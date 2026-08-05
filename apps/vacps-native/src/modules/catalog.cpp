@@ -17,12 +17,14 @@ namespace {
 }  // namespace
 
 ModuleCatalog::ModuleCatalog(
+    host::Application& application,
     Runtime::Async& async_runtime,
     Runtime::Callbacks& callbacks_runtime,
     process::ProcessRuntime& process_runtime,
     std::string data_dir,
     std::string ca_bundle)
     : composition_(
+          application,
           async_runtime,
           callbacks_runtime,
           process_runtime,
@@ -32,6 +34,7 @@ ModuleCatalog::ModuleCatalog(
           {"vacps:crypto", init_module_crypto},
           {"vacps:host", init_module_host},
           {"vacps:log", init_module_log},
+          {"vacps:timer", init_module_timer},
           {"vacps:store", init_module_store},
           {"vacps:fs", init_module_fs},
           {"vacps:http", init_module_http},

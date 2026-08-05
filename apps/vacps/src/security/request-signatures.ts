@@ -27,14 +27,18 @@ export async function createAgentSignatureHeaders(
 }
 
 export async function verifyControlPlaneRequest(
-  config: Pick<AgentConfig, 'CONTROL_PLANE_PUBLIC_KEY'>,
+  config: Pick<AgentConfig, 'CONTROL_PLANE_PUBLIC_KEY' | 'BACKEND_ID'>,
   input: {
     method: string;
     url: string;
     headers: Record<string, string | string[] | undefined>;
     body: string;
   },
-): Promise<{ nonce: string }> {
+): Promise<{ nonce: string; backendId: string }> {
+  const backendId = requiredHeader(input.headers, 'x-vps-control-backend-id');
+  if (backendId !== config.BACKEND_ID) {
+    throw new Error('Control-plane signature targets a different backend.');
+  }
   const timestamp = requiredTimestamp(input.headers, 'x-vps-control-timestamp');
   const nonce = requiredNonce(input.headers, 'x-vps-control-nonce');
   const signature = requiredBase64Url(input.headers, 'x-vps-control-signature', 86);
@@ -43,10 +47,10 @@ export async function verifyControlPlaneRequest(
     'Ed25519',
     await verificationKey(config.CONTROL_PLANE_PUBLIC_KEY),
     Buffer.from(signature, 'base64url'),
-    Buffer.from(canonicalRequest('control', request, undefined, timestamp, nonce, input.body)),
+    Buffer.from(canonicalRequest('control', request, backendId, timestamp, nonce, input.body)),
   );
   if (!verified) throw new Error('Control-plane signature is invalid.');
-  return { nonce };
+  return { nonce, backendId };
 }
 
 function signingKey(value: string): Promise<CryptoKey> {
@@ -79,20 +83,26 @@ function verificationKey(value: string): Promise<CryptoKey> {
   return key;
 }
 
+/** pathname + search (search includes leading `?` when non-empty); fragments excluded. */
+export function requestTargetOf(url: string): string {
+  const parsed = new URL(url, 'http://vacps.invalid');
+  return `${parsed.pathname}${parsed.search}`;
+}
+
 function canonicalRequest(
   issuer: 'agent' | 'control',
   request: Pick<Request, 'method' | 'url'>,
-  backendId: string | undefined,
+  backendId: string,
   timestamp: string,
   nonce: string,
   body: string,
 ): string {
   return [
-    'vacps-request-v1',
+    'vacps-request-v2',
     issuer,
     request.method.toUpperCase(),
-    new URL(request.url).pathname,
-    backendId ?? '',
+    requestTargetOf(request.url),
+    backendId,
     timestamp,
     nonce,
     createHash('sha256').update(body).digest('base64url'),
@@ -139,6 +149,6 @@ function requiredHeader(
 ): string {
   const value = headers[name];
   const normalized = Array.isArray(value) ? value[0] : value;
-  if (!normalized) throw new Error(`Missing ${name} header.`);
-  return normalized;
+  if (!normalized?.trim()) throw new Error(`Missing ${name} header.`);
+  return normalized.trim();
 }

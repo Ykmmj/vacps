@@ -1,18 +1,31 @@
 /**
  * Verify control-plane → agent request signatures (issuer = control).
+ * Canonical version: vacps-request-v2. Requires x-vps-control-backend-id audience.
  */
 import * as crypto from 'vacps:crypto';
 import * as host from 'vacps:host';
+
+import { requestTargetFromParts } from './request-target';
 
 const MAX_CLOCK_SKEW_SECONDS = 5 * 60;
 
 export function verifyControlPlaneRequest(input: {
   publicKeyB64: string;
+  /** Receiving application's configured BACKEND_ID (audience). */
+  expectedBackendId: string;
   method: string;
+  /** Path without query (normalized). */
   path: string;
+  /** Query without leading `?`; empty/undefined when absent. */
+  query?: string;
   headers: Readonly<Record<string, string>>;
   body: string;
-}): { nonce: string } {
+}): { nonce: string; backendId: string } {
+  const backendId = requiredHeader(input.headers, 'x-vps-control-backend-id');
+  if (backendId !== input.expectedBackendId) {
+    throw new Error('Control-plane signature targets a different backend.');
+  }
+
   const timestamp = requiredHeader(input.headers, 'x-vps-control-timestamp');
   const nonce = requiredHeader(input.headers, 'x-vps-control-nonce');
   const signature = requiredHeader(input.headers, 'x-vps-control-signature');
@@ -31,13 +44,14 @@ export function verifyControlPlaneRequest(input: {
     throw new Error('Control-plane signature is invalid.');
   }
 
+  const target = requestTargetFromParts(input.path, input.query);
   const bodyDigest = crypto.base64UrlEncode(crypto.sha256(input.body));
   const canonical = [
-    'vacps-request-v1',
+    'vacps-request-v2',
     'control',
     input.method.toUpperCase(),
-    input.path,
-    '',
+    target,
+    backendId,
     timestamp,
     nonce,
     bodyDigest,
@@ -48,7 +62,7 @@ export function verifyControlPlaneRequest(input: {
   if (!crypto.ed25519Verify(pub, canonical, sig)) {
     throw new Error('Control-plane signature is invalid.');
   }
-  return { nonce };
+  return { nonce, backendId };
 }
 
 function requiredHeader(headers: Readonly<Record<string, string>>, name: string): string {

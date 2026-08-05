@@ -9,6 +9,8 @@ declare module 'vacps:host' {
   export function platform(): string;
   export function dataDir(): string;
   export function nowMs(): number;
+  /** Request the generic host lifecycle to run script shutdown and stop. */
+  export function requestStop(): void;
   /**
    * Process environment variable via live getenv.
    * Unset → undefined; set empty → "".

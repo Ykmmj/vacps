@@ -3,29 +3,45 @@ import { describe, expect, it } from 'vitest';
 import { hashRequest, IdempotencyStore } from '../../src/runtime/idempotency';
 
 describe('IdempotencyStore', () => {
-  it('returns null on first lookup', () => {
+  it('runs the first keyed operation', async () => {
     const s = new IdempotencyStore();
-    expect(s.lookup('files.write', 'k1', 'h1')).toBeNull();
+    await expect(
+      s.execute('files.write', 'k1', 'h1', async () => ({ path: '/a' })),
+    ).resolves.toEqual({ result: { path: '/a' }, replayed: false });
   });
 
-  it('ignores missing key', () => {
+  it('does not retain operations without a key', async () => {
     const s = new IdempotencyStore();
-    s.store('files.write', undefined, 'h1', { ok: true });
-    expect(s.lookup('files.write', undefined, 'h1')).toBeNull();
+    let runs = 0;
+    const run = async () => ({ run: ++runs });
+    await expect(s.execute('files.write', undefined, 'h1', run)).resolves.toEqual({
+      result: { run: 1 },
+      replayed: false,
+    });
+    await expect(s.execute('files.write', undefined, 'h1', run)).resolves.toEqual({
+      result: { run: 2 },
+      replayed: false,
+    });
   });
 
-  it('stores and replays matching key+hash', () => {
+  it('stores and replays matching key+hash', async () => {
     const s = new IdempotencyStore();
-    s.store('files.write', 'k1', 'h1', { path: '/a' });
-    expect(s.lookup('files.write', 'k1', 'h1')).toEqual({ path: '/a' });
+    let runs = 0;
+    const run = async () => ({ path: `/a/${++runs}` });
+    await s.execute('files.write', 'k1', 'h1', run);
+    await expect(s.execute('files.write', 'k1', 'h1', run)).resolves.toEqual({
+      result: { path: '/a/1' },
+      replayed: true,
+    });
+    expect(runs).toBe(1);
   });
 
-  it('throws on key reuse with different hash', () => {
+  it('throws on key reuse with different hash', async () => {
     const s = new IdempotencyStore();
-    s.store('files.write', 'k1', 'h1', { path: '/a' });
-    expect(() => s.lookup('files.write', 'k1', 'h2')).toThrow(/idempotency/);
+    await s.execute('files.write', 'k1', 'h1', async () => ({ path: '/a' }));
     try {
-      s.lookup('files.write', 'k1', 'h2');
+      await s.execute('files.write', 'k1', 'h2', async () => ({ path: '/b' }));
+      throw new Error('expected conflict');
     } catch (e) {
       expect((e as { code: string }).code).toBe('idempotency_conflict');
       expect((e as { statusCode: number }).statusCode).toBe(409);

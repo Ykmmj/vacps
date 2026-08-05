@@ -103,6 +103,19 @@ export async function migrateAgentDb(db: Store): Promise<void> {
           WHERE schedule_id IS NOT NULL AND scheduled_for_ms IS NOT NULL`,
       ],
     },
+    {
+      version: 7,
+      statements: [
+        `ALTER TABLE tasks ADD COLUMN output_pruned_at TEXT`,
+        `CREATE INDEX IF NOT EXISTS tasks_output_prune
+          ON tasks(finished_at) WHERE output_pruned_at IS NULL AND finished_at IS NOT NULL`,
+        `CREATE INDEX IF NOT EXISTS schedulers_due
+          ON schedulers(enabled, next_run_at)`,
+        `CREATE INDEX IF NOT EXISTS tasks_schedule_active
+          ON tasks(schedule_id)
+          WHERE schedule_id IS NOT NULL AND status IN ('queued', 'running')`,
+      ],
+    },
   ];
 
   for (const m of migrations) {

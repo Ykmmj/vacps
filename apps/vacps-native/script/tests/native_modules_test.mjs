@@ -6,6 +6,7 @@
  * On failure: throws Error so the host run fails.
  */
 import * as log from 'vacps:log';
+import * as timer from 'vacps:timer';
 import * as host from 'vacps:host';
 import { Store } from 'vacps:store';
 import * as fs from 'vacps:fs';
@@ -89,6 +90,31 @@ await test('log levels + async flush', async () => {
   log.warn('warn-js');
   log.error('error-js');
   await log.flush();
+});
+
+// ── vacps:timer ───────────────────────────────────────────────────
+
+await test('timer.sleep is asynchronous and supports concurrent waits', async () => {
+  const order = [];
+  const pending = timer.sleep(0).then(() => order.push('timer'));
+  order.push('sync');
+  assertEq(order.join(','), 'sync', 'sleep must not settle inline');
+  await pending;
+  assertEq(order.join(','), 'sync,timer', 'sleep settles on a later turn');
+
+  await Promise.all(Array.from({ length: 64 }, (_, index) => timer.sleep(index % 4)));
+});
+
+await test('timer.sleep rejects invalid arguments synchronously', () => {
+  for (const value of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 4_294_967_296]) {
+    let threw = false;
+    try {
+      timer.sleep(value);
+    } catch {
+      threw = true;
+    }
+    assert(threw, `expected synchronous rejection for ${String(value)}`);
+  }
 });
 
 // ── global URL / Encoding APIs ───────────────────────────────────

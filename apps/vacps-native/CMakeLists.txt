@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(vacps-native VERSION 0.1.7 LANGUAGES C CXX
+project(vacps-native VERSION 0.1.8 LANGUAGES C CXX
   DESCRIPTION "Asio + QuickJS native agent runtime")
 
 set(CMAKE_CXX_STANDARD 23)
@@ -203,6 +203,7 @@ vacps_layer(vacps_modules
   src/modules/crypto.cpp
   src/modules/host.cpp
   src/modules/log.cpp
+  src/modules/timer.cpp
   src/modules/store.cpp
   src/modules/fs.cpp
   src/modules/http.cpp

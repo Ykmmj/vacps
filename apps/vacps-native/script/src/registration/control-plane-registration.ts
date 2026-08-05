@@ -59,7 +59,8 @@ export async function registerWithControlPlane(config: AgentConfig): Promise<str
     url,
     headers,
     body,
-    timeoutMs: 30_000,
+    // Bound below host lifecycle deadline with margin.
+    timeoutMs: 10_000,
   });
   const text = bodyText(res.body);
   if (res.status < 200 || res.status >= 300) {
@@ -108,7 +109,8 @@ export async function reportTelemetry(
       ...sig,
     },
     body,
-    timeoutMs: 30_000,
+    // Bound below host lifecycle deadline with margin.
+    timeoutMs: 10_000,
   });
   const text = bodyText(res.body);
   if (res.status < 200 || res.status >= 300) {

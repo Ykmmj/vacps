@@ -7,6 +7,7 @@
 | `vacps:crypto`  | 同步自由函数                              |
 | `vacps:host`    | 同步自由函数（进程信息）                  |
 | `vacps:log`     | 同步日志 + async `flush`                  |
+| `vacps:timer`   | Asio 原生 async `sleep`                   |
 | `vacps:store`   | 仅导出 class `Store`（静态 `open` + 实例方法） |
 | `vacps:fs`      | class `File` + 命名空间路径操作（async）  |
 | `vacps:http`    | outbound `request`（async）+ inbound class `Server` |
@@ -62,6 +63,19 @@ TS 声明见 `script/types/url.d.ts` 等（只声明已实现面）。
 | --- | --- |
 | `trace/debug/info/warn/error(msg: string)` | 同步写入 spdlog |
 | `flush(): Promise<void>` | **async**：`create_async_function` + `Runtime::Async::run_blocking` → `vacps::log::flush()` |
+
+---
+
+## `vacps:timer`
+
+| API | 说明 |
+| --- | --- |
+| `sleep(delayMs): Promise<void>` | 在 Runtime 主 executor 上用 `asio::steady_timer` 等待；不占 worker 线程 |
+
+- JS 边界为 **Wide contract**：`delayMs` 必须是 `0..4294967295` 的有限整数 Number；非法输入在 Promise 创建前同步抛 `TypeError` / `RangeError`。
+- Runtime stop 经 `std::stop_token` 取消 pending timer，Promise 以取消错误拒绝。
+- 这是通用事件循环能力，不提供 `setTimeout` / `setInterval` 全局兼容层，也不知道注册、遥测、调度等产品业务。
+- 周期、退避、循环停止和业务资源关闭顺序由 JavaScript 产品层表达。
 
 ---
 

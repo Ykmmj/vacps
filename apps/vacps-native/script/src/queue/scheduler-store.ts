@@ -188,13 +188,33 @@ export class SchedulerStore {
     return rowToScheduler(rows[0]!);
   }
 
-  async listEnabled(): Promise<StoredScheduler[]> {
-    return (await this.list()).filter((s) => s.enabled);
+  /**
+   * Enabled schedules whose absolute next_run_at is due (SQL-bounded, earliest first).
+   * Rows without next_run_at are out of contract and never selected.
+   */
+  async listDue(nowMs: number, limit = 128): Promise<StoredScheduler[]> {
+    const nowIso = canonicalUtcIso(nowMs) ?? new Date(nowMs).toISOString();
+    const rows = await this.db.query(
+      `SELECT * FROM schedulers
+       WHERE enabled = 1
+         AND next_run_at IS NOT NULL
+         AND next_run_at <= ?
+       ORDER BY next_run_at ASC
+       LIMIT ?;`,
+      [nowIso, limit],
+    );
+    return rows.map(rowToScheduler);
   }
 
   /**
-   * CAS claim of current next_run_at + insert occurrence tasks in **one**
+   * CAS claim of current next_run_at + conditional occurrence inserts in **one**
    * `store.transaction()` unit (BEGIN … UPDATE … INSERTs … COMMIT on db_pool).
+   *
+   * Cursor CAS advances whenever id/revision/enabled/next_run_at match, even when
+   * concurrency=forbid suppresses every insert (enqueued_count stays 0).
+   * Each INSERT is gated by: concurrency='queue' OR no active (queued|running)
+   * task for this schedule_id — so queue inserts all planned slots and forbid
+   * inserts only when no earlier task for the schedule is active.
    *
    * `beforeInsert` is optional and must not touch the DB — tests use it to throw
    * before the transaction to simulate insert failure / rollback of the claim.
@@ -222,7 +242,7 @@ export class SchedulerStore {
       return { claimed: false, reason: 'not_due', slots: [], advancedNext: null };
     }
 
-    const slots: ClaimEnqueueSlot[] = plan.enqueueSlots.map((iso) => {
+    const plannedSlots: ClaimEnqueueSlot[] = plan.enqueueSlots.map((iso) => {
       const ms = Date.parse(iso);
       return {
         occurrenceId: occurrenceId(schedule.id, schedule.revision, ms),
@@ -233,7 +253,7 @@ export class SchedulerStore {
     });
 
     if (beforeInsert) {
-      for (const slot of slots) {
+      for (const slot of plannedSlots) {
         await beforeInsert(slot, schedule);
       }
     }
@@ -241,6 +261,7 @@ export class SchedulerStore {
     const advanced = plan.advancedNext;
     const claimedAt = canonicalUtcIso(plan.scheduledForMs) ?? plan.scheduledForRaw;
     const nowIso = new Date().toISOString();
+    const concurrency = schedule.policy.concurrency;
 
     type Step = { sql: string; params?: readonly (string | number | null)[] };
     const steps: Step[] = [
@@ -266,7 +287,7 @@ export class SchedulerStore {
       },
     ];
 
-    for (const slot of slots) {
+    for (const slot of plannedSlots) {
       const dispatch = {
         ...schedule.task,
         task_id: slot.occurrenceId,
@@ -274,12 +295,20 @@ export class SchedulerStore {
         schedule_id: schedule.id,
         idempotency_key: slot.occurrenceId,
       };
+      // Conditional insert: queue always attempts; forbid only when no active task.
       steps.push({
         sql: `INSERT INTO tasks(
           id, backend_id, kind, status, profile, input_json,
           cancel_requested, created_at, updated_at,
           schedule_id, schedule_revision, scheduled_for_ms
-        ) VALUES(?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?)
+        )
+        SELECT ?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?
+        WHERE ? = 'queue'
+           OR NOT EXISTS (
+             SELECT 1 FROM tasks
+             WHERE schedule_id = ?
+               AND status IN ('queued', 'running')
+           )
         ON CONFLICT(id) DO NOTHING;`,
         params: [
           dispatch.task_id,
@@ -292,6 +321,8 @@ export class SchedulerStore {
           schedule.id,
           slot.revision,
           slot.scheduledForMs,
+          concurrency,
+          schedule.id,
         ],
       });
     }
@@ -309,10 +340,22 @@ export class SchedulerStore {
         advancedNext: null,
       };
     }
+
+    // Only report slots whose INSERT actually changed a row (not suppressed / conflict).
+    const insertedSlots: ClaimEnqueueSlot[] = [];
+    for (let i = 0; i < plannedSlots.length; i++) {
+      const stepResult = results[i + 1];
+      const inserted =
+        stepResult != null && !Array.isArray(stepResult) ? stepResult.changes : 0;
+      if (inserted === 1) {
+        insertedSlots.push(plannedSlots[i]!);
+      }
+    }
+
     return {
       claimed: true,
       plan,
-      slots,
+      slots: insertedSlots,
       advancedNext: advanced,
     };
   }

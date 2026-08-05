@@ -52,7 +52,8 @@ export async function reportScheduleOccurrenceAck(
         ...sig,
       },
       body,
-      timeoutMs: 15_000,
+      // Concurrent acks use a short bound so N failures cannot stack to the host deadline.
+      timeoutMs: 5_000,
     });
     if (res.status < 200 || res.status >= 300) {
       const text = bodyText(res.body);

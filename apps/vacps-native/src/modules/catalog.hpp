@@ -14,6 +14,10 @@ namespace vacps::process {
 class ProcessRuntime;
 }
 
+namespace vacps::host {
+class Application;
+}
+
 namespace vacps::js {
 
 /**
@@ -31,9 +35,9 @@ struct ModuleDescriptor {
  * Runtime-scoped module composition state owned by ModuleCatalog.
  *
  * Contract: Narrow (construction / opaque install)
- * Preconditions: Application always supplies live Runtime::Async,
- * Runtime::Callbacks, and ProcessRuntime references that outlive the catalog
- * for the Runtime lifetime.
+ * Preconditions: Application supplies its own live lifecycle reference plus
+ * live Runtime::Async, Runtime::Callbacks, and ProcessRuntime references that
+ * outlive the catalog for the Runtime lifetime.
  *
  * Installed as JSRuntime opaque so C-module init callbacks recover host-wired
  * capabilities from a live JSContext alone. Does not store Async/Callbacks by
@@ -47,6 +51,7 @@ struct ModuleDescriptor {
  * used.
  */
 struct RuntimeModuleComposition {
+  host::Application& application;
   Runtime::Async& async_runtime;
   Runtime::Callbacks& callbacks_runtime;
   process::ProcessRuntime& process_runtime;
@@ -60,12 +65,14 @@ struct RuntimeModuleComposition {
   std::string ca_bundle;
 
   RuntimeModuleComposition(
+      host::Application& application_in,
       Runtime::Async& async_runtime_in,
       Runtime::Callbacks& callbacks_runtime_in,
       process::ProcessRuntime& process_runtime_in,
       std::string data_dir_in = "data",
       std::string ca_bundle_in = {})
-      : async_runtime(async_runtime_in),
+      : application(application_in),
+        async_runtime(async_runtime_in),
         callbacks_runtime(callbacks_runtime_in),
         process_runtime(process_runtime_in),
         data_dir(
@@ -89,10 +96,11 @@ class ModuleCatalog {
  public:
   /**
    * Contract: Narrow
-   * Preconditions: async/callbacks/process outlive this catalog for the
-   * Runtime lifetime; data_dir empty becomes "data".
+   * Preconditions: application/async/callbacks/process outlive this catalog
+   * for the Runtime lifetime; data_dir empty becomes "data".
    */
   explicit ModuleCatalog(
+      host::Application& application,
       Runtime::Async& async_runtime,
       Runtime::Callbacks& callbacks_runtime,
       process::ProcessRuntime& process_runtime,

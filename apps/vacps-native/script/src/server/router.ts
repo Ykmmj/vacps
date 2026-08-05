@@ -1,8 +1,13 @@
+import * as log from 'vacps:log';
+
 import type { HostRequest, HostResponse } from '../contracts/http';
 
 /**
  * Minimal Fastify-shaped router for inbound JS onRequest callbacks.
  * Native transport has zero product routes; script registers them with app.get/post/…
+ *
+ * Contract: Wide at the HTTP boundary — malformed URI encoding and unexpected
+ * handler failures are mapped to stable status codes (never crash the callback).
  */
 
 export type RouteParams = Record<string, string>;
@@ -80,6 +85,15 @@ interface CompiledRoute {
 
 const INVALID_JSON = Symbol('vacps.invalid_json');
 
+class InvalidUriError extends Error {
+  readonly code = 'invalid_uri';
+  readonly statusCode = 400;
+  constructor() {
+    super('Malformed percent-encoding in request URI.');
+    this.name = 'InvalidUriError';
+  }
+}
+
 function compilePath(path: string): { keys: string[]; pattern: RegExp } {
   const keys: string[] = [];
   const parts = path.split('/').map((seg) => {
@@ -107,6 +121,14 @@ function headerMap(h: Readonly<Record<string, string>>): Record<string, string> 
   return out;
 }
 
+function decodeUriComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new InvalidUriError();
+  }
+}
+
 function parseQuery(query: string): QueryParams {
   const out: QueryParams = {};
   const q = query.startsWith('?') ? query.slice(1) : query;
@@ -114,8 +136,8 @@ function parseQuery(query: string): QueryParams {
   for (const part of q.split('&')) {
     if (!part) continue;
     const eq = part.indexOf('=');
-    const k = decodeURIComponent(eq >= 0 ? part.slice(0, eq) : part);
-    const v = decodeURIComponent(eq >= 0 ? part.slice(eq + 1) : '');
+    const k = decodeUriComponent(eq >= 0 ? part.slice(0, eq) : part);
+    const v = decodeUriComponent(eq >= 0 ? part.slice(eq + 1) : '');
     if (k) out[k] = v;
   }
   return out;
@@ -136,6 +158,25 @@ function parseBody(raw: HostRequest, headers: Record<string, string>): unknown {
     }
   }
   return raw.body;
+}
+
+function jsonError(status: number, code: string, message: string): HostResponse {
+  return {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ error: { code, message } }),
+  };
+}
+
+function logAndInternalError(
+  requestId: string,
+  method: string,
+  path: string,
+  error: unknown,
+): HostResponse {
+  const detail = error instanceof Error ? error.message : String(error);
+  log.error(`request failed id=${requestId} method=${method} path=${path}: ${detail}`);
+  return jsonError(500, 'internal_error', 'Internal server error.');
 }
 
 export class App {
@@ -190,19 +231,36 @@ export class App {
       return reply.toHostResponse();
     }
 
+    let query: QueryParams;
+    try {
+      query = parseQuery(raw.query ?? '');
+    } catch (error) {
+      if (error instanceof InvalidUriError) {
+        return jsonError(400, 'invalid_uri', error.message);
+      }
+      return logAndInternalError(raw.requestId, method, path, error);
+    }
+
     let match: CompiledRoute | undefined;
     let params: RouteParams = {};
-    for (const r of this.routes) {
-      if (r.method !== method) continue;
-      const m = r.pattern.exec(path);
-      if (!m) continue;
-      match = r;
-      params = {};
-      for (let i = 0; i < r.keys.length; i++) {
-        const key = r.keys[i]!;
-        params[key] = decodeURIComponent(m[i + 1] ?? '');
+    try {
+      for (const r of this.routes) {
+        if (r.method !== method) continue;
+        const m = r.pattern.exec(path);
+        if (!m) continue;
+        match = r;
+        params = {};
+        for (let i = 0; i < r.keys.length; i++) {
+          const key = r.keys[i]!;
+          params[key] = decodeUriComponent(m[i + 1] ?? '');
+        }
+        break;
       }
-      break;
+    } catch (error) {
+      if (error instanceof InvalidUriError) {
+        return jsonError(400, 'invalid_uri', error.message);
+      }
+      return logAndInternalError(raw.requestId, method, path, error);
     }
 
     const request: AppRequest = {
@@ -212,15 +270,19 @@ export class App {
       headers,
       body,
       params,
-      query: parseQuery(raw.query ?? ''),
+      query,
       requestId: raw.requestId,
       raw,
     };
 
     for (const hook of this.hooks.preValidation ?? []) {
-      const out = await hook(request, reply);
-      if (reply.sent) return reply.toHostResponse();
-      if (out !== undefined && out !== null) return reply.toHostResponse(out);
+      try {
+        const out = await hook(request, reply);
+        if (reply.sent) return reply.toHostResponse();
+        if (out !== undefined && out !== null) return reply.toHostResponse(out);
+      } catch (error) {
+        return logAndInternalError(request.requestId, request.method, request.path, error);
+      }
     }
 
     if (!match) {
@@ -234,12 +296,8 @@ export class App {
       const out = await match.handler(request, reply);
       if (reply.sent) return reply.toHostResponse();
       return reply.toHostResponse(out);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      reply.code(500).send({
-        error: { code: 'internal_error', message: msg },
-      });
-      return reply.toHostResponse();
+    } catch (error) {
+      return logAndInternalError(request.requestId, request.method, request.path, error);
     }
   }
 }

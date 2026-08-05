@@ -8,14 +8,28 @@ import type {
 import { AppError } from '../lib/http.js';
 import { createControlPlaneSignatureHeaders } from '../security/request-signatures.js';
 
+/**
+ * Target backend for control → agent calls. Audience id is signed explicitly
+ * (x-vps-control-backend-id) so a shared control key cannot cross-replay.
+ * Accepts Backend (`id`) or registration-shaped (`backendId`) targets.
+ */
+export type BackendRequestTarget =
+  | Pick<Backend, 'id' | 'baseUrl'>
+  | { backendId: string; baseUrl: string };
+
+/** Contract: Narrow — caller supplies a typed BackendRequestTarget discriminant. */
+function backendAudienceId(backend: BackendRequestTarget): string {
+  return 'id' in backend ? backend.id : backend.backendId;
+}
+
 export class BackendClient {
   constructor(private readonly controlPlaneSigningPrivateKey: string | undefined) {}
 
-  async health(backend: Pick<Backend, 'baseUrl'>): Promise<BackendHealth> {
+  async health(backend: BackendRequestTarget): Promise<BackendHealth> {
     return this.request(backend, '/health', { method: 'GET' }) as Promise<BackendHealth>;
   }
 
-  async status(backend: Pick<Backend, 'baseUrl'>): Promise<BackendStatusResponse> {
+  async status(backend: BackendRequestTarget): Promise<BackendStatusResponse> {
     const [health, metrics] = await Promise.all([
       this.request(backend, '/health', { method: 'GET' }),
       this.request(backend, '/metrics', { method: 'GET' }),
@@ -26,16 +40,16 @@ export class BackendClient {
     };
   }
 
-  async createTask(backend: Pick<Backend, 'baseUrl'>, task: unknown): Promise<unknown> {
+  async createTask(backend: BackendRequestTarget, task: unknown): Promise<unknown> {
     return this.request(backend, '/tasks', { method: 'POST', body: JSON.stringify(task) });
   }
 
-  async getTask(backend: Pick<Backend, 'baseUrl'>, taskId: string): Promise<unknown> {
+  async getTask(backend: BackendRequestTarget, taskId: string): Promise<unknown> {
     return this.request(backend, `/tasks/${encodeURIComponent(taskId)}`, { method: 'GET' });
   }
 
   async getLogs(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     taskId: string,
     query: {
       stream?: 'stdout' | 'stderr';
@@ -60,7 +74,7 @@ export class BackendClient {
   }
 
   async readFile(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     input: {
       path: string;
       startLine?: number | undefined;
@@ -77,12 +91,12 @@ export class BackendClient {
     return this.request(backend, `/fs/read?${params.toString()}`, { method: 'GET' });
   }
 
-  async statFile(backend: Pick<Backend, 'baseUrl'>, path: string): Promise<unknown> {
+  async statFile(backend: BackendRequestTarget, path: string): Promise<unknown> {
     return this.request(backend, `/fs/stat?${new URLSearchParams({ path })}`, { method: 'GET' });
   }
 
   async listDir(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     input: { path: string; limit?: number; includeHidden?: boolean; cursor?: string },
   ): Promise<unknown> {
     const params = new URLSearchParams({ path: input.path });
@@ -92,7 +106,7 @@ export class BackendClient {
     return this.request(backend, `/fs/list?${params.toString()}`, { method: 'GET' });
   }
 
-  async glob(backend: Pick<Backend, 'baseUrl'>, body: Record<string, unknown>): Promise<unknown> {
+  async glob(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/glob', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -100,7 +114,7 @@ export class BackendClient {
     });
   }
 
-  async grep(backend: Pick<Backend, 'baseUrl'>, body: Record<string, unknown>): Promise<unknown> {
+  async grep(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/grep', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -109,14 +123,14 @@ export class BackendClient {
   }
 
   async editFile(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/fs/edit', { method: 'POST', body: JSON.stringify(body) });
   }
 
   async writeFile(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/fs/write', {
@@ -127,7 +141,7 @@ export class BackendClient {
   }
 
   async applyPatch(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/fs/apply_patch', {
@@ -138,29 +152,29 @@ export class BackendClient {
   }
 
   async moveFile(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/fs/move', { method: 'POST', body: JSON.stringify(body) });
   }
 
   async deleteFile(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/fs/delete', { method: 'POST', body: JSON.stringify(body) });
   }
 
-  async mkdir(backend: Pick<Backend, 'baseUrl'>, body: Record<string, unknown>): Promise<unknown> {
+  async mkdir(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
     return this.request(backend, '/fs/mkdir', { method: 'POST', body: JSON.stringify(body) });
   }
 
-  async getCapabilities(backend: Pick<Backend, 'baseUrl'>): Promise<unknown> {
+  async getCapabilities(backend: BackendRequestTarget): Promise<unknown> {
     return this.request(backend, '/capabilities', { method: 'GET' });
   }
 
   async execCommand(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     const yieldMs = typeof body.yield_time_ms === 'number' ? body.yield_time_ms : 10_000;
@@ -172,7 +186,7 @@ export class BackendClient {
   }
 
   async execShell(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     const yieldMs = typeof body.yield_time_ms === 'number' ? body.yield_time_ms : 10_000;
@@ -184,7 +198,7 @@ export class BackendClient {
   }
 
   async processStartCommand(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/process/start_command', {
@@ -195,7 +209,7 @@ export class BackendClient {
   }
 
   async processStartShell(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/process/start_shell', {
@@ -206,7 +220,7 @@ export class BackendClient {
   }
 
   async processRead(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     const waitMs = typeof body.wait_ms === 'number' ? body.wait_ms : 0;
@@ -218,14 +232,14 @@ export class BackendClient {
   }
 
   async processWrite(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/process/write', { method: 'POST', body: JSON.stringify(body) });
   }
 
   async processTerminate(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/process/terminate', {
@@ -234,7 +248,7 @@ export class BackendClient {
     });
   }
 
-  async cancelTask(backend: Pick<Backend, 'baseUrl'>, taskId: string): Promise<unknown> {
+  async cancelTask(backend: BackendRequestTarget, taskId: string): Promise<unknown> {
     // Always send JSON body so Content-Type: application/json is valid for the agent parser.
     return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/cancel`, {
       method: 'POST',
@@ -242,7 +256,7 @@ export class BackendClient {
     });
   }
 
-  async retryTask(backend: Pick<Backend, 'baseUrl'>, taskId: string): Promise<unknown> {
+  async retryTask(backend: BackendRequestTarget, taskId: string): Promise<unknown> {
     return this.request(backend, `/tasks/${encodeURIComponent(taskId)}/retry`, {
       method: 'POST',
       body: JSON.stringify({}),
@@ -250,7 +264,7 @@ export class BackendClient {
   }
 
   async upsertScheduler(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     id: string,
     schedule: unknown,
   ): Promise<void> {
@@ -260,12 +274,12 @@ export class BackendClient {
     });
   }
 
-  async deleteScheduler(backend: Pick<Backend, 'baseUrl'>, id: string): Promise<void> {
+  async deleteScheduler(backend: BackendRequestTarget, id: string): Promise<void> {
     await this.request(backend, `/schedulers/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   async runSchedule(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     id: string,
     task: unknown,
   ): Promise<unknown> {
@@ -276,7 +290,7 @@ export class BackendClient {
   }
 
   private async request(
-    backend: Pick<Backend, 'baseUrl'>,
+    backend: BackendRequestTarget,
     path: string,
     init: RequestInit & { timeoutMs?: number },
   ): Promise<unknown> {
@@ -284,6 +298,7 @@ export class BackendClient {
     const timeoutMs = init.timeoutMs ?? 12_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const targetUrl = joinBackendUrl(backend.baseUrl, path);
+    const backendId = backendAudienceId(backend);
     try {
       const body = typeof init.body === 'string' ? init.body : '';
       const request = new Request(targetUrl, { method: init.method ?? 'GET' });
@@ -291,6 +306,7 @@ export class BackendClient {
         this.controlPlaneSigningPrivateKey,
         request,
         body,
+        backendId,
       );
       const { timeoutMs: _ignored, ...fetchInit } = init;
       const response = await fetch(request, {

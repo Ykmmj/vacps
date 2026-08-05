@@ -1,9 +1,14 @@
 /**
  * Agent → control-plane request signatures (parity with apps/vacps).
  * Uses vacps:crypto (OpenSSL) instead of Node webcrypto.
+ * Canonical version: vacps-request-v2.
  */
 import * as crypto from 'vacps:crypto';
 import * as host from 'vacps:host';
+
+import { requestTargetOf } from './request-target';
+
+export { requestTargetFromParts, requestTargetOf } from './request-target';
 
 export function createAgentSignatureHeaders(
   backendId: string,
@@ -14,13 +19,13 @@ export function createAgentSignatureHeaders(
 ): Record<string, string> {
   const timestamp = String(Math.floor(host.nowMs() / 1000));
   const nonce = crypto.base64UrlEncode(crypto.randomBytes(16));
-  const path = pathnameOf(url);
+  const target = requestTargetOf(url);
   const bodyDigest = crypto.base64UrlEncode(crypto.sha256(body));
   const canonical = [
-    'vacps-request-v1',
+    'vacps-request-v2',
     'agent',
     method.toUpperCase(),
-    path,
+    target,
     backendId,
     timestamp,
     nonce,
@@ -34,18 +39,4 @@ export function createAgentSignatureHeaders(
     'x-vacps-nonce': nonce,
     'x-vacps-signature': crypto.base64UrlEncode(signature),
   };
-}
-
-function pathnameOf(url: string): string {
-  // Minimal URL path extract (QuickJS has no URL global).
-  const scheme = url.indexOf('://');
-  if (scheme < 0) throw new Error('invalid url for signature');
-  const rest = url.slice(scheme + 3);
-  const slash = rest.indexOf('/');
-  if (slash < 0) return '/';
-  const pathQuery = rest.slice(slash);
-  const hash = pathQuery.indexOf('#');
-  const noHash = hash >= 0 ? pathQuery.slice(0, hash) : pathQuery;
-  const q = noHash.indexOf('?');
-  return q >= 0 ? noHash.slice(0, q) : noHash;
 }

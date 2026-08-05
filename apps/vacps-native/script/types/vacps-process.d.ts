@@ -32,6 +32,12 @@ declare module 'vacps:process' {
     readonly timedOut: boolean;
     readonly stdout: string;
     readonly stderr: string;
+    /** Exact bytes drained from stdout/stderr, including discarded bytes. */
+    readonly stdoutBytes: number;
+    readonly stderrBytes: number;
+    /** True when the native capture cap or global process budget discarded bytes. */
+    readonly stdoutTruncated: boolean;
+    readonly stderrTruncated: boolean;
   }
 
   /**

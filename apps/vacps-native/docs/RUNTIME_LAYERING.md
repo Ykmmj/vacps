@@ -30,7 +30,7 @@ src/
 │   └── detail/ # Runtime::Impl（内部实现；非产品 API）
 ├── host/       # command_line、Application::Options、EntryModule
 ├── globals/    # URL / URLSearchParams / TextEncoder / TextDecoder
-├── modules/    # ModuleCatalog + crypto/host/log/store/fs/http
+├── modules/    # ModuleCatalog + crypto/host/log/timer/store/fs/http/process
 ├── http/       # outbound client + inbound server transport（纯 C++）
 ├── app/ …      # 其它域库与进程入口
 └── main.cpp
@@ -48,7 +48,7 @@ src/
 | Promise | `PromiseCapability`、`Runtime::await_value` | 正向 native Promise；反向 JS thenable（Callbacks 复用此路径） |
 | 原语 | `qjs::OwnedValue`、`ScopedCString` | 唯一 JS 值 / CString 拥有层 |
 | DSL | `ModuleBuilder`、`ClassBuilder`、`create_function` / `create_async_function` | 直接使用 `qjs::OwnedValue` |
-| 模块 | `ModuleCatalog` + crypto/host/log/store/fs/http | 见上 |
+| 模块 | `ModuleCatalog` + crypto/host/log/timer/store/fs/http/process | 见上 |
 | 域库 | crypto / url / text / fs / http / … | 纯 C++；未进 catalog 则无 JS 导出 |
 
 依赖：Runtime 与 Binding 均直接依赖 `vacps::qjs`。禁止在 run_blocking / worker 边界携带 JS 拥有 RAII。
@@ -119,6 +119,7 @@ src/
 - Async：经非拥有 `Runtime::Async*` 进入唯一 Promise 入口（注册时非空 `Runtime::Async*` 为 Narrow 组合前置条件；缺失 wiring 不是友好的 JS `InternalError`）。Promise 创建前的 **Wide** 输入/准入错误抛 JS 异常且不建 Promise；之后由 `Runtime::Async` reject。
 - Inbound `Server`：module-private `ServerNative` 拥有 `onRequest` 根 + domain `http::Server`；经 `Runtime::Callbacks` 调 JS。
 - `vacps:process`：域工作仅 `main_executor`。见 [`PROCESS_RUNTIME.md`](./PROCESS_RUNTIME.md)。
+- `vacps:timer`：`steady_timer` 直接运行在 `main_executor`；不投递 worker。产品周期循环由 JavaScript 持有并在 `shutdown()` 中停止/等待。
 - Globals：`ClassBuilder`；WebIDL ToString 用 `binding::try_coerce_string`。
 
 ### 3.7 启动配置
@@ -138,7 +139,7 @@ C++ 进程旋钮**仅**来自 CLI（`host::parse_command_line` → `Application:
 | `napi_compat` / 完整 N-API v9 / Node addon 兼容 | **不存在**；surface 保持 QuickJS-native binding DSL |
 | HTTP product routes / JSON 错误体 | 属 script；native `vacps:http` 仅为 binary transport |
 
-已编译 catalog：`vacps:crypto` / `host` / `log` / `store` / `fs` / `http` / `process`。以 `CMakeLists.txt` 与 `ModuleCatalog` 构造函数为准。
+已编译 catalog：`vacps:crypto` / `host` / `log` / `timer` / `store` / `fs` / `http` / `process`。以 `CMakeLists.txt` 与 `ModuleCatalog` 构造函数为准。
 
 ## 5. 所有权与线程
 
@@ -192,7 +193,7 @@ SIGINT/SIGTERM 或 Application::request_stop
 
 ## 7. 路线图
 
-1. 基线：`vacps::Runtime` + `Runtime::Impl`（含 Async/Callbacks/Script）、双向 Promise、binding DSL 同步路径直接执行、crypto/host/log/store/fs/http/process、globals。
+1. 基线：`vacps::Runtime` + `Runtime::Impl`（含 Async/Callbacks/Script）、双向 Promise、binding DSL 同步路径直接执行、crypto/host/log/timer/store/fs/http/process、globals。
 2. 其余域能力按需迁入 ModuleCatalog + binding DSL。
 3. 完整 N-API / `napi_compat` **不在**当前目标。
 

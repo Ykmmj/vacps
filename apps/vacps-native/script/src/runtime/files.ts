@@ -78,16 +78,56 @@ function asUint8(buf: ArrayBuffer | Uint8Array): Uint8Array {
 // ── Product-local File helpers (open → bytes I/O → close) ─
 // Text lives in JS TextEncoder/TextDecoder (native vacps:fs is bytes-first).
 
-const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
+/** Deliberate maximum for whole-file in-memory operations. */
+const WHOLE_FILE_MAX_BYTES = 16 * 1024 * 1024;
+/** Maximum size for optional read/stat SHA-256 digests. */
+const OPTIONAL_SHA256_MAX_BYTES = 8 * 1024 * 1024;
 
-async function readTextFile(path: string): Promise<string> {
+const textEncoder = new TextEncoder();
+/** Fatal decoder for whole-file text mutation paths; never replacement-decodes. */
+const fatalUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
+
+function fileTooLargeError(maxBytes: number): Error & { code: string; statusCode: number } {
+  return runtimeError(
+    `File exceeds the maximum size of ${maxBytes} bytes.`,
+    'file_too_large',
+    413,
+    { max_bytes: maxBytes },
+  );
+}
+
+/** Decode whole-file bytes as UTF-8; invalid sequences → structured 409. */
+function decodeWholeFileUtf8(bytes: Uint8Array): string {
+  try {
+    return fatalUtf8Decoder.decode(bytes);
+  } catch {
+    throw runtimeError('File content is not valid UTF-8.', 'invalid_encoding', 409);
+  }
+}
+
+/**
+ * Read an entire file as bytes. Never returns a silent prefix as a whole file:
+ * requests limit+1 and throws structured 413 file_too_large when oversized.
+ * Every File.read call passes an explicit max.
+ */
+async function readWholeBytesFile(path: string, maxBytes: number): Promise<Uint8Array> {
   const f = await File.open(path, { mode: 'read' });
   try {
-    return textDecoder.decode(await f.read());
+    const bytes = asUint8(await f.read(maxBytes + 1));
+    if (bytes.byteLength > maxBytes) {
+      throw fileTooLargeError(maxBytes);
+    }
+    return bytes;
   } finally {
     await f.close();
   }
+}
+
+async function readTextFile(
+  path: string,
+  maxBytes: number = WHOLE_FILE_MAX_BYTES,
+): Promise<string> {
+  return decodeWholeFileUtf8(await readWholeBytesFile(path, maxBytes));
 }
 
 async function writeTextFile(path: string, content: string): Promise<void> {
@@ -99,29 +139,10 @@ async function writeTextFile(path: string, content: string): Promise<void> {
   }
 }
 
-async function readBytesFile(path: string): Promise<Uint8Array> {
-  const f = await File.open(path, { mode: 'read' });
-  try {
-    return asUint8(await f.read());
-  } finally {
-    await f.close();
-  }
-}
-
 async function readRangeFile(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
   const f = await File.open(path, { mode: 'read' });
   try {
     return asUint8(await f.readAt(offset, maxBytes));
-  } finally {
-    await f.close();
-  }
-}
-
-async function hashFileBytes(path: string): Promise<{ sizeBytes: number; sha256Hex: string }> {
-  const f = await File.open(path, { mode: 'read' });
-  try {
-    const bytes = asUint8(await f.read());
-    return { sizeBytes: bytes.byteLength, sha256Hex: crypto.sha256Hex(bytes) };
   } finally {
     await f.close();
   }
@@ -139,9 +160,9 @@ export async function filesStat(pathInput: string) {
   }
 
   let digest: string | null = null;
-  if (st.type === 'file' && st.size <= 8 * 1024 * 1024) {
+  if (st.type === 'file' && st.size <= OPTIONAL_SHA256_MAX_BYTES) {
     try {
-      digest = crypto.sha256Hex(await readBytesFile(path));
+      digest = crypto.sha256Hex(await readWholeBytesFile(path, OPTIONAL_SHA256_MAX_BYTES));
     } catch {
       digest = null;
     }
@@ -181,14 +202,23 @@ export async function filesRead(input: {
     );
   }
 
-  if (!(await exists(path))) {
+  let st: FileStat;
+  try {
+    st = await stat(path);
+  } catch {
     throw runtimeError(`Path not found: ${path}`, 'path_not_found', 404);
   }
 
-  // Digest of full file; content loaded only for the requested window.
-  const digestInfo = await hashFileBytes(path);
-  const sizeBytes = digestInfo.sizeBytes;
-  const digest = digestInfo.sha256Hex;
+  // Authoritative size from stat; content loaded only for the requested window.
+  const sizeBytes = st.size;
+  let digest: string | null = null;
+  if (st.type === 'file' && sizeBytes <= OPTIONAL_SHA256_MAX_BYTES) {
+    try {
+      digest = crypto.sha256Hex(await readWholeBytesFile(path, OPTIONAL_SHA256_MAX_BYTES));
+    } catch {
+      digest = null;
+    }
+  }
 
   if (encoding === 'base64') {
     const end = Math.min(maxBytes, sizeBytes);
@@ -263,7 +293,7 @@ export async function filesWrite(input: {
     throw runtimeError('Path not found.', 'path_not_found', 404);
   }
   if (pathExists && input.expectedSha256) {
-    const current = crypto.sha256Hex(await readTextFile(path));
+    const current = crypto.sha256Hex(await readWholeBytesFile(path, WHOLE_FILE_MAX_BYTES));
     if (normalizeHash(input.expectedSha256) !== current) {
       throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
         current_sha256: current,
@@ -342,7 +372,7 @@ export async function filesDelete(input: {
     throw runtimeError(`Expected ${input.expectedType} but found ${type}.`, 'type_mismatch', 409);
   }
   if (type === 'file' && input.expectedSha256) {
-    const current = crypto.sha256Hex(await readBytesFile(path));
+    const current = crypto.sha256Hex(await readWholeBytesFile(path, WHOLE_FILE_MAX_BYTES));
     if (normalizeHash(input.expectedSha256) !== current) {
       throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
         current_sha256: current,
@@ -412,7 +442,7 @@ export async function filesMove(input: {
     throw runtimeError(`Path not found: ${from}`, 'path_not_found', 404);
   }
   if (fromSt.type === 'file' && input.expectedSha256) {
-    const current = crypto.sha256Hex(await readBytesFile(from));
+    const current = crypto.sha256Hex(await readWholeBytesFile(from, WHOLE_FILE_MAX_BYTES));
     if (normalizeHash(input.expectedSha256) !== current) {
       throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
         current_sha256: current,
@@ -470,10 +500,10 @@ export async function filesGlob(input: {
         .map((line) => line.trim())
         .filter(Boolean);
       const page = allLines.slice(offset, offset + limit);
+      // Omit size_bytes: rg --files does not provide sizes; do not claim zero.
       const matches = page.map((rel) => ({
         path: joinPath(root, rel),
         type: 'file' as const,
-        size_bytes: 0,
       }));
       const nextOffset = offset + matches.length;
       const truncated = nextOffset < allLines.length;
@@ -645,13 +675,18 @@ export async function filesEdit(input: {
   expectedSha256?: string;
 }) {
   const path = requireAbsolutePath(input.path);
-  const text = await readTextFile(path);
-  const beforeHash = crypto.sha256Hex(text);
+  if (input.oldText === '') {
+    throw runtimeError('old_text must not be empty.', 'validation_error', 400);
+  }
+  const currentBytesArr = await readWholeBytesFile(path, WHOLE_FILE_MAX_BYTES);
+  const currentBytes = currentBytesArr.byteLength;
+  const beforeHash = crypto.sha256Hex(currentBytesArr);
   if (input.expectedSha256 && normalizeHash(input.expectedSha256) !== beforeHash) {
     throw runtimeError('The file changed after it was read.', 'file_version_conflict', 409, {
       current_sha256: beforeHash,
     });
   }
+  const text = decodeWholeFileUtf8(currentBytesArr);
   const count = countOccurrences(text, input.oldText);
   if (count === 0) {
     throw runtimeError('old_text was not found.', 'old_text_not_found', 409);
@@ -664,16 +699,23 @@ export async function filesEdit(input: {
       { match_count: count },
     );
   }
+  const replacements = input.replaceAll ? count : 1;
+  const oldBytes = utf8ByteLengthOfString(input.oldText);
+  const newBytes = utf8ByteLengthOfString(input.newText);
+  const resultBytes = currentBytes - replacements * oldBytes + replacements * newBytes;
+  if (resultBytes > WHOLE_FILE_MAX_BYTES) {
+    throw fileTooLargeError(WHOLE_FILE_MAX_BYTES);
+  }
   const next = input.replaceAll
     ? text.split(input.oldText).join(input.newText)
     : text.replace(input.oldText, input.newText);
   await writeTextFile(path, next);
   return {
     path,
-    replacement_count: input.replaceAll ? count : 1,
+    replacement_count: replacements,
     before_sha256: beforeHash,
     after_sha256: crypto.sha256Hex(next),
-    bytes_changed: Math.abs(next.length - text.length),
+    bytes_changed: Math.abs(resultBytes - currentBytes),
   };
 }
 
@@ -713,8 +755,9 @@ export async function applyPatch(input: {
         if (!(await exists(op.absolute))) {
           throw runtimeError(`Cannot delete missing file ${op.path}`, 'path_not_found', 404);
         }
+        // Reject targets over 16 MiB before mutation (also bounds rollback backup).
+        const before = await readTextFile(op.absolute, WHOLE_FILE_MAX_BYTES);
         if (!input.dryRun) {
-          const before = await readTextFile(op.absolute);
           backups.set(op.absolute, before);
           await remove(op.absolute);
         }
@@ -723,8 +766,12 @@ export async function applyPatch(input: {
         if (!(await exists(op.absolute))) {
           throw runtimeError(`Cannot update missing file ${op.path}`, 'path_not_found', 404);
         }
-        const before = await readTextFile(op.absolute);
+        // Reject targets over 16 MiB before mutation.
+        const before = await readTextFile(op.absolute, WHOLE_FILE_MAX_BYTES);
         const after = applyHunks(before, op.hunks ?? []);
+        if (utf8ByteLengthOfString(after) > WHOLE_FILE_MAX_BYTES) {
+          throw fileTooLargeError(WHOLE_FILE_MAX_BYTES);
+        }
         if (!input.dryRun) {
           backups.set(op.absolute, before);
           await writeTextFile(op.absolute, after);
@@ -772,29 +819,36 @@ export async function detectCapabilities() {
   } catch {
     rgAvailable = false;
   }
+  // Schema v3 nested shape used by control-worker (no process start/read/write object).
   return {
-    files: {
-      read: true,
-      write: true,
-      edit: true,
-      glob: true,
-      grep: true,
-      apply_patch: true,
-      list: true,
-      stat: true,
-      move: true,
-      delete: true,
-      mkdir: true,
+    schema_version: '3.0',
+    features: {
+      command_exec: true,
+      shell_exec: true,
+      interactive_process: false,
+      file_patch: true,
+      // No git tool routes registered on this script.
+      git_tools: false,
     },
-    process: {
-      exec: true,
-      start: true,
-      read: true,
-      write: true,
-      terminate: true,
+    engines: {
+      grep: {
+        active: rgAvailable ? 'ripgrep' : 'walk',
+        available: rgAvailable,
+        version: rgVersion,
+        fallback: 'walk',
+        regex_flavor: rgAvailable ? 'rust' : 'javascript',
+        respects_gitignore: rgAvailable,
+      },
+      glob: {
+        dialect: 'globstar',
+        respects_gitignore: true,
+      },
     },
-    tools: {
-      rg: { available: rgAvailable, version: rgVersion },
+    limits: {
+      command_timeout_max_ms: 3_600_000,
+      // Interactive process read is unsupported on native.
+      process_read_max_bytes: 0,
+      file_read_max_bytes: 262_144,
     },
     pi: { available: false },
   };
@@ -1027,8 +1081,21 @@ function applyHunks(original: string, hunks: string[][]): string {
     }
     const oldBlock = oldLines.join('\n');
     const newBlock = newLines.join('\n');
-    if (!text.includes(oldBlock)) {
+    // Empty old block is ambiguous (would match everywhere); treat as conflict.
+    if (oldBlock === '') {
+      throw runtimeError('Patch hunk old block is empty.', 'patch_conflict', 409);
+    }
+    const matches = countOccurrences(text, oldBlock);
+    if (matches === 0) {
       throw runtimeError('Patch hunk did not match file content.', 'patch_conflict', 409);
+    }
+    if (matches > 1) {
+      throw runtimeError(
+        'Patch hunk matched multiple locations in file content.',
+        'patch_conflict',
+        409,
+        { match_count: matches },
+      );
     }
     text = text.replace(oldBlock, newBlock);
   }

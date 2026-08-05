@@ -12,7 +12,7 @@
  * stdin defaults are applied by the caller (Process class → pipe/open;
  * run → ignore/closed) when the property is omitted.
  *
- * ProcessResult → { exitCode, timedOut, stdout, stderr } only.
+ * ProcessResult → captured strings plus exact drained-byte/truncation facts.
  */
 
 #include "binding/convert.hpp"
@@ -442,6 +442,26 @@ struct Converter<vacps::process::RunResult> {
       return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
     }
     if (!set("stderr", Converter<std::string>::to_js(env, r.stderr_str))) {
+      return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+    }
+    if (!set(
+            "stdoutBytes",
+            Converter<std::uint64_t>::to_js(env, r.stdout_bytes))) {
+      return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+    }
+    if (!set(
+            "stderrBytes",
+            Converter<std::uint64_t>::to_js(env, r.stderr_bytes))) {
+      return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+    }
+    if (!set(
+            "stdoutTruncated",
+            Converter<bool>::to_js(env, r.stdout_truncated))) {
+      return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+    }
+    if (!set(
+            "stderrTruncated",
+            Converter<bool>::to_js(env, r.stderr_truncated))) {
       return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
     }
     return obj;

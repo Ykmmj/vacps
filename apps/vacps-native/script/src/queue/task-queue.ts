@@ -7,13 +7,20 @@ import type { ShellExecutor } from '../executor/shell-executor';
 import type { TaskStore } from '../storage/task-store';
 import { randomUuidV4 } from '../util/uuid';
 import { DEFAULT_SCHEDULE_POLICY, parseSchedulePolicy } from './schedule-logic';
-import { cronMatchesUtc, SchedulerStore, utcMinuteKey } from './scheduler-store';
+import { SchedulerStore, utcMinuteKey } from './scheduler-store';
 
 /**
  * Local inbox + single-flight worker (apps/vacps TaskQueue without BullMQ/Redis).
+ * Work wake is a TaskQueue-owned JS notification (pending flag + at most one waiter).
  */
 export class TaskQueue {
   private pumpBusy = false;
+  private stopping = false;
+  private activeTaskId: string | undefined;
+  /** Set when notify arrives with no waiter; consumed by the next waitForWork. */
+  private wakePending = false;
+  /** At most one stored resolver for the Application worker await. */
+  private wakeResolver: (() => void) | undefined;
   readonly schedulers: SchedulerStore;
 
   constructor(
@@ -26,6 +33,7 @@ export class TaskQueue {
 
   async enqueue(task: TaskDispatch): Promise<{ created: boolean }> {
     const created = await this.store.createTask(task, 'queued');
+    if (created) this.notifyWorker();
     return { created };
   }
 
@@ -77,13 +85,14 @@ export class TaskQueue {
     if (!enqueued) {
       throw new Error('Task not found.');
     }
+    this.notifyWorker();
     return { task_id: newId, status: 'queued', retry_of_task_id: taskId };
   }
 
   /** Claim and run at most one queued task (single-flight). */
   async pumpOnce(): Promise<boolean> {
     // Lock before any await so concurrent pumpOnce cannot both pass the gate.
-    if (this.pumpBusy) {
+    if (this.stopping || this.pumpBusy) {
       return false;
     }
     this.pumpBusy = true;
@@ -91,17 +100,72 @@ export class TaskQueue {
       if (await this.store.hasRunning()) {
         return false;
       }
+      if (this.stopping) {
+        return false;
+      }
       // claimNextQueued is atomic UPDATE…RETURNING — only the winner gets a row.
       const claimed = await this.store.claimNextQueued();
       if (!claimed) return false;
+      this.activeTaskId = claimed.task.task_id;
+      if (this.stopping) {
+        await this.store.requestCancel(this.activeTaskId);
+      }
       log.info(`queue claim task=${claimed.task.task_id} kind=${claimed.task.kind}`);
       await this.executor.execute(claimed.task);
       const done = await this.store.getTask(claimed.task.task_id);
       log.info(`queue done task=${claimed.task.task_id} status=${done?.status ?? '?'}`);
       return true;
     } finally {
+      this.activeTaskId = undefined;
       this.pumpBusy = false;
     }
+  }
+
+  /**
+   * Stop claiming work and cooperatively cancel the current task.
+   * Notifies the worker waiter so Application can exit the loop.
+   * The Application owns and joins the worker loop after this request.
+   */
+  async stop(): Promise<void> {
+    this.stopping = true;
+    this.notifyWorker();
+    const activeTaskId = this.activeTaskId;
+    if (activeTaskId === undefined) return;
+    await this.store.requestCancel(activeTaskId);
+    await this.executor.cancelRunning(activeTaskId);
+  }
+
+  /**
+   * Owner-thread wake: resolve a waiting worker, or remember a pending pulse.
+   * Transitions are atomic on the JS owner thread (no mutex).
+   */
+  private notifyWorker(): void {
+    if (this.wakeResolver !== undefined) {
+      const resolve = this.wakeResolver;
+      this.wakeResolver = undefined;
+      resolve();
+      return;
+    }
+    this.wakePending = true;
+  }
+
+  /**
+   * Await the next work pulse. Consumes a pending notify immediately when set.
+   * At most one waiter is stored.
+   */
+  waitForWork(): Promise<void> {
+    if (this.wakePending) {
+      this.wakePending = false;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.wakeResolver = resolve;
+    });
+  }
+
+  /** Coarse reconciliation wake (control loop / external DB work). */
+  wakeWorker(): void {
+    this.notifyWorker();
   }
 
   async recoverInterruptedOnBoot(): Promise<number> {
@@ -114,6 +178,14 @@ export class TaskQueue {
 
   async queueCounts() {
     return await this.store.queueCounts();
+  }
+
+  /** Bounded SQLite retention (outputs then terminal metadata). */
+  async pruneRetention(nowMs: number = host.nowMs()): Promise<{
+    outputsPruned: number;
+    tasksDeleted: number;
+  }> {
+    return await this.store.pruneRetention(nowMs);
   }
 
   async upsertScheduler(input: {
@@ -180,12 +252,17 @@ export class TaskQueue {
       source: 'schedule' as const,
       schedule_id: input.id,
     } as TaskDispatch;
-    await this.store.createTask(dispatch, 'queued');
+    const created = await this.store.createTask(dispatch, 'queued');
+    if (!created) {
+      throw new Error('Failed to insert schedule run-now task.');
+    }
+    this.notifyWorker();
     return taskId;
   }
 
   /**
    * Successful claim payload for control-plane occurrence ack.
+   * Due rows come from SQL listDue; inserted result.slots drive tasksEnqueued/acks.
    */
   async fireDueSchedulers(nowMs: number = host.nowMs()): Promise<{
     tasksEnqueued: number;
@@ -193,28 +270,7 @@ export class TaskQueue {
   }> {
     let tasksEnqueued = 0;
     const acks: ScheduleFireAck[] = [];
-    for (const s of await this.schedulers.listEnabled()) {
-      // Legacy rows without absolute cursor: seed next from UTC minute match once.
-      if (!s.nextRunAt) {
-        const now = new Date(nowMs);
-        if (!cronMatchesUtc(s.cron, now)) continue;
-        const seeded = nextCronRunAtIso(s.cron, s.timezone, new Date(nowMs - 60_000));
-        if (!seeded || Date.parse(seeded) > nowMs) continue;
-        await this.schedulers.writeRow({
-          id: s.id,
-          cron: s.cron,
-          timezone: s.timezone,
-          enabled: s.enabled,
-          task: s.task,
-          revision: s.revision,
-          policy: s.policy,
-          nextRunAt: seeded,
-        });
-      }
-
-      const current = await this.schedulers.get(s.id);
-      if (!current?.nextRunAt || !current.enabled) continue;
-
+    for (const current of await this.schedulers.listDue(nowMs)) {
       // Claim + task inserts are one store.transaction() inside claimAndEnqueue.
       const result = await this.schedulers.claimAndEnqueue(current, nowMs);
 
@@ -238,6 +294,7 @@ export class TaskQueue {
       if (result.slots[0]) ack.occurrence_id = result.slots[0].occurrenceId;
       acks.push(ack);
     }
+    if (tasksEnqueued > 0) this.notifyWorker();
     return { tasksEnqueued, acks };
   }
 }

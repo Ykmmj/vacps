@@ -102,8 +102,8 @@ struct Process::State {
   std::string stderr_acc;
   std::size_t max_out{16 * 1024 * 1024};
   std::size_t max_err{16 * 1024 * 1024};
-  std::size_t produced_out{0};
-  std::size_t produced_err{0};
+  std::uint64_t produced_out{0};
+  std::uint64_t produced_err{0};
   bool stdout_truncated{false};
   bool stderr_truncated{false};
 
@@ -342,10 +342,10 @@ struct Process::State {
       std::string& acc,
       std::size_t max_bytes,
       bool& truncated,
-      std::size_t& produced,
+      std::uint64_t& produced,
       const char* data,
       std::size_t n) {
-    produced += n;
+    produced += static_cast<std::uint64_t>(n);
     const auto global_room = budget ? budget->global_buffer_room() : n;
     const auto entry_room =
         acc.size() < max_bytes ? max_bytes - acc.size() : std::size_t{0};
@@ -739,6 +739,10 @@ asio::awaitable<Result<RunResult>> Process::wait() {
   r.timed_out = state_->timed_out;
   r.stdout_str = state_->stdout_acc;
   r.stderr_str = state_->stderr_acc;
+  r.stdout_bytes = state_->produced_out;
+  r.stderr_bytes = state_->produced_err;
+  r.stdout_truncated = state_->stdout_truncated;
+  r.stderr_truncated = state_->stderr_truncated;
   co_return r;
 }
 

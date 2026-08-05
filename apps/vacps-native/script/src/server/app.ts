@@ -1,17 +1,26 @@
-import { createTaskSchema, taskDispatchSchema, isTerminalTaskStatus } from '@vacps/contracts';
+import {
+  createTaskSchema,
+  schedulePolicySchema,
+  taskDispatchSchema,
+  isTerminalTaskStatus,
+  type BackendHealth,
+  type CreateTaskInput,
+  type SchedulePolicy,
+  type TaskDispatch,
+} from '@vacps/contracts';
 import * as crypto from 'vacps:crypto';
 import * as host from 'vacps:host';
 
 import type { AgentConfig } from '../config';
-import { parseSchedulePolicy } from '../queue/schedule-logic';
 import type { TaskQueue } from '../queue/task-queue';
 import type { ControlPlaneState } from '../registration/control-plane-state';
 import { probeShellEnvironment } from '../runtime/shell-environment';
 import * as files from '../runtime/files';
 import { hashRequest, IdempotencyStore } from '../runtime/idempotency';
-import type { ProcessManager } from '../runtime/process-manager';
+import { execOneShot, NATIVE_STREAM_MAX_BYTES } from '../runtime/process-exec';
 import { allowUnsignedWhenNoKey, isPublicHttpPath } from '../security/http-auth';
 import { verifyControlPlaneRequest } from '../security/control-plane-verify';
+import type { LiveHealthState } from '../telemetry/liveness-health';
 import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
 import { utf8ByteSlice } from '../util/utf8';
 import { createApp, type App, type Reply } from './router';
@@ -19,10 +28,13 @@ import { createApp, type App, type Reply } from './router';
 export interface CreateServerInput {
   config: AgentConfig;
   queue: TaskQueue;
-  processes: ProcessManager;
   telemetry: NativeTelemetryCollector;
   getControlPlaneState: () => ControlPlaneState;
   isReady: () => boolean;
+  /** Cheap public /health body (no telemetry/shell probes). */
+  getLivenessHealth: () => BackendHealth;
+  /** Live ok/worker flags for authenticated status/telemetry. */
+  getLiveHealthState: () => LiveHealthState;
 }
 
 function numberOr(value: string | undefined, fallback: number): number {
@@ -81,8 +93,11 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     try {
       const { nonce } = verifyControlPlaneRequest({
         publicKeyB64: pub,
+        expectedBackendId: input.config.BACKEND_ID,
         method: request.method,
-        path: request.path,
+        // Sign/verify the raw pre-router path; request.path drops a trailing slash.
+        path: request.raw.path,
+        query: request.raw.query,
         headers: request.headers,
         body: request.raw.body ?? '',
       });
@@ -106,18 +121,11 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.get('/health', async () => {
-    const status = await input.telemetry.collect();
-    const shellEnv = await probeShellEnvironment();
-    return {
-      ...status.health,
-      shell_environment: shellEnv,
-      shell_environment_ok: shellEnv.home_accessible && shellEnv.shell_smoke_ok,
-    };
-  });
+  // Public liveness only: ready/loop state + cheap host fields. No df/uname/bash/telemetry.
+  app.get('/health', async () => input.getLivenessHealth());
 
   app.get('/metrics', async () => {
-    const status = await input.telemetry.collect();
+    const status = await input.telemetry.collect(input.getLiveHealthState());
     return status.metrics ?? {};
   });
 
@@ -143,7 +151,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.get('/status', async () => ({
     registration: input.getControlPlaneState(),
     controlPlaneConfigured: Boolean(input.config.CONTROL_PLANE_URL),
-    ...(await input.telemetry.collect()),
+    ...(await input.telemetry.collect(input.getLiveHealthState())),
   }));
 
   app.get('/info', async () => ({
@@ -173,15 +181,10 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .code(409)
         .send({ error: { code: 'backend_mismatch', message: 'Task targets another backend.' } });
     }
-    if (parsed.data.kind === 'agent') {
-      // Protocol kind from @vacps/contracts; native never runs Pi.
-      return reply.code(409).send({
-        error: {
-          code: 'capability_unavailable',
-          message: 'Pi runtime is not available on this backend.',
-          details: { capability: 'pi' },
-        },
-      });
+
+    const capability = nativeTaskCapabilityRejection(parsed.data);
+    if (capability) {
+      return reply.code(capability.status).send(capability.body);
     }
 
     if (parsed.data.idempotency_key) {
@@ -223,7 +226,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     const outputExpired =
       isTerminalTaskStatus(task.status) &&
       Number.isFinite(terminalAt) &&
-      Date.now() - terminalAt > retentionSec * 1000;
+      host.nowMs() - terminalAt > retentionSec * 1000;
 
     let result: unknown = task.result;
     if (outputExpired && result && typeof result === 'object') {
@@ -265,7 +268,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     const outputExpired =
       isTerminalTaskStatus(task.status) &&
       Number.isFinite(terminalAt) &&
-      Date.now() - terminalAt > retentionSec * 1000;
+      host.nowMs() - terminalAt > retentionSec * 1000;
 
     const offset = Math.max(0, Number(request.query.offset ?? '0') || 0);
     const stream = request.query.stream;
@@ -299,7 +302,8 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       };
     }
 
-    // Stream-style read: absolute **UTF-8 byte** offsets over concatenated stream text.
+    // Stream-style read: absolute **UTF-8 byte** offsets over concatenated retained text.
+    // EOF = end of retained content; total/truncated report native drain facts when known.
     if (stream === 'stdout' || stream === 'stderr') {
       const rows = await input.queue.listLogs(id, { stream, offset: 0, limit: 50_000 });
       const full = rows.map((r) => r.data).join('');
@@ -325,14 +329,15 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       }
       const slice = utf8ByteSlice(full, offset, offset + maxBytes);
       const terminal = isTerminalTaskStatus(task.status);
+      const meta = processStreamMeta(task.result, stream, slice.totalBytes);
       return {
         task_id: id,
         stream,
         offset: slice.start,
         next_offset: slice.end,
         eof: terminal && slice.end >= slice.totalBytes,
-        total_bytes: slice.totalBytes,
-        truncated: false,
+        total_bytes: meta.totalBytes,
+        truncated: meta.nativeTruncated,
         expired: false,
         encoding: 'utf-8',
         content: slice.content,
@@ -350,7 +355,15 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     const allStderr = (await input.queue.listLogs(id, { stream: 'stderr', offset: 0, limit: 2000 }))
       .map((r) => r.data)
       .join('');
-    const clip = (s: string) => (s.length > previewMax ? s.slice(0, previewMax) : s);
+    const stdoutPreview = utf8ByteSlice(allStdout, 0, previewMax);
+    const stderrPreview = utf8ByteSlice(allStderr, 0, previewMax);
+    const stdoutMeta = processStreamMeta(task.result, 'stdout', stdoutPreview.totalBytes);
+    const stderrMeta = processStreamMeta(task.result, 'stderr', stderrPreview.totalBytes);
+    const stdoutClipped = previewMax > 0 && stdoutPreview.end < stdoutPreview.totalBytes;
+    const stderrClipped = previewMax > 0 && stderrPreview.end < stderrPreview.totalBytes;
+    // previewMax <= 0 → empty preview; treat any retained/native bytes as clipped.
+    const stdoutPreviewEmptyClip = previewMax <= 0 && stdoutMeta.totalBytes > 0;
+    const stderrPreviewEmptyClip = previewMax <= 0 && stderrMeta.totalBytes > 0;
     const cmdStatus =
       task.status === 'succeeded'
         ? 'succeeded'
@@ -374,16 +387,18 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         exit_code: result?.exitCode ?? result?.exit_code ?? null,
         startedAt: task.startedAt ?? null,
         finishedAt: task.finishedAt ?? null,
-        stdout: clip(allStdout),
-        stderr: clip(allStderr),
-        stdoutPreview: clip(allStdout),
-        stderrPreview: clip(allStderr),
-        stdout_bytes: allStdout.length,
-        stderr_bytes: allStderr.length,
-        stdoutBytes: allStdout.length,
-        stderrBytes: allStderr.length,
-        stdout_truncated: allStdout.length > previewMax,
-        stderr_truncated: allStderr.length > previewMax,
+        stdout: stdoutPreview.content,
+        stderr: stderrPreview.content,
+        stdoutPreview: stdoutPreview.content,
+        stderrPreview: stderrPreview.content,
+        stdout_bytes: stdoutMeta.totalBytes,
+        stderr_bytes: stderrMeta.totalBytes,
+        stdoutBytes: stdoutMeta.totalBytes,
+        stderrBytes: stderrMeta.totalBytes,
+        stdout_truncated:
+          stdoutMeta.nativeTruncated || stdoutClipped || stdoutPreviewEmptyClip,
+        stderr_truncated:
+          stderrMeta.nativeTruncated || stderrClipped || stderrPreviewEmptyClip,
         stdout_complete: isTerminalTaskStatus(task.status),
         stderr_complete: isTerminalTaskStatus(task.status),
       },
@@ -504,7 +519,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       });
     }
     try {
-      return await withFileIdempotency(
+      return await withIdempotency(
         idempotency,
         input.config.BACKEND_ID,
         'files.write',
@@ -597,7 +612,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       });
     }
     try {
-      return await withFileIdempotency(
+      return await withIdempotency(
         idempotency,
         input.config.BACKEND_ID,
         'files.edit',
@@ -629,7 +644,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .send({ error: { code: 'validation_error', message: 'patch is required.' } });
     }
     try {
-      return await withFileIdempotency(
+      return await withIdempotency(
         idempotency,
         input.config.BACKEND_ID,
         'files.apply_patch',
@@ -687,7 +702,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .send({ error: { code: 'validation_error', message: 'path is required.' } });
     }
     try {
-      return await withFileIdempotency(
+      return await withIdempotency(
         idempotency,
         input.config.BACKEND_ID,
         'files.delete',
@@ -722,7 +737,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .send({ error: { code: 'validation_error', message: 'from and to are required.' } });
     }
     try {
-      return await withFileIdempotency(
+      return await withIdempotency(
         idempotency,
         input.config.BACKEND_ID,
         'files.move',
@@ -745,7 +760,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  // ── Command / shell ───────────────────────────────────────────────
+  // ── Command / shell (completed one-shot via vacps:process run) ─────
   app.post('/exec/command', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.program !== 'string' || !body.program) {
@@ -753,22 +768,57 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .code(400)
         .send({ error: { code: 'validation_error', message: 'program is required.' } });
     }
-    try {
-      const result = await input.processes.exec({
-        toolName: 'command.exec',
-        program: body.program,
-        ...(Array.isArray(body.arguments) ? { arguments: body.arguments.map(String) } : {}),
-        ...(typeof body.working_directory === 'string'
-          ? { workingDirectory: body.working_directory }
-          : {}),
-        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
-        stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
-        stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
-        ...(typeof body.idempotency_key === 'string'
-          ? { idempotencyKey: body.idempotency_key }
-          : {}),
+    const unsupported = rejectUnsupportedExecFields(body);
+    if (unsupported) {
+      return reply.code(unsupported.status).send(unsupported.body);
+    }
+    if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'working_directory must be a string when present.',
+        },
       });
-      return { ok: true, ...result };
+    }
+    let args: string[] | undefined;
+    if (body.arguments !== undefined) {
+      if (!isStringArray(body.arguments)) {
+        return reply.code(400).send({
+          error: {
+            code: 'validation_error',
+            message: 'arguments must be an array of strings when present.',
+          },
+        });
+      }
+      args = body.arguments;
+    }
+    let numeric: ReturnType<typeof parseExecNumericOptions>;
+    try {
+      numeric = parseExecNumericOptions(body);
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+    try {
+      return await withIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'command.exec',
+        body,
+        async () => ({
+          ok: true,
+          ...(await execOneShot(input.config.BACKEND_ID, {
+            kind: 'command',
+            program: body.program as string,
+            ...(args ? { arguments: args } : {}),
+            ...(typeof body.working_directory === 'string'
+              ? { workingDirectory: body.working_directory }
+              : {}),
+            timeoutMs: numeric.timeoutMs,
+            stdoutMaxBytes: numeric.stdoutMaxBytes,
+            stderrMaxBytes: numeric.stderrMaxBytes,
+          })),
+        }),
+      );
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -781,8 +831,42 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .code(400)
         .send({ error: { code: 'validation_error', message: 'command is required.' } });
     }
-    const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
-    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    const unsupported = rejectUnsupportedExecFields(body);
+    if (unsupported) {
+      return reply.code(unsupported.status).send(unsupported.body);
+    }
+    if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'working_directory must be a string when present.',
+        },
+      });
+    }
+    let shell: '/bin/bash' | '/bin/sh' = '/bin/bash';
+    if (body.shell !== undefined) {
+      if (body.shell !== '/bin/bash' && body.shell !== '/bin/sh') {
+        return reply.code(400).send({
+          error: {
+            code: 'validation_error',
+            message: 'shell must be exactly /bin/bash or /bin/sh when present.',
+          },
+        });
+      }
+      shell = body.shell;
+    }
+    if (
+      body.load_user_environment !== undefined &&
+      typeof body.load_user_environment !== 'boolean'
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'load_user_environment must be a boolean when present.',
+        },
+      });
+    }
+    // At the direct /exec boundary: /bin/sh + omitted → false; /bin/sh + true → 400.
     if (shell === '/bin/sh' && body.load_user_environment === true) {
       return reply.code(400).send({
         error: {
@@ -792,165 +876,36 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         },
       });
     }
+    const loadUserEnvironment =
+      shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    let numeric: ReturnType<typeof parseExecNumericOptions>;
     try {
-      const result = await input.processes.exec({
-        toolName: 'shell.exec',
-        command: body.command,
-        shell,
-        ...(typeof body.working_directory === 'string'
-          ? { workingDirectory: body.working_directory }
-          : {}),
-        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000,
-        stdoutMaxBytes: typeof body.stdout_max_bytes === 'number' ? body.stdout_max_bytes : 16_384,
-        stderrMaxBytes: typeof body.stderr_max_bytes === 'number' ? body.stderr_max_bytes : 16_384,
-        ...(typeof body.idempotency_key === 'string'
-          ? { idempotencyKey: body.idempotency_key }
-          : {}),
-        loadUserEnvironment,
-      });
-      return { ok: true, ...result };
+      numeric = parseExecNumericOptions(body);
     } catch (error) {
       return runtimeError(reply, error);
     }
-  });
-
-  // ── Long-lived process (start / read / write / terminate) ─────────
-  app.post('/process/start_command', async (request, reply) => {
-    const body = asRecord(request.body);
-    if (typeof body.program !== 'string' || !body.program) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'program is required.' } });
-    }
     try {
-      const result = await input.processes.start({
-        toolName: 'process.start_command',
-        program: body.program,
-        ...(Array.isArray(body.arguments) ? { arguments: body.arguments.map(String) } : {}),
-        ...(typeof body.working_directory === 'string'
-          ? { workingDirectory: body.working_directory }
-          : {}),
-        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
-        closeStdin: body.tty === true ? false : body.close_stdin !== false,
-        tty: body.tty === true,
-        ...(typeof body.stdout_hard_max_bytes === 'number'
-          ? { hardMaxStdout: body.stdout_hard_max_bytes }
-          : {}),
-        ...(typeof body.stderr_hard_max_bytes === 'number'
-          ? { hardMaxStderr: body.stderr_hard_max_bytes }
-          : {}),
-      });
-      return { ok: true, ...result };
-    } catch (error) {
-      return runtimeError(reply, error);
-    }
-  });
-
-  app.post('/process/start_shell', async (request, reply) => {
-    const body = asRecord(request.body);
-    if (typeof body.command !== 'string' || !body.command.trim()) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'command is required.' } });
-    }
-    const shell = body.shell === '/bin/sh' ? '/bin/sh' : '/bin/bash';
-    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
-    try {
-      const result = await input.processes.start({
-        toolName: 'process.start_shell',
-        command: body.command,
-        shell,
-        ...(typeof body.working_directory === 'string'
-          ? { workingDirectory: body.working_directory }
-          : {}),
-        timeoutMs: typeof body.timeout_ms === 'number' ? body.timeout_ms : 3_600_000,
-        closeStdin: body.tty === true ? false : body.close_stdin !== false,
-        tty: body.tty === true,
-        loadUserEnvironment,
-        ...(typeof body.stdout_hard_max_bytes === 'number'
-          ? { hardMaxStdout: body.stdout_hard_max_bytes }
-          : {}),
-        ...(typeof body.stderr_hard_max_bytes === 'number'
-          ? { hardMaxStderr: body.stderr_hard_max_bytes }
-          : {}),
-      });
-      return { ok: true, ...result };
-    } catch (error) {
-      return runtimeError(reply, error);
-    }
-  });
-
-  app.post('/process/read', async (request, reply) => {
-    const body = asRecord(request.body);
-    if (typeof body.process_id !== 'string') {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
-    }
-    try {
-      const result = await input.processes.readWait(body.process_id, {
-        ...(typeof body.cursor === 'string' ? { cursor: body.cursor } : {}),
-        maxBytes: typeof body.max_bytes === 'number' ? body.max_bytes : 65_536,
-        waitMs: typeof body.wait_ms === 'number' ? body.wait_ms : 0,
-      });
-      return { ok: true, ...result };
-    } catch (error) {
-      return runtimeError(reply, error);
-    }
-  });
-
-  app.post('/process/write', async (request, reply) => {
-    const body = asRecord(request.body);
-    if (typeof body.process_id !== 'string' || typeof body.data !== 'string') {
-      return reply.code(400).send({
-        error: { code: 'validation_error', message: 'process_id and data are required.' },
-      });
-    }
-    try {
-      const result = await input.processes.write(
-        body.process_id,
-        body.data,
-        body.close_stdin === true,
+      return await withIdempotency(
+        idempotency,
+        input.config.BACKEND_ID,
+        'shell.exec',
+        body,
+        async () => ({
+          ok: true,
+          ...(await execOneShot(input.config.BACKEND_ID, {
+            kind: 'shell',
+            command: body.command as string,
+            shell,
+            loadUserEnvironment,
+            ...(typeof body.working_directory === 'string'
+              ? { workingDirectory: body.working_directory }
+              : {}),
+            timeoutMs: numeric.timeoutMs,
+            stdoutMaxBytes: numeric.stdoutMaxBytes,
+            stderrMaxBytes: numeric.stderrMaxBytes,
+          })),
+        }),
       );
-      return { ok: true, process_id: body.process_id, ...result };
-    } catch (error) {
-      return runtimeError(reply, error);
-    }
-  });
-
-  app.post('/process/close', async (request, reply) => {
-    const body = asRecord(request.body);
-    if (typeof body.process_id !== 'string') {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
-    }
-    try {
-      const result = await input.processes.close(body.process_id);
-      return { ok: true, process_id: body.process_id, ...result };
-    } catch (error) {
-      return runtimeError(reply, error);
-    }
-  });
-
-  app.post('/process/terminate', async (request, reply) => {
-    const body = asRecord(request.body);
-    if (typeof body.process_id !== 'string') {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
-    }
-    try {
-      const signal =
-        body.signal === 'sigint' || body.signal === 'sigkill' || body.signal === 'sigterm'
-          ? body.signal
-          : 'sigterm';
-      const result = await input.processes.terminate(
-        body.process_id,
-        signal,
-        typeof body.grace_period_ms === 'number' ? body.grace_period_ms : 3_000,
-      );
-      return { ok: true, ...result };
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -981,12 +936,57 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .code(400)
         .send({ error: { code: 'invalid_scheduler', message: 'Invalid scheduler payload.' } });
     }
+
+    const capability = nativeTaskCapabilityRejection(template.data);
+    if (capability) {
+      return reply.code(capability.status).send(capability.body);
+    }
+
     const revision =
       typeof body.revision === 'number' && Number.isInteger(body.revision) && body.revision >= 1
         ? body.revision
         : undefined;
-    const policy =
-      body.policy && typeof body.policy === 'object' ? parseSchedulePolicy(body.policy) : undefined;
+
+    // Wide boundary: validate policy once when provided; omit keeps current PUT merge behavior.
+    let policy: SchedulePolicy | undefined;
+    if (body.policy !== undefined) {
+      const parsedPolicy = schedulePolicySchema.safeParse(body.policy);
+      if (!parsedPolicy.success) {
+        return reply.code(400).send({
+          error: {
+            code: 'invalid_scheduler',
+            message: 'Invalid scheduler policy.',
+            details: { field: 'policy', issues: parsedPolicy.error.issues },
+          },
+        });
+      }
+      const concurrency = parsedPolicy.data.concurrency;
+      if (concurrency === 'allow' || concurrency === 'replace') {
+        return reply.code(409).send({
+          error: {
+            code: 'capability_unavailable',
+            message: `Schedule concurrency "${concurrency}" is not supported on this backend.`,
+            details: { capability: 'schedule.concurrency', concurrency },
+          },
+        });
+      }
+      if (concurrency === 'forbid' && parsedPolicy.data.misfire === 'catch_up') {
+        return reply.code(409).send({
+          error: {
+            code: 'capability_unavailable',
+            message:
+              'Schedule concurrency "forbid" with misfire "catch_up" is not supported on this backend.',
+            details: {
+              capability: 'schedule.concurrency',
+              concurrency,
+              misfire: parsedPolicy.data.misfire,
+            },
+          },
+        });
+      }
+      policy = parsedPolicy.data;
+    }
+
     await input.queue.upsertScheduler({
       id,
       cron: body.cron,
@@ -1031,6 +1031,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .code(400)
         .send({ error: { code: 'invalid_task', message: template.error.message } });
     }
+
+    const capability = nativeTaskCapabilityRejection(template.data);
+    if (capability) {
+      return reply.code(capability.status).send(capability.body);
+    }
+
     const taskId = await input.queue.runScheduleNow({ id, task: template.data });
     return { task_id: taskId };
   });
@@ -1045,7 +1051,33 @@ function asRecord(body: unknown): Record<string, unknown> {
   return {};
 }
 
-async function withFileIdempotency(
+/**
+ * Exact native drain totals + capture truncation from stored canonical result metadata.
+ * In-progress tasks have no result yet — fall back to retained UTF-8 byte length only.
+ * This is not backward compatibility for alternate field shapes.
+ */
+function processStreamMeta(
+  result: unknown,
+  stream: 'stdout' | 'stderr',
+  retainedUtf8Bytes: number,
+): { totalBytes: number; nativeTruncated: boolean } {
+  if (!result || typeof result !== 'object') {
+    return { totalBytes: retainedUtf8Bytes, nativeTruncated: false };
+  }
+  const r = result as Record<string, unknown>;
+  const bytesKey = stream === 'stdout' ? 'stdoutBytes' : 'stderrBytes';
+  const truncKey = stream === 'stdout' ? 'stdoutTruncated' : 'stderrTruncated';
+  const rawBytes = r[bytesKey];
+  const totalBytes =
+    typeof rawBytes === 'number' && Number.isFinite(rawBytes) && rawBytes >= 0
+      ? rawBytes
+      : retainedUtf8Bytes;
+  const nativeTruncated = r[truncKey] === true;
+  return { totalBytes, nativeTruncated };
+}
+
+/** Shared in-memory idempotency for mutating file tools and completed /exec results. */
+async function withIdempotency(
   store: IdempotencyStore,
   backendId: string,
   toolName: string,
@@ -1058,11 +1090,201 @@ async function withFileIdempotency(
     backend_id: backendId,
     arguments: body,
   });
-  const cached = store.lookup(toolName, key, requestHash);
-  if (cached && typeof cached === 'object') {
-    return store.withIdempotencyMeta(key, requestHash, true, cached as Record<string, unknown>);
+  const { result, replayed } = await store.execute(toolName, key, requestHash, run);
+  return store.withIdempotencyMeta(key, requestHash, replayed, result);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+/** Reject native-unsupported /exec fields before side effects. */
+function rejectUnsupportedExecFields(
+  body: Record<string, unknown>,
+): { status: number; body: Record<string, unknown> } | null {
+  if (body.environment !== undefined) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message: 'Process environment injection is not supported on this backend.',
+          details: { capability: 'environment' },
+        },
+      },
+    };
   }
-  const result = await run();
-  store.store(toolName, key, requestHash, result);
-  return store.withIdempotencyMeta(key, requestHash, false, result);
+  if (body.yield_time_ms !== undefined) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message:
+            'yield_time_ms is not supported; native one-shot execution does not return a live queryable handle.',
+          details: { capability: 'yield_time_ms' },
+        },
+      },
+    };
+  }
+  // Shared command/shell protocol does not define hard-max capture fields.
+  for (const field of ['stdout_hard_max_bytes', 'stderr_hard_max_bytes'] as const) {
+    if (body[field] !== undefined) {
+      return {
+        status: 400,
+        body: {
+          error: {
+            code: 'validation_error',
+            message: `${field} is not supported on /exec; native one-shot capture uses a fixed internal cap.`,
+            details: { field },
+          },
+        },
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Wide-boundary optional integer fields for /exec.
+ * Defaults applied only when absent; invalid values throw validation_error (no clamp).
+ */
+function parseExecNumericOptions(body: Record<string, unknown>): {
+  timeoutMs: number;
+  stdoutMaxBytes: number;
+  stderrMaxBytes: number;
+} {
+  return {
+    timeoutMs: readOptionalIntField(body, 'timeout_ms', 120_000, 1, 3_600_000),
+    stdoutMaxBytes: readOptionalIntField(body, 'stdout_max_bytes', 16_384, 0, 1_048_576),
+    stderrMaxBytes: readOptionalIntField(body, 'stderr_max_bytes', 16_384, 0, 1_048_576),
+  };
+}
+
+function readOptionalIntField(
+  body: Record<string, unknown>,
+  field: string,
+  defaultValue: number,
+  min: number,
+  max: number,
+): number {
+  const value = body[field];
+  if (value === undefined) return defaultValue;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    const error = new Error(
+      `${field} must be an integer in range ${min}..${max}.`,
+    ) as Error & { code: string; statusCode: number };
+    error.code = 'validation_error';
+    error.statusCode = 400;
+    throw error;
+  }
+  return value;
+}
+
+/**
+ * Native capability gate after shared Zod parse, before enqueue/persist/side effects.
+ * Valid shared-contract features this backend does not implement → 409 capability_unavailable.
+ * Invalid /bin/sh+load_user_environment and hard caps above native limit → 400 validation_error.
+ */
+function nativeTaskCapabilityRejection(
+  task: CreateTaskInput | TaskDispatch,
+): { status: number; body: Record<string, unknown> } | null {
+  if (task.kind === 'agent') {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message: 'Pi runtime is not available on this backend.',
+          details: { capability: 'pi' },
+        },
+      },
+    };
+  }
+
+  if (task.profile !== 'full') {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message: 'Only profile "full" is supported on this backend.',
+          details: { capability: 'profile', profile: task.profile },
+        },
+      },
+    };
+  }
+
+  if (task.environment !== undefined) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message: 'Task environment injection is not supported on this backend.',
+          details: { capability: 'environment' },
+        },
+      },
+    };
+  }
+
+  if (task.retry !== undefined) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message:
+            'Automatic retry policy is not supported on this backend; use the manual retry endpoint.',
+          details: { capability: 'retry' },
+        },
+      },
+    };
+  }
+
+  if (task.verify !== undefined && task.verify.mode === 'command') {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message: 'Verify mode "command" is not supported on this backend.',
+          details: { capability: 'verify.command' },
+        },
+      },
+    };
+  }
+
+  const hardMax = task.output?.hard_max_bytes ?? 10_485_760;
+  if (hardMax > NATIVE_STREAM_MAX_BYTES) {
+    return {
+      status: 400,
+      body: {
+        error: {
+          code: 'validation_error',
+          message:
+            'output.hard_max_bytes exceeds the native vacps:process 64 MiB per-stream maximum.',
+          details: {
+            field: 'output.hard_max_bytes',
+            max: NATIVE_STREAM_MAX_BYTES,
+          },
+        },
+      },
+    };
+  }
+
+  if (task.kind === 'shell' && task.shell === '/bin/sh' && task.load_user_environment === true) {
+    return {
+      status: 400,
+      body: {
+        error: {
+          code: 'validation_error',
+          message:
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or set load_user_environment=false.',
+        },
+      },
+    };
+  }
+
+  return null;
 }

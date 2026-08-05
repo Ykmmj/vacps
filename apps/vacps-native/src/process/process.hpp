@@ -70,6 +70,11 @@ struct RunResult {
   bool timed_out{false};
   std::string stdout_str;
   std::string stderr_str;
+  /** Total bytes drained from each pipe, including bytes not retained. */
+  std::uint64_t stdout_bytes{0};
+  std::uint64_t stderr_bytes{0};
+  bool stdout_truncated{false};
+  bool stderr_truncated{false};
 };
 
 /**

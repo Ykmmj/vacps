@@ -54,6 +54,7 @@ runtime::VoidResult Application::initialize() {
   // vacps:host / vacps:http / vacps:process. Capabilities are Impl-owned;
   // references remain valid for the Runtime lifetime.
   module_catalog_ = std::make_unique<js::ModuleCatalog>(
+      *this,
       runtime_.async(),
       runtime_.callbacks(),
       *process_runtime_,
