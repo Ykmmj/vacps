@@ -59,7 +59,8 @@ export async function registerWithControlPlane(config: AgentConfig): Promise<str
     url,
     headers,
     body,
-    timeoutMs: 30_000,
+    // Bound below host lifecycle deadline with margin.
+    timeoutMs: 10_000,
   });
   const text = bodyText(res.body);
   if (res.status < 200 || res.status >= 300) {
@@ -108,7 +109,8 @@ export async function reportTelemetry(
       ...sig,
     },
     body,
-    timeoutMs: 30_000,
+    // Bound below host lifecycle deadline with margin.
+    timeoutMs: 10_000,
   });
   const text = bodyText(res.body);
   if (res.status < 200 || res.status >= 300) {
@@ -121,25 +123,4 @@ export async function reportTelemetry(
     /* ignore */
   }
   return undefined;
-}
-
-/** @deprecated Prefer NativeTelemetryCollector.collect() — kept for tests. */
-export function collectNativeStatus(config: AgentConfig): BackendStatus {
-  const version = host.version().slice(0, 48) || '0.1.0';
-  return {
-    health: {
-      ok: true,
-      backendId: config.BACKEND_ID,
-      version,
-      uptimeSeconds: 0,
-      worker: { running: true, concurrency: 1 },
-      redis: { connected: false },
-      pi: { available: false },
-    },
-    system: {
-      platform: 'linux',
-      kernel: 'unknown',
-      architecture: 'x86_64',
-    },
-  };
 }

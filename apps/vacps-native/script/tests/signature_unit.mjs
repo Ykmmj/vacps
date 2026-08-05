@@ -63,15 +63,17 @@ const digest = b64urlEncode(new Uint8Array(crypto.sha256(body)));
 const ts = String(Math.floor(host.nowMs() / 1000));
 const nonce = b64urlEncode(new Uint8Array(crypto.randomBytes(16)));
 const canonical = [
-  'vacps-request-v1',
+  'vacps-request-v2',
   'agent',
   'POST',
-  '/api/registrations',
+  '/api/registrations?dry=1',
   'test-node',
   ts,
   nonce,
   digest,
 ].join('\n');
+// Control-plane audience binding uses the same field layout with issuer=control
+// and x-vps-control-backend-id as field 5 (parity with apps/vacps).
 const sig = crypto.ed25519Sign(seed, canonical);
 if (new Uint8Array(sig).byteLength !== 64) throw new Error('sig len');
 if (!crypto.ed25519Verify(pub, canonical, sig)) throw new Error('verify failed');
@@ -82,3 +84,6 @@ const path = host.getenv('PATH');
 if (path !== null && typeof path !== 'string') throw new Error('getenv type');
 
 export default { ok: true };
+
+export async function initialize() {}
+export async function shutdown() {}

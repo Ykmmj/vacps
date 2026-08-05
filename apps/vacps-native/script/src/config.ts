@@ -8,7 +8,7 @@ export interface AgentConfig {
   BACKEND_ID: string;
   BACKEND_NAME: string;
   BACKEND_TAGS: string[];
-  /** Inbound bind (passed to http.createServer). Not owned by C++ Config. */
+  /** Inbound bind (passed to new http.Server(options, onRequest)). Not owned by C++ Config. */
   LISTEN_HOST: string;
   LISTEN_PORT: number;
   PUBLIC_BASE_URL: string | undefined;
@@ -21,8 +21,6 @@ export interface AgentConfig {
    * unsigned HTTP is allowed. Dev/tests only (`VACPS_ALLOW_INSECURE_NO_AUTH=1`).
    */
   ALLOW_INSECURE_NO_AUTH: boolean;
-  /** Extra filesystem roots allowed by path sandbox (absolute). */
-  FS_ALLOWED_ROOTS: string[];
   REGISTRATION_TOKEN: string | undefined;
   REGISTRATION_INTERVAL_SECONDS: number;
   TELEMETRY_FALLBACK_INTERVAL_SECONDS: number;
@@ -60,14 +58,6 @@ function envTruthy(name: string): boolean {
   return v === '1' || v.toLowerCase() === 'true' || v.toLowerCase() === 'yes';
 }
 
-function parseAllowedRoots(): string[] {
-  const raw = env('VACPS_FS_ALLOWED_ROOTS') ?? env('FS_ALLOWED_ROOTS') ?? '';
-  return raw
-    .split(/[:\n,]/)
-    .map((s) => s.trim())
-    .filter((s) => s.startsWith('/'));
-}
-
 export function loadConfig(): AgentConfig {
   const backendId = env('BACKEND_ID') ?? env('VACPS_BACKEND_ID') ?? 'local';
   const tagsRaw = env('BACKEND_TAGS') ?? '';
@@ -92,7 +82,6 @@ export function loadConfig(): AgentConfig {
     CONTROL_PLANE_PUBLIC_KEY:
       env('CONTROL_PLANE_PUBLIC_KEY') ?? env('VACPS_CONTROL_PLANE_PUBLIC_KEY'),
     ALLOW_INSECURE_NO_AUTH: envTruthy('VACPS_ALLOW_INSECURE_NO_AUTH'),
-    FS_ALLOWED_ROOTS: parseAllowedRoots(),
     REGISTRATION_TOKEN: env('REGISTRATION_TOKEN') ?? env('VACPS_REGISTRATION_TOKEN'),
     REGISTRATION_INTERVAL_SECONDS: envInt('REGISTRATION_INTERVAL_SECONDS', 300, 60, 86_400),
     TELEMETRY_FALLBACK_INTERVAL_SECONDS: envInt(

@@ -29,20 +29,6 @@ struct EvpPkey {
   EvpPkey& operator=(const EvpPkey&) = delete;
 };
 
-std::vector<std::uint8_t> sha256_bytes(const std::uint8_t* data, std::size_t len) {
-  EvpMdCtx ctx;
-  std::vector<std::uint8_t> out(EVP_MAX_MD_SIZE);
-  unsigned int out_len = 0;
-  if (ctx.p == nullptr ||
-      EVP_DigestInit_ex(ctx.p, EVP_sha256(), nullptr) != 1 ||
-      EVP_DigestUpdate(ctx.p, data, len) != 1 ||
-      EVP_DigestFinal_ex(ctx.p, out.data(), &out_len) != 1) {
-    return std::vector<std::uint8_t>(32, 0);
-  }
-  out.resize(out_len);
-  return out;
-}
-
 }  // namespace
 
 Result<std::vector<std::uint8_t>> random_bytes(std::size_t n) {
@@ -56,68 +42,24 @@ Result<std::vector<std::uint8_t>> random_bytes(std::size_t n) {
   return out;
 }
 
-std::vector<std::uint8_t> sha256(std::string_view data) {
-  return sha256_bytes(reinterpret_cast<const std::uint8_t*>(data.data()), data.size());
-}
-
-std::vector<std::uint8_t> sha256(const std::vector<std::uint8_t>& data) {
-  return sha256_bytes(data.data(), data.size());
-}
-
-Sha256::Sha256() {
-  auto* ctx = EVP_MD_CTX_new();
-  if (ctx != nullptr && EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1) {
-    ctx_ = ctx;
-  } else if (ctx != nullptr) {
-    EVP_MD_CTX_free(ctx);
-  }
-}
-
-Sha256::Sha256(Sha256&& other) noexcept : ctx_(other.ctx_) {
-  other.ctx_ = nullptr;
-}
-
-Sha256& Sha256::operator=(Sha256&& other) noexcept {
-  if (this != &other) {
-    if (ctx_ != nullptr) {
-      EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
-    }
-    ctx_ = other.ctx_;
-    other.ctx_ = nullptr;
-  }
-  return *this;
-}
-
-Sha256::~Sha256() {
-  if (ctx_ != nullptr) {
-    EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
-    ctx_ = nullptr;
-  }
-}
-
-void Sha256::update(const std::uint8_t* data, std::size_t len) {
-  if (ctx_ == nullptr || data == nullptr || len == 0) return;
-  (void)EVP_DigestUpdate(static_cast<EVP_MD_CTX*>(ctx_), data, len);
-}
-
-void Sha256::update(std::string_view data) {
-  update(reinterpret_cast<const std::uint8_t*>(data.data()), data.size());
-}
-
-std::vector<std::uint8_t> Sha256::finalize() {
-  std::vector<std::uint8_t> out(32, 0);
-  if (ctx_ == nullptr) return out;
+Result<Sha256Digest> sha256(std::span<const std::uint8_t> data) {
+  Sha256Digest out{};
   unsigned int out_len = 0;
-  if (EVP_DigestFinal_ex(static_cast<EVP_MD_CTX*>(ctx_), out.data(), &out_len) != 1) {
-    return std::vector<std::uint8_t>(32, 0);
+  // One-shot EVP_Digest: stack digest only; no EVP_MAX_MD_SIZE heap buffer.
+  if (EVP_Digest(
+          data.data(),
+          data.size(),
+          out.data(),
+          &out_len,
+          EVP_sha256(),
+          nullptr) != 1 ||
+      out_len != static_cast<unsigned int>(out.size())) {
+    return std::unexpected(Error{"OpenSSL EVP_Digest(SHA-256) failed"});
   }
-  out.resize(out_len);
-  EVP_MD_CTX_free(static_cast<EVP_MD_CTX*>(ctx_));
-  ctx_ = nullptr;
   return out;
 }
 
-std::string to_hex(const std::vector<std::uint8_t>& bytes) {
+std::string to_hex(std::span<const std::uint8_t> bytes) {
   static constexpr char kHex[] = "0123456789abcdef";
   std::string out;
   out.resize(bytes.size() * 2);

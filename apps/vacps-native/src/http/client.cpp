@@ -1,29 +1,30 @@
 #include "http/client.hpp"
 
-#include "app/log.hpp"
-
 #include <ada.h>
 
 #include <boost/asio/as_tuple.hpp>
-#include <boost/asio/cancel_after.hpp>
-#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/connect.hpp>
+#include <boost/asio/experimental/channel.hpp>
+#include <boost/asio/experimental/channel_error.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/ssl.hpp>
-#include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
-#include <boost/beast/version.hpp>
+
+#include <openssl/ssl.h>
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <chrono>
-#include <cstdlib>
+#include <cerrno>
 #include <filesystem>
 #include <format>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -32,305 +33,900 @@ namespace vacps::http {
 namespace {
 
 namespace beast = boost::beast;
-namespace http = beast::http;
+namespace beast_http = beast::http;
 namespace ssl = boost::asio::ssl;
 using tcp = boost::asio::ip::tcp;
+using steady_clock = std::chrono::steady_clock;
 
-bool ieq(std::string_view a, std::string_view b) {
-  if (a.size() != b.size()) return false;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    if (std::tolower(static_cast<unsigned char>(a[i])) !=
-        std::tolower(static_cast<unsigned char>(b[i]))) {
+struct OperationCancel {
+  asio::cancellation_signal signal;
+};
+
+void emit_cancel(OperationCancel& operation) noexcept {
+  operation.signal.emit(asio::cancellation_type::all);
+}
+
+[[nodiscard]] bool ieq(std::string_view left, std::string_view right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (std::tolower(static_cast<unsigned char>(left[index])) !=
+        std::tolower(static_cast<unsigned char>(right[index]))) {
       return false;
     }
   }
   return true;
 }
 
-http::verb parse_verb(std::string_view method) {
-  if (ieq(method, "GET")) return http::verb::get;
-  if (ieq(method, "POST")) return http::verb::post;
-  if (ieq(method, "PUT")) return http::verb::put;
-  if (ieq(method, "DELETE")) return http::verb::delete_;
-  if (ieq(method, "PATCH")) return http::verb::patch;
-  if (ieq(method, "HEAD")) return http::verb::head;
-  if (ieq(method, "OPTIONS")) return http::verb::options;
-  return http::verb::unknown;
+[[nodiscard]] bool is_client_owned_header(std::string_view name) {
+  return ieq(name, "host") || ieq(name, "content-length") ||
+         ieq(name, "transfer-encoding") || ieq(name, "connection") ||
+         ieq(name, "proxy-connection") || ieq(name, "keep-alive") ||
+         ieq(name, "te") || ieq(name, "trailer") || ieq(name, "upgrade") ||
+         ieq(name, "expect");
 }
 
-/** Host header: hostname, or hostname:port when non-default. */
-std::string host_header_value(const ParsedUrl& url) {
+[[nodiscard]] beast_http::verb parse_verb(std::string_view method) {
+  if (ieq(method, "GET")) {
+    return beast_http::verb::get;
+  }
+  if (ieq(method, "POST")) {
+    return beast_http::verb::post;
+  }
+  if (ieq(method, "PUT")) {
+    return beast_http::verb::put;
+  }
+  if (ieq(method, "DELETE")) {
+    return beast_http::verb::delete_;
+  }
+  if (ieq(method, "PATCH")) {
+    return beast_http::verb::patch;
+  }
+  if (ieq(method, "HEAD")) {
+    return beast_http::verb::head;
+  }
+  if (ieq(method, "OPTIONS")) {
+    return beast_http::verb::options;
+  }
+  return beast_http::verb::unknown;
+}
+
+[[nodiscard]] std::string host_header_value(const ParsedUrl& url) {
   const bool default_port =
       (url.scheme == "https" && url.port == "443") ||
       (url.scheme == "http" && url.port == "80");
-  if (default_port) return url.host;
-  return url.host + ":" + url.port;
+  std::string authority =
+      url.host_is_ipv6 ? "[" + url.host + "]" : url.host;
+  if (default_port) {
+    return authority;
+  }
+  return authority + ":" + url.port;
 }
 
-ssl::context make_tls_client_context(const std::string& ca_path) {
-  ssl::context ctx{ssl::context::tls_client};
-  ctx.set_options(
-      ssl::context::default_workarounds | ssl::context::no_sslv2 | ssl::context::no_sslv3);
-  ctx.set_verify_mode(ssl::verify_peer);
-  // TLS 1.2 minimum (design §8.4).
-#if defined(SSL_CTX_set_min_proto_version)
-  ::SSL_CTX_set_min_proto_version(ctx.native_handle(), TLS1_2_VERSION);
-#endif
-  boost::system::error_code ec;
-  ctx.load_verify_file(ca_path, ec);
-  if (ec) {
-    throw boost::system::system_error(ec, "load_verify_file");
+[[nodiscard]] bool deadline_expired(steady_clock::time_point deadline) {
+  return steady_clock::now() >= deadline;
+}
+
+[[nodiscard]] int system_code(const boost::system::error_code& ec) {
+  return ec ? ec.value() : 0;
+}
+
+[[nodiscard]] Error phase_error(
+    std::string_view operation,
+    const boost::system::error_code& ec,
+    const std::stop_token& stop,
+    steady_clock::time_point deadline) {
+  const bool cancelled =
+      ec == asio::error::operation_aborted ||
+      ec == asio::experimental::error::channel_cancelled;
+  const bool timed_out = ec == beast::error::timeout;
+  if (cancelled || timed_out) {
+    if (stop.stop_requested()) {
+      return Error{
+          std::format("{}: cancelled", operation),
+          std::string{operation},
+          ECANCELED};
+    }
+    if (timed_out || deadline_expired(deadline)) {
+      return Error{
+          std::format("{}: timed out", operation),
+          std::string{operation},
+          ETIMEDOUT};
+    }
+    return Error{
+        std::format("{}: cancelled", operation),
+        std::string{operation},
+        ECANCELED};
   }
-  return ctx;
+  return Error{
+      std::format("{}: {}", operation, ec.message()),
+      std::string{operation},
+      system_code(ec)};
+}
+
+[[nodiscard]] Error stopped_error(std::string_view operation) {
+  return Error{
+      std::format("{}: cancelled", operation),
+      std::string{operation},
+      ECANCELED};
+}
+
+[[nodiscard]] Error timeout_error(std::string_view operation) {
+  return Error{
+      std::format("{}: timed out", operation),
+      std::string{operation},
+      ETIMEDOUT};
+}
+
+[[nodiscard]] Error io_error(
+    std::string_view operation,
+    const boost::system::error_code& ec) {
+  return Error{
+      std::format("{}: {}", operation, ec.message()),
+      std::string{operation},
+      system_code(ec)};
+}
+
+/**
+ * Stop and the absolute deadline are checked immediately before starting each
+ * sequential operation. This is required because cancellation_signal is
+ * edge-triggered: an edge between operations is not replayed into the next
+ * slot.
+ */
+[[nodiscard]] std::optional<Error> stop_before_operation(
+    const std::stop_token& stop,
+    steady_clock::time_point deadline,
+    std::string_view operation) {
+  if (stop.stop_requested()) {
+    return stopped_error(operation);
+  }
+  if (deadline_expired(deadline)) {
+    return timeout_error(operation);
+  }
+  return std::nullopt;
+}
+
+auto io_token(asio::cancellation_slot slot) {
+  return asio::bind_cancellation_slot(slot, asio::as_tuple);
 }
 
 template <class Stream>
-asio::awaitable<Result<ClientResponse>> do_http_exchange(
+asio::awaitable<Result<ClientResponse>> exchange_stream(
     Stream& stream,
+    beast::flat_buffer& buffer,
+    bool& reusable,
     const ParsedUrl& url,
-    ClientRequest req) {
-  const auto verb = parse_verb(req.method);
-  if (verb == http::verb::unknown) {
-    co_return std::unexpected(Error{std::format("http.request: unknown method '{}'", req.method)});
-  }
+    ClientRequest req,
+    asio::cancellation_slot cancel,
+    const std::stop_token& stop,
+    steady_clock::time_point deadline) {
+  constexpr std::string_view kWriteOperation = "http.request.write";
+  constexpr std::string_view kReadOperation = "http.request.read";
 
-  http::request<http::string_body> http_req{verb, url.target, 11};
-  http_req.set(http::field::host, host_header_value(url));
-  http_req.set(http::field::user_agent, "vacps-native");
-  http_req.set(http::field::connection, "close");
-  for (const auto& [k, v] : req.headers) {
-    http_req.set(k, v);
+  const beast_http::verb verb = parse_verb(req.method);
+  beast_http::request<beast_http::vector_body<std::uint8_t>> message{
+      verb,
+      url.target,
+      11};
+  message.set(beast_http::field::host, host_header_value(url));
+  message.set(beast_http::field::user_agent, "vacps-native");
+  message.keep_alive(true);
+  for (const auto& [name, value] : req.headers) {
+    message.set(name, value);
   }
   if (!req.body.empty()) {
-    http_req.body() = req.body;
-    http_req.prepare_payload();
+    message.body() = std::move(req.body);
+    message.prepare_payload();
   }
 
-  auto [wec, wn] =
-      co_await http::async_write(stream, http_req, asio::as_tuple(asio::use_awaitable));
-  (void)wn;
-  if (wec) {
-    co_return std::unexpected(Error{std::format("http.request write: {}", wec.message())});
+  if (auto stopped = stop_before_operation(stop, deadline, kWriteOperation)) {
+    co_return std::unexpected(std::move(*stopped));
+  }
+  auto [write_ec, bytes_written] = co_await beast_http::async_write(
+      stream,
+      message,
+      io_token(cancel));
+  (void)bytes_written;
+  if (write_ec) {
+    co_return std::unexpected(
+        phase_error(kWriteOperation, write_ec, stop, deadline));
   }
 
-  // body_limit applies during async_read — not after a full unbounded read.
-  beast::flat_buffer buffer;
-  http::response_parser<http::string_body> parser;
-  parser.body_limit(req.max_response_bytes);
-  auto [rec, rn] =
-      co_await http::async_read(stream, buffer, parser, asio::as_tuple(asio::use_awaitable));
-  (void)rn;
-  if (rec == http::error::body_limit) {
-    co_return std::unexpected(Error{std::format(
-        "http.request: response body exceeds maxResponseBytes {}",
-        req.max_response_bytes)});
-  }
-  if (rec) {
-    co_return std::unexpected(Error{std::format("http.request read: {}", rec.message())});
-  }
+  for (;;) {
+    if (auto stopped = stop_before_operation(stop, deadline, kReadOperation)) {
+      co_return std::unexpected(std::move(*stopped));
+    }
 
-  http::response<http::string_body> res = parser.release();
-  ClientResponse out;
-  out.status = static_cast<int>(res.result_int());
-  out.body = std::move(res.body());
-  for (auto it = res.begin(); it != res.end(); ++it) {
-    out.headers.emplace_back(std::string{it->name_string()}, std::string{it->value()});
+    beast_http::response_parser<beast_http::vector_body<std::uint8_t>> parser;
+    parser.body_limit(req.max_response_bytes);
+    if (verb == beast_http::verb::head) {
+      parser.skip(true);
+    }
+
+    auto [read_ec, bytes_read] = co_await beast_http::async_read(
+        stream,
+        buffer,
+        parser,
+        io_token(cancel));
+    (void)bytes_read;
+    if (read_ec == beast_http::error::body_limit) {
+      co_return std::unexpected(Error{
+          std::format(
+              "http.request.read: response body exceeds maxResponseBytes {}",
+              req.max_response_bytes),
+          std::string{kReadOperation},
+          0});
+    }
+    if (read_ec) {
+      co_return std::unexpected(
+          phase_error(kReadOperation, read_ec, stop, deadline));
+    }
+
+    const unsigned status = parser.get().result_int();
+    const bool keep_alive =
+        parser.keep_alive() && !parser.need_eof() && status != 101;
+    auto response = parser.release();
+
+    // Ignore informational responses and continue parsing the final response.
+    // 101 switches protocol, so it is returned and the connection is discarded.
+    if (status >= 100 && status < 200 && status != 101) {
+      continue;
+    }
+
+    ClientResponse result;
+    result.status = static_cast<int>(status);
+    result.body = std::move(response.body());
+    for (auto field = response.begin(); field != response.end(); ++field) {
+      result.headers.emplace_back(
+          std::string{field->name_string()},
+          std::string{field->value()});
+    }
+    reusable = keep_alive;
+    co_return result;
   }
-  co_return out;
 }
 
 }  // namespace
 
-Result<ParsedUrl> parse_url(std::string_view url) {
-  if (url.empty()) {
-    return std::unexpected(Error{"http.request: empty url"});
+struct Client::Connection {
+  using PlainStream = beast::tcp_stream;
+  using TlsStream = ssl::stream<beast::tcp_stream>;
+
+  explicit Connection(asio::any_io_executor executor)
+      : plain(std::make_unique<PlainStream>(std::move(executor))) {}
+
+  Connection(asio::any_io_executor executor, ssl::context& context)
+      : tls(std::make_unique<TlsStream>(std::move(executor), context)) {}
+
+  std::unique_ptr<PlainStream> plain;
+  std::unique_ptr<TlsStream> tls;
+  beast::flat_buffer buffer;
+  steady_clock::time_point idle_since{};
+  bool reusable{false};
+};
+
+struct Client::OriginPool {
+  using Gate = asio::experimental::channel<void(boost::system::error_code)>;
+
+  OriginPool(asio::any_io_executor executor, std::size_t capacity)
+      : gate(std::move(executor), capacity) {
+    idle.reserve(capacity);
   }
 
-  // WHATWG parse via Ada (same engine as JS global URL).
-  auto parsed = ada::parse<ada::url_aggregator>(url);
-  if (!parsed) {
-    return std::unexpected(Error{"http.request: invalid url"});
+  Gate gate;
+  std::vector<std::unique_ptr<Connection>> idle;
+  std::size_t users{0};
+};
+
+struct Client::RequestGate {
+  RequestGate(asio::any_io_executor executor, std::size_t capacity)
+      : gate(std::move(executor), capacity) {}
+
+  OriginPool::Gate gate;
+};
+
+class Client::OriginLease final {
+ public:
+  OriginLease(Client& client, PoolIterator position) noexcept
+      : client_(client), position_(position) {}
+
+  ~OriginLease() noexcept {
+    client_.release_pool(position_);
   }
 
-  // protocol is "https:" / "http:" (with trailing colon).
-  auto protocol = parsed->get_protocol();
-  std::string scheme;
-  scheme.reserve(protocol.size());
-  for (char c : protocol) {
-    if (c == ':') break;
-    scheme.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-  }
-  if (scheme != "http" && scheme != "https") {
-    return std::unexpected(Error{"http.request: only http and https schemes are supported"});
+  OriginLease(const OriginLease&) = delete;
+  OriginLease& operator=(const OriginLease&) = delete;
+  OriginLease(OriginLease&&) = delete;
+  OriginLease& operator=(OriginLease&&) = delete;
+
+  [[nodiscard]] OriginPool& pool() noexcept {
+    return *position_->second;
   }
 
-  // Reject credentials (agent outbound requests must not embed userinfo).
-  if (parsed->has_credentials()) {
-    return std::unexpected(Error{"http.request: userinfo in url is not supported"});
+ private:
+  Client& client_;
+  PoolIterator position_;
+};
+
+class Client::GateLease final {
+ public:
+  explicit GateLease(OriginPool::Gate& gate) noexcept : gate_(gate) {}
+
+  ~GateLease() noexcept {
+    (void)gate_.try_receive([](boost::system::error_code) noexcept {});
   }
 
-  ParsedUrl out;
-  out.scheme = std::move(scheme);
-  out.host = std::string{parsed->get_hostname()};
-  if (out.host.empty()) {
-    return std::unexpected(Error{"http.request: missing host"});
+  GateLease(const GateLease&) = delete;
+  GateLease& operator=(const GateLease&) = delete;
+  GateLease(GateLease&&) = delete;
+  GateLease& operator=(GateLease&&) = delete;
+
+ private:
+  OriginPool::Gate& gate_;
+};
+
+class Client::ConnectionLease final {
+ public:
+  ConnectionLease(
+      Client& client,
+      OriginPool& pool,
+      std::unique_ptr<Connection> connection) noexcept
+      : client_(client), pool_(pool), connection_(std::move(connection)) {}
+
+  ~ConnectionLease() noexcept {
+    client_.release(pool_, std::move(connection_));
   }
 
-  auto port_sv = parsed->get_port();
-  if (port_sv.empty()) {
-    out.port = (out.scheme == "https") ? "443" : "80";
-  } else {
-    unsigned long n = 0;
-    const char* begin = port_sv.data();
-    const char* end = port_sv.data() + port_sv.size();
-    auto [ptr, ec] = std::from_chars(begin, end, n);
-    if (ec != std::errc{} || ptr != end || n == 0 || n > 65535) {
-      return std::unexpected(Error{"http.request: invalid port"});
-    }
-    out.port = std::to_string(n);
+  ConnectionLease(const ConnectionLease&) = delete;
+  ConnectionLease& operator=(const ConnectionLease&) = delete;
+  ConnectionLease(ConnectionLease&&) = delete;
+  ConnectionLease& operator=(ConnectionLease&&) = delete;
+
+  [[nodiscard]] Connection* get() noexcept {
+    return connection_.get();
   }
 
-  // path + query only (fragment must not be sent).
-  auto path = parsed->get_pathname();
-  auto search = parsed->get_search();  // includes leading '?' when present
-  out.target = path.empty() ? std::string{"/"} : std::string{path};
-  out.target.append(search);
-  if (out.target.empty()) {
-    out.target = "/";
+  void reset(std::unique_ptr<Connection> connection) noexcept {
+    connection_ = std::move(connection);
   }
-  return out;
+
+ private:
+  Client& client_;
+  OriginPool& pool_;
+  std::unique_ptr<Connection> connection_;
+};
+
+Client::Client(
+    asio::any_io_executor executor,
+    std::string ca_bundle)
+    : Client(std::move(executor), std::move(ca_bundle), Options{}) {}
+
+Client::Client(
+    asio::any_io_executor executor,
+    std::string ca_bundle,
+    Options options)
+    : executor_(std::move(executor)),
+      ca_bundle_(std::move(ca_bundle)),
+      options_(options),
+      request_gate_(std::make_unique<RequestGate>(
+          executor_, options_.max_active_connections)) {}
+
+Client::~Client() = default;
+
+Client::PoolIterator Client::acquire_pool(const ParsedUrl& url) {
+  OriginKey key{url.scheme, url.host, url.port};
+  auto position = pools_.find(key);
+  if (position == pools_.end()) {
+    auto pool = std::make_unique<OriginPool>(
+        executor_,
+        options_.max_connections_per_origin);
+    position = pools_.emplace(std::move(key), std::move(pool)).first;
+  }
+  ++position->second->users;
+  return position;
 }
 
-Result<std::string> resolve_ca_bundle(std::string_view explicit_path) {
-  namespace fs = std::filesystem;
-  auto try_path = [](std::string_view p) -> std::optional<std::string> {
-    if (p.empty()) return std::nullopt;
-    std::error_code ec;
-    if (fs::is_regular_file(fs::path{std::string{p}}, ec)) {
-      return std::string{p};
-    }
-    return std::nullopt;
-  };
-
-  if (auto p = try_path(explicit_path)) {
-    return *p;
+void Client::release_pool(PoolIterator position) noexcept {
+  OriginPool& pool = *position->second;
+  --pool.users;
+  if (pool.users == 0 && pool.idle.empty()) {
+    pools_.erase(position);
   }
-  if (const char* env = std::getenv("VACPS_CA_BUNDLE"); env != nullptr && env[0] != '\0') {
-    if (auto p = try_path(env)) {
-      return *p;
-    }
-    return std::unexpected(
-        Error{std::format("http.request: VACPS_CA_BUNDLE not a file: {}", env)});
-  }
-  static constexpr const char* kDefaults[] = {
-      "/etc/vacps/ca-bundle.pem",
-      "/etc/ssl/certs/ca-certificates.crt",
-      "/etc/ssl/cert.pem",
-      "/etc/pki/tls/certs/ca-bundle.crt",
-  };
-  for (const char* d : kDefaults) {
-    if (auto p = try_path(d)) {
-      return *p;
-    }
-  }
-  return std::unexpected(Error{
-      "http.request: no CA bundle found (set VACPS_CA_BUNDLE or install ca-certificates)"});
 }
 
-asio::awaitable<Result<ClientResponse>> async_request(ClientRequest req) {
+std::unique_ptr<Client::Connection> Client::take_idle(OriginPool& pool) {
+  const auto now = steady_clock::now();
+  while (!pool.idle.empty()) {
+    auto connection = std::move(pool.idle.back());
+    pool.idle.pop_back();
+    --idle_connections_;
+    if (now - connection->idle_since <= options_.idle_timeout) {
+      connection->reusable = false;
+      return connection;
+    }
+  }
+  return nullptr;
+}
+
+void Client::release(
+    OriginPool& pool,
+    std::unique_ptr<Connection> connection) noexcept {
+  if (connection == nullptr || !connection->reusable) {
+    return;
+  }
+
+  const auto now = steady_clock::now();
+  if (idle_connections_ >= options_.max_idle_connections) {
+    prune_expired_idle(now);
+  }
+  if (idle_connections_ >= options_.max_idle_connections) {
+    evict_oldest_idle();
+  }
+
+  connection->idle_since = now;
+  pool.idle.push_back(std::move(connection));
+  ++idle_connections_;
+}
+
+void Client::prune_expired_idle(Deadline now) noexcept {
+  for (auto position = pools_.begin(); position != pools_.end();) {
+    OriginPool& pool = *position->second;
+    const std::size_t old_size = pool.idle.size();
+    std::erase_if(pool.idle, [&](const auto& connection) {
+      return now - connection->idle_since > options_.idle_timeout;
+    });
+    idle_connections_ -= old_size - pool.idle.size();
+
+    if (pool.users == 0 && pool.idle.empty()) {
+      position = pools_.erase(position);
+    } else {
+      ++position;
+    }
+  }
+}
+
+void Client::evict_oldest_idle() noexcept {
+  auto oldest_pool = pools_.end();
+  std::size_t oldest_index = 0;
+  Deadline oldest_time = Deadline::max();
+
+  for (auto position = pools_.begin(); position != pools_.end(); ++position) {
+    const auto& idle = position->second->idle;
+    for (std::size_t index = 0; index < idle.size(); ++index) {
+      if (idle[index]->idle_since < oldest_time) {
+        oldest_pool = position;
+        oldest_index = index;
+        oldest_time = idle[index]->idle_since;
+      }
+    }
+  }
+
+  OriginPool& pool = *oldest_pool->second;
+  pool.idle.erase(pool.idle.begin() + static_cast<std::ptrdiff_t>(oldest_index));
+  --idle_connections_;
+  if (pool.users == 0 && pool.idle.empty()) {
+    pools_.erase(oldest_pool);
+  }
+}
+
+Result<ssl::context*> Client::ensure_tls_context() {
+  constexpr std::string_view kTlsOperation = "http.request.tls";
+  if (tls_context_ != nullptr) {
+    return tls_context_.get();
+  }
+
+  auto ca_path = resolve_ca_bundle(ca_bundle_);
+  if (!ca_path) {
+    return std::unexpected(std::move(ca_path.error()));
+  }
+
+  auto context = std::make_unique<ssl::context>(ssl::context::tls_client);
+  boost::system::error_code ec;
+  context->set_options(
+      ssl::context::default_workarounds | ssl::context::no_sslv2 |
+          ssl::context::no_sslv3 | ssl::context::no_tlsv1 |
+          ssl::context::no_tlsv1_1,
+      ec);
+  if (ec) {
+    return std::unexpected(io_error(kTlsOperation, ec));
+  }
+
+#if defined(SSL_CTX_set_min_proto_version)
+  if (::SSL_CTX_set_min_proto_version(
+          context->native_handle(),
+          TLS1_2_VERSION) != 1) {
+    return std::unexpected(Error{
+        "http.request.tls: failed to require TLS 1.2",
+        std::string{kTlsOperation},
+        0});
+  }
+#endif
+
+  context->set_verify_mode(ssl::verify_peer, ec);
+  if (ec) {
+    return std::unexpected(io_error(kTlsOperation, ec));
+  }
+  context->load_verify_file(*ca_path, ec);
+  if (ec) {
+    return std::unexpected(io_error(kTlsOperation, ec));
+  }
+
+  tls_context_ = std::move(context);
+  return tls_context_.get();
+}
+
+asio::awaitable<Result<std::unique_ptr<Client::Connection>>> Client::connect(
+    const ParsedUrl& url,
+    asio::cancellation_slot cancel,
+    const std::stop_token& stop,
+    Deadline deadline) {
+  constexpr std::string_view kResolveOperation = "http.request.resolve";
+  constexpr std::string_view kConnectOperation = "http.request.connect";
+  constexpr std::string_view kTlsOperation = "http.request.tls";
+
+  ssl::context* tls_context = nullptr;
+  if (url.scheme == "https") {
+    auto context = ensure_tls_context();
+    if (!context) {
+      co_return std::unexpected(std::move(context.error()));
+    }
+    tls_context = *context;
+  }
+
+  if (auto stopped = stop_before_operation(stop, deadline, kResolveOperation)) {
+    co_return std::unexpected(std::move(*stopped));
+  }
+  tcp::resolver resolver{executor_};
+  auto [resolve_ec, endpoints] = co_await resolver.async_resolve(
+      url.host,
+      url.port,
+      io_token(cancel));
+  if (resolve_ec) {
+    co_return std::unexpected(
+        phase_error(kResolveOperation, resolve_ec, stop, deadline));
+  }
+
+  if (url.scheme == "http") {
+    auto connection = std::make_unique<Connection>(executor_);
+    if (auto stopped = stop_before_operation(stop, deadline, kConnectOperation)) {
+      co_return std::unexpected(std::move(*stopped));
+    }
+    auto [connect_ec, endpoint] = co_await connection->plain->async_connect(
+        endpoints,
+        io_token(cancel));
+    (void)endpoint;
+    if (connect_ec) {
+      co_return std::unexpected(
+          phase_error(kConnectOperation, connect_ec, stop, deadline));
+    }
+    co_return connection;
+  }
+
+  auto connection = std::make_unique<Connection>(executor_, *tls_context);
+  if (!url.host_is_ip_literal &&
+      ::SSL_set_tlsext_host_name(
+          connection->tls->native_handle(),
+          url.host.c_str()) != 1) {
+    co_return std::unexpected(Error{
+        "http.request.tls: failed to set SNI hostname",
+        std::string{kTlsOperation},
+        0});
+  }
+  connection->tls->set_verify_callback(ssl::host_name_verification(url.host));
+
+  if (auto stopped = stop_before_operation(stop, deadline, kConnectOperation)) {
+    co_return std::unexpected(std::move(*stopped));
+  }
+  auto [connect_ec, endpoint] =
+      co_await beast::get_lowest_layer(*connection->tls).async_connect(
+          endpoints,
+          io_token(cancel));
+  (void)endpoint;
+  if (connect_ec) {
+    co_return std::unexpected(
+        phase_error(kConnectOperation, connect_ec, stop, deadline));
+  }
+
+  if (auto stopped = stop_before_operation(stop, deadline, kTlsOperation)) {
+    co_return std::unexpected(std::move(*stopped));
+  }
+  auto [handshake_ec] = co_await connection->tls->async_handshake(
+      ssl::stream_base::client,
+      io_token(cancel));
+  if (handshake_ec) {
+    co_return std::unexpected(
+        phase_error(kTlsOperation, handshake_ec, stop, deadline));
+  }
+  co_return connection;
+}
+
+asio::awaitable<Result<ClientResponse>> Client::exchange(
+    Connection& connection,
+    const ParsedUrl& url,
+    ClientRequest req,
+    asio::cancellation_slot cancel,
+    const std::stop_token& stop,
+    Deadline deadline) {
+  connection.reusable = false;
+  if (connection.plain != nullptr) {
+    co_return co_await exchange_stream(
+        *connection.plain,
+        connection.buffer,
+        connection.reusable,
+        url,
+        std::move(req),
+        cancel,
+        stop,
+        deadline);
+  }
+  co_return co_await exchange_stream(
+      *connection.tls,
+      connection.buffer,
+      connection.reusable,
+      url,
+      std::move(req),
+      cancel,
+      stop,
+      deadline);
+}
+
+asio::awaitable<Result<ClientResponse>> Client::request(
+    std::stop_token stop,
+    ClientRequest req) {
+  constexpr std::string_view kRequestOperation = "http.request";
+  constexpr std::string_view kOriginAcquireOperation =
+      "http.request.acquire.origin";
+  constexpr std::string_view kGlobalAcquireOperation =
+      "http.request.acquire.global";
+
   if (req.url.empty()) {
-    co_return std::unexpected(Error{"http.request: url required"});
+    co_return std::unexpected(Error{
+        "http.request: url required",
+        std::string{kRequestOperation},
+        0});
   }
-  if (req.timeout_ms < 0) {
-    co_return std::unexpected(Error{"http.request: timeoutMs must be >= 0"});
+  if (req.timeout <= std::chrono::milliseconds::zero()) {
+    co_return std::unexpected(Error{
+        "http.request: timeout must be > 0",
+        std::string{kRequestOperation},
+        0});
   }
   if (req.max_response_bytes == 0) {
-    co_return std::unexpected(Error{"http.request: maxResponseBytes must be > 0"});
+    co_return std::unexpected(Error{
+        "http.request: maxResponseBytes must be > 0",
+        std::string{kRequestOperation},
+        0});
+  }
+  if (parse_verb(req.method) == beast_http::verb::unknown) {
+    co_return std::unexpected(Error{
+        std::format("http.request: unknown method '{}'", req.method),
+        std::string{kRequestOperation},
+        0});
+  }
+  for (const auto& [name, value] : req.headers) {
+    (void)value;
+    if (is_client_owned_header(name)) {
+      co_return std::unexpected(Error{
+          std::format(
+              "http.request: header '{}' is reserved (owned by the client)",
+              name),
+          std::string{kRequestOperation},
+          0});
+    }
+  }
+  if (stop.stop_requested()) {
+    co_return std::unexpected(stopped_error(kRequestOperation));
   }
 
   auto parsed = parse_url(req.url);
   if (!parsed) {
     co_return std::unexpected(std::move(parsed.error()));
   }
-  const ParsedUrl url = std::move(*parsed);
 
-  try {
-    auto executor = co_await asio::this_coro::executor;
-    const auto timeout = std::chrono::milliseconds(
-        req.timeout_ms > 0 ? req.timeout_ms : 30'000);
+  const Deadline deadline = steady_clock::now() + req.timeout;
+  OriginLease origin{*this, acquire_pool(*parsed)};
+  OriginPool& pool = origin.pool();
 
-    // DNS resolve is covered by the same wall budget (previously uncancellable).
-    tcp::resolver resolver{executor};
-    auto [rec, results] = co_await resolver.async_resolve(
-        url.host,
-        url.port,
-        asio::as_tuple(asio::cancel_after(timeout, asio::use_awaitable)));
-    if (rec == asio::error::operation_aborted) {
-      co_return std::unexpected(Error{"http.request resolve: timed out"});
-    }
-    if (rec) {
-      co_return std::unexpected(Error{std::format("http.request resolve: {}", rec.message())});
-    }
+  auto cancellation = std::make_shared<OperationCancel>();
+  std::weak_ptr<OperationCancel> weak_cancellation = cancellation;
 
-    if (url.scheme == "http") {
-      beast::tcp_stream stream{executor};
-      stream.expires_after(timeout);
-      auto [cec, ep] =
-          co_await stream.async_connect(results, asio::as_tuple(asio::use_awaitable));
-      (void)ep;
-      if (cec) {
-        co_return std::unexpected(Error{std::format("http.request connect: {}", cec.message())});
-      }
-      stream.expires_after(timeout);
-      auto out = co_await do_http_exchange(stream, url, std::move(req));
-      beast::error_code sec;
-      stream.socket().shutdown(tcp::socket::shutdown_both, sec);
-      co_return out;
-    }
+  // One absolute timer owns the entire request budget. Sequential phases bind
+  // the same edge-triggered slot instead of allocating one cancel_at timer per
+  // gate / resolve / connect / TLS / write / read operation.
+  asio::steady_timer deadline_timer{executor_, deadline};
+  deadline_timer.async_wait(
+      [cancellation](const boost::system::error_code& ec) noexcept {
+        if (!ec) {
+          emit_cancel(*cancellation);
+        }
+      });
 
-    // HTTPS
-    auto ca = resolve_ca_bundle(req.ca_bundle);
-    if (!ca) {
-      co_return std::unexpected(std::move(ca.error()));
-    }
-    ssl::context ctx = make_tls_client_context(*ca);
+  std::stop_callback on_stop{
+      stop,
+      [weak_cancellation, executor = executor_]() noexcept {
+        asio::post(executor, [weak_cancellation]() noexcept {
+          if (auto operation = weak_cancellation.lock()) {
+            emit_cancel(*operation);
+          }
+        });
+      }};
 
-    ssl::stream<beast::tcp_stream> stream{executor, ctx};
-    // SNI
-    if (!SSL_set_tlsext_host_name(stream.native_handle(), url.host.c_str())) {
-      co_return std::unexpected(Error{"http.request: SSL_set_tlsext_host_name failed"});
-    }
-    stream.set_verify_callback(ssl::host_name_verification(url.host));
-
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    auto [cec, ep] = co_await beast::get_lowest_layer(stream).async_connect(
-        results, asio::as_tuple(asio::use_awaitable));
-    (void)ep;
-    if (cec) {
-      co_return std::unexpected(Error{std::format("http.request connect: {}", cec.message())});
-    }
-
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    auto [hec] =
-        co_await stream.async_handshake(ssl::stream_base::client, asio::as_tuple(asio::use_awaitable));
-    if (hec) {
-      co_return std::unexpected(Error{std::format("http.request tls: {}", hec.message())});
-    }
-
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    auto out = co_await do_http_exchange(stream, url, std::move(req));
-
-    beast::get_lowest_layer(stream).expires_after(timeout);
-    auto [sec] = co_await stream.async_shutdown(asio::as_tuple(asio::use_awaitable));
-    if (sec && sec != ssl::error::stream_truncated) {
-      log::debug("http.request shutdown: {}", sec.message());
-    }
-    co_return out;
-  } catch (const boost::system::system_error& e) {
-    co_return std::unexpected(Error{std::format("http.request: {}", e.what())});
-  } catch (const std::exception& e) {
-    co_return std::unexpected(Error{std::format("http.request: {}", e.what())});
+  if (auto stopped = stop_before_operation(
+          stop, deadline, kOriginAcquireOperation)) {
+    co_return std::unexpected(std::move(*stopped));
   }
+  auto [acquire_ec] = co_await pool.gate.async_send(
+      boost::system::error_code{},
+      io_token(cancellation->signal.slot()));
+  if (acquire_ec) {
+    co_return std::unexpected(
+        phase_error(kOriginAcquireOperation, acquire_ec, stop, deadline));
+  }
+  GateLease origin_permit{pool.gate};
+
+  if (auto stopped = stop_before_operation(
+          stop, deadline, kGlobalAcquireOperation)) {
+    co_return std::unexpected(std::move(*stopped));
+  }
+  auto [global_acquire_ec] = co_await request_gate_->gate.async_send(
+      boost::system::error_code{},
+      io_token(cancellation->signal.slot()));
+  if (global_acquire_ec) {
+    co_return std::unexpected(phase_error(
+        kGlobalAcquireOperation,
+        global_acquire_ec,
+        stop,
+        deadline));
+  }
+  GateLease global_permit{request_gate_->gate};
+
+  ConnectionLease lease{*this, pool, take_idle(pool)};
+  if (lease.get() == nullptr) {
+    auto connected = co_await connect(
+        *parsed,
+        cancellation->signal.slot(),
+        stop,
+        deadline);
+    if (!connected) {
+      co_return std::unexpected(std::move(connected.error()));
+    }
+    lease.reset(std::move(*connected));
+  }
+
+  co_return co_await exchange(
+      *lease.get(),
+      *parsed,
+      std::move(req),
+      cancellation->signal.slot(),
+      stop,
+      deadline);
+}
+
+Result<ParsedUrl> parse_url(std::string_view url) {
+  if (url.empty()) {
+    return std::unexpected(Error{
+        "http.request: empty url",
+        "http.request",
+        0});
+  }
+
+  auto parsed = ada::parse<ada::url_aggregator>(url);
+  if (!parsed) {
+    return std::unexpected(Error{
+        "http.request: invalid url",
+        "http.request",
+        0});
+  }
+
+  const auto protocol = parsed->get_protocol();
+  std::string scheme;
+  scheme.reserve(protocol.size());
+  for (char character : protocol) {
+    if (character == ':') {
+      break;
+    }
+    scheme.push_back(static_cast<char>(
+        std::tolower(static_cast<unsigned char>(character))));
+  }
+  if (scheme != "http" && scheme != "https") {
+    return std::unexpected(Error{
+        "http.request: only http and https schemes are supported",
+        "http.request",
+        0});
+  }
+  if (parsed->has_credentials()) {
+    return std::unexpected(Error{
+        "http.request: userinfo in url is not supported",
+        "http.request",
+        0});
+  }
+
+  ParsedUrl result;
+  result.scheme = std::move(scheme);
+  result.host = std::string{parsed->get_hostname()};
+  result.host_is_ip_literal =
+      parsed->host_type != ada::url_host_type::DEFAULT;
+  result.host_is_ipv6 = parsed->host_type == ada::url_host_type::IPV6;
+  if (result.host_is_ipv6 && result.host.size() >= 2 &&
+      result.host.front() == '[' && result.host.back() == ']') {
+    result.host.erase(result.host.begin());
+    result.host.pop_back();
+  }
+  if (result.host.empty()) {
+    return std::unexpected(Error{
+        "http.request: missing host",
+        "http.request",
+        0});
+  }
+
+  const auto port = parsed->get_port();
+  if (port.empty()) {
+    result.port = result.scheme == "https" ? "443" : "80";
+  } else {
+    unsigned long number = 0;
+    const char* begin = port.data();
+    const char* end = port.data() + port.size();
+    auto [position, ec] = std::from_chars(begin, end, number);
+    if (ec != std::errc{} || position != end || number == 0 ||
+        number > 65535) {
+      return std::unexpected(Error{
+          "http.request: invalid port",
+          "http.request",
+          0});
+    }
+    result.port = std::to_string(number);
+  }
+
+  const auto path = parsed->get_pathname();
+  const auto query = parsed->get_search();
+  result.target = path.empty() ? std::string{"/"} : std::string{path};
+  result.target.append(query);
+  if (result.target.empty()) {
+    result.target = "/";
+  }
+  return result;
+}
+
+Result<std::string> resolve_ca_bundle(std::string_view explicit_path) {
+  namespace fs = std::filesystem;
+  auto regular_file = [](std::string_view path) -> std::optional<std::string> {
+    if (path.empty()) {
+      return std::nullopt;
+    }
+    std::error_code ec;
+    if (fs::is_regular_file(fs::path{std::string{path}}, ec)) {
+      return std::string{path};
+    }
+    return std::nullopt;
+  };
+
+  if (!explicit_path.empty()) {
+    if (auto path = regular_file(explicit_path)) {
+      return *path;
+    }
+    return std::unexpected(Error{
+        std::format("http.request: CA bundle not a file: {}", explicit_path),
+        "http.request.tls",
+        0});
+  }
+
+  static constexpr const char* kDefaultPaths[] = {
+      "/etc/vacps/ca-bundle.pem",
+      "/etc/ssl/certs/ca-certificates.crt",
+      "/etc/ssl/cert.pem",
+      "/etc/pki/tls/certs/ca-bundle.crt",
+  };
+  for (const char* path : kDefaultPaths) {
+    if (auto found = regular_file(path)) {
+      return *found;
+    }
+  }
+  return std::unexpected(Error{
+      "http.request: no CA bundle found "
+      "(inject ca_bundle or install ca-certificates)",
+      "http.request.tls",
+      0});
 }
 
 }  // namespace vacps::http

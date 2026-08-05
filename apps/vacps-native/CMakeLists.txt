@@ -1,29 +1,20 @@
 cmake_minimum_required(VERSION 3.24)
-project(vacps-native
-  VERSION 0.1.7
-  LANGUAGES C CXX
-  DESCRIPTION "VACPS native agent (musl static ELF)"
-)
+project(vacps-native VERSION 0.1.8 LANGUAGES C CXX
+  DESCRIPTION "Asio + QuickJS native agent runtime")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(VACPS_STATIC "Link the agent as a fully static ELF" ON)
-option(VACPS_ENABLE_ASAN "Enable AddressSanitizer (Debug only, dynamic)" OFF)
-option(VACPS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
-option(VACPS_BUILD_TESTS "Build GoogleTest unit tests" ON)
+option(VACPS_STATIC "Static link" ON)
+option(VACPS_ENABLE_ASAN "AddressSanitizer (incompatible with VACPS_STATIC)" OFF)
+option(VACPS_ENABLE_UBSAN "UndefinedBehaviorSanitizer (incompatible with VACPS_STATIC)" OFF)
+option(VACPS_ENABLE_TSAN "ThreadSanitizer (incompatible with VACPS_STATIC / ASan)" OFF)
+# Optional debug counters in Runtime diagnostics. Zero cost when OFF.
 
-# ── Compiler / linker ──────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  add_compile_options(
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wformat
-    -Wformat-security
-  )
+  add_compile_options(-Wall -Wextra -Wpedantic -Wformat -Wformat-security)
 endif()
 
 if(VACPS_STATIC)
@@ -33,11 +24,15 @@ if(VACPS_STATIC)
   add_compile_options(-ffunction-sections -fdata-sections)
 endif()
 
+if(VACPS_ENABLE_TSAN AND (VACPS_ENABLE_ASAN OR VACPS_ENABLE_UBSAN))
+  message(FATAL_ERROR "TSan cannot be combined with ASan/UBSan")
+endif()
+
 if(VACPS_ENABLE_ASAN)
   if(VACPS_STATIC)
     message(FATAL_ERROR "ASan is incompatible with VACPS_STATIC=ON")
   endif()
-  add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
   add_link_options(-fsanitize=address)
 endif()
 
@@ -45,196 +40,250 @@ if(VACPS_ENABLE_UBSAN)
   if(VACPS_STATIC)
     message(FATAL_ERROR "UBSan is incompatible with VACPS_STATIC=ON")
   endif()
-  add_compile_options(-fsanitize=undefined)
+  # Non-recovering UBSan: CI/tests must fail hard on the first UB report.
+  add_compile_options(
+    -fsanitize=undefined
+    -fno-sanitize-recover=all
+    -fno-omit-frame-pointer
+    -g
+  )
   add_link_options(-fsanitize=undefined)
 endif()
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dependencies.cmake")
-
-find_package(Threads REQUIRED)
-
-# OpenSSL (Alpine: openssl-dev + openssl-libs-static for musl full-static)
-if(VACPS_STATIC)
-  set(OPENSSL_USE_STATIC_LIBS TRUE)
-endif()
-find_package(OpenSSL REQUIRED)
-message(STATUS "OpenSSL ${OPENSSL_VERSION} (static=${OPENSSL_USE_STATIC_LIBS})")
-
-# ── Boost.Process v2 (compiled; not header-only) ───────────────────
-# Sources live under FetchContent Boost tarball: libs/process/src
-if(VACPS_BOOST_INCLUDE_DIRS)
-  set(_vacps_boost_root "${VACPS_BOOST_INCLUDE_DIRS}")
-else()
-  # system boost — try to locate process sources is not required if headers only
-  set(_vacps_boost_root "")
+if(VACPS_ENABLE_TSAN)
+  if(VACPS_STATIC)
+    message(FATAL_ERROR "TSan is incompatible with VACPS_STATIC=ON")
+  endif()
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=thread)
 endif()
 
-if(_vacps_boost_root AND EXISTS "${_vacps_boost_root}/libs/process/src/error.cpp")
-  set(_bp_src "${_vacps_boost_root}/libs/process/src")
-  add_library(vacps_boost_process STATIC
-    "${_bp_src}/error.cpp"
-    "${_bp_src}/environment.cpp"
-    "${_bp_src}/pid.cpp"
-    "${_bp_src}/shell.cpp"
-    "${_bp_src}/detail/environment_posix.cpp"
-    "${_bp_src}/detail/last_error.cpp"
-    "${_bp_src}/detail/throw_error.cpp"
-    "${_bp_src}/detail/utf8.cpp"
-    "${_bp_src}/posix/close_handles.cpp"
-    "${_bp_src}/ext/cmd.cpp"
-    "${_bp_src}/ext/cwd.cpp"
-    "${_bp_src}/ext/env.cpp"
-    "${_bp_src}/ext/exe.cpp"
-    "${_bp_src}/ext/proc_info.cpp"
-  )
-  target_include_directories(vacps_boost_process PUBLIC ${_vacps_boost_root})
-  target_compile_definitions(vacps_boost_process
-    PUBLIC
-      BOOST_PROCESS_USE_STD_FS=1
-      BOOST_PROCESS_STATIC_LINK=1
-    PRIVATE
-      BOOST_PROCESS_SOURCE=1
-  )
-  target_compile_features(vacps_boost_process PUBLIC cxx_std_17)
-  set_target_properties(vacps_boost_process PROPERTIES
-    POSITION_INDEPENDENT_CODE OFF
-  )
-  message(STATUS "Boost.Process v2 from ${_bp_src}")
-else()
-  message(FATAL_ERROR "Boost.Process sources not found (need FetchContent Boost with libs/process)")
-endif()
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(VacpsDeps)
 
-# ── Core library (shared by agent + tests) ─────────────────────────
-# Layout: src/{main,app,quickjs,process,storage,http,crypto,fs}
-add_library(vacps_native_core STATIC
-  src/app/version.cpp
+# ── base (log) ─────────────────────────────────────────────────────
+vacps_layer(vacps_base
   src/app/log.cpp
-  src/storage/db.cpp
-  src/fs/fs.cpp
-  src/fs/sandbox.cpp
-  src/fs/async.cpp
-  src/fs/io_uring_probe.cpp
-  src/process/process.cpp
-  src/process/registry.cpp
-  src/crypto/crypto.cpp
-  src/http/script_dispatch.cpp
-  src/http/server.cpp
-  src/http/session.cpp
-  src/http/client.cpp
-  src/quickjs/runtime.cpp
-  src/quickjs/context.cpp
-  src/quickjs/host.cpp
-  src/quickjs/modules.cpp
-  src/quickjs/url_globals.cpp
-  src/quickjs/encoding_globals.cpp
+  src/app/version.cpp
 )
-
-target_include_directories(vacps_native_core PUBLIC
-  "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  ${VACPS_BOOST_INCLUDE_DIRS}
-)
-
-target_compile_definitions(vacps_native_core PUBLIC
-  VACPS_NATIVE_VERSION="${PROJECT_VERSION}"
-  BOOST_ASIO_NO_DEPRECATED
-  BOOST_BEAST_USE_STD_STRING_VIEW
-  BOOST_PROCESS_USE_STD_FS=1
-  BOOST_PROCESS_STATIC_LINK=1
-)
-
-if(VACPS_BOOST_TARGETS)
-  target_link_libraries(vacps_native_core PUBLIC ${VACPS_BOOST_TARGETS})
-endif()
-
-target_link_libraries(vacps_native_core PUBLIC
+target_link_libraries(vacps_base PUBLIC
   Threads::Threads
-  vacps_sqlite
-  vacps_quickjs
-  vacps_boost_process
-  ada
-  simdutf::simdutf
   spdlog::spdlog
-  nlohmann_json::nlohmann_json
-  OpenSSL::SSL
+)
+
+# ── URL domain (Ada) ───────────────────────────────────────────────
+vacps_layer(vacps_url
+  src/url/url.cpp
+  src/url/search_params.cpp
+)
+target_link_libraries(vacps_url PUBLIC ada::ada)
+
+# ── Text domain (simdutf) ──────────────────────────────────────────
+vacps_layer(vacps_text
+  src/text/decoder.cpp
+)
+target_link_libraries(vacps_text PUBLIC simdutf::simdutf)
+
+# ── Crypto domain (OpenSSL) ────────────────────────────────────────
+vacps_layer(vacps_crypto
+  src/crypto/crypto.cpp
+)
+target_link_libraries(vacps_crypto PUBLIC
+  vacps_base
   OpenSSL::Crypto
 )
 
-# liburing: compile-time enable Asio stream_file + runtime probe (setup+NOP).
-# Docker default seccomp blocks io_uring_setup → probe fails → thread_pool only.
-# Incomplete profiles (setup OK, enter denied) also fail probe — avoids pending ops.
-# Asio has no automatic file→thread_pool fallback; we branch ourselves.
-find_path(VACPS_URING_INCLUDE liburing.h)
-unset(VACPS_URING_LIB CACHE)
-if(VACPS_STATIC)
-  set(_vacps_lib_suffixes_save ${CMAKE_FIND_LIBRARY_SUFFIXES})
-  set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-  find_library(VACPS_URING_LIB uring)
-  set(CMAKE_FIND_LIBRARY_SUFFIXES ${_vacps_lib_suffixes_save})
-else()
-  find_library(VACPS_URING_LIB uring)
+# ── HTTP domain (Beast + Ada URL + OpenSSL TLS) ─────────────────────
+# Pure C++ outbound client + inbound HTTP/1 server transport.
+# JS surface via vacps:http module (request + class Server).
+vacps_layer(vacps_http
+  src/http/client.cpp
+  src/http/server.cpp
+)
+target_link_libraries(vacps_http PUBLIC
+  vacps_base
+  ada::ada
+  OpenSSL::SSL
+)
+
+# ── Storage domain (SQLite; JS surface via vacps:store module) ──
+vacps_layer(vacps_storage
+  src/storage/database.cpp
+  src/storage/store.cpp
+)
+target_link_libraries(vacps_storage PUBLIC
+  vacps_base
+  vacps_sqlite
+)
+
+# ── FS domain (dual backend: Asio random_access_file/io_uring + POSIX) ──
+# BOOST_ASIO_HAS_IO_URING is defined PUBLIC on every vacps_layer (see VacpsDeps
+# vacps_layer helper) so all Asio TUs share one config and avoid ODR/ABI skew.
+# Epoll remains the default reactor: we never define BOOST_ASIO_DISABLE_EPOLL
+# or BOOST_ASIO_HAS_IO_URING_AS_DEFAULT. io_uring backs file ops only when the
+# runtime probe succeeds; networking/timers stay on epoll.
+find_library(VACPS_URING_LIB uring)
+if(NOT VACPS_URING_LIB)
+  message(FATAL_ERROR "liburing not found (required for vacps:fs Asio/io_uring backend)")
 endif()
-if(VACPS_URING_LIB AND VACPS_URING_INCLUDE)
-  target_compile_definitions(vacps_native_core PUBLIC
-    BOOST_ASIO_HAS_IO_URING=1
-    VACPS_HAVE_LIBURING=1
+vacps_layer(vacps_fs
+  src/fs/fs.cpp
+  src/fs/file.cpp
+  src/fs/open_options.cpp
+  src/fs/io_uring_probe.cpp
+)
+# Probe implementation only.
+target_compile_definitions(vacps_fs PRIVATE VACPS_HAVE_LIBURING=1)
+target_link_libraries(vacps_fs PUBLIC
+  vacps_base
+  ${VACPS_URING_LIB}
+)
+
+# ── Process domain (Boost.Process v2; owner main_executor only) ──────────
+# Process v2 compiled symbols come from VACPS_BOOST_PROCESS_TARGET
+# (vacps_boost_process for FetchContent, or Boost::process for system Boost).
+vacps_layer(vacps_process
+  src/process/budget.cpp
+  src/process/process.cpp
+  src/process/runtime.cpp
+)
+if(NOT VACPS_BOOST_PROCESS_TARGET)
+  message(FATAL_ERROR
+    "vacps_process requires VACPS_BOOST_PROCESS_TARGET "
+    "(set in cmake/VacpsDeps.cmake)")
+endif()
+target_link_libraries(vacps_process PUBLIC
+  vacps_base
+  ${VACPS_BOOST_PROCESS_TARGET}
+)
+# Custom vacps_boost_process keeps Process macros PRIVATE; apply consumer ABI
+# config only on the Process domain TUs that include Boost.Process headers.
+# System Boost::process brings its own interface definitions — do not override.
+if(VACPS_BOOST_PROCESS_TARGET STREQUAL "vacps_boost_process")
+  target_compile_definitions(vacps_process PRIVATE
+    BOOST_PROCESS_USE_STD_FS=1
+    BOOST_PROCESS_STATIC_LINK=1
   )
-  target_include_directories(vacps_native_core PUBLIC ${VACPS_URING_INCLUDE})
-  target_link_libraries(vacps_native_core PUBLIC ${VACPS_URING_LIB})
-  message(STATUS "liburing: ${VACPS_URING_LIB} (stream_file if probe_io_uring() ok)")
-else()
-  message(STATUS "liburing: not found (vacps:fs content always thread_pool)")
 endif()
+
+# ── Global APIs: URL / TextEncoder / TextDecoder ───────────────────
+# Headers use Runtime / binding types; link is resolved by vacps_runtime
+# (avoids static-lib cycle: runtime → globals → runtime).
+vacps_layer(vacps_globals
+  src/globals/install.cpp
+  src/globals/url_binding.cpp
+  src/globals/url_search_params_binding.cpp
+  src/globals/text_encoder_binding.cpp
+  src/globals/text_decoder_binding.cpp
+)
+target_link_libraries(vacps_globals PUBLIC
+  vacps_base
+  vacps_quickjs
+  vacps_url
+  vacps_text
+)
+
+# ── binding DSL (header-only QuickJS C++23 helpers) ────────────────
+# No implementation sources — consumers include binding/*.hpp only.
+add_library(vacps_binding INTERFACE)
+target_include_directories(vacps_binding INTERFACE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_features(vacps_binding INTERFACE cxx_std_23)
+target_link_libraries(vacps_binding INTERFACE
+  vacps_base
+  vacps_quickjs
+)
+
+# ── vacps:* ES modules (binding DSL + domain libs) ─────────────────
+# Same cycle pattern as vacps_globals: templates need Runtime headers;
+# symbols resolve when linked into vacps_runtime.
+vacps_layer(vacps_modules
+  src/modules/catalog.cpp
+  src/modules/crypto.cpp
+  src/modules/host.cpp
+  src/modules/log.cpp
+  src/modules/timer.cpp
+  src/modules/store.cpp
+  src/modules/fs.cpp
+  src/modules/http.cpp
+  src/modules/process.cpp
+)
+target_link_libraries(vacps_modules PUBLIC
+  vacps_base
+  vacps_quickjs
+  vacps_crypto
+  vacps_storage
+  vacps_fs
+  vacps_http
+  vacps_process
+  vacps_binding
+)
+
+# ── Asio + QuickJS runtime core (docs/RUNTIME_LAYERING.md) ──────────
+vacps_layer(vacps_runtime
+  src/runtime/js_engine.cpp
+  src/runtime/js_error.cpp
+  src/runtime/promise_capability.cpp
+  src/runtime/js_promise_await.cpp
+  src/runtime/detail/runtime_impl.cpp
+  src/runtime/runtime.cpp
+  src/runtime/runtime_async.cpp
+  src/runtime/runtime_script.cpp
+  src/runtime/runtime_callbacks.cpp
+)
+target_link_libraries(vacps_runtime PUBLIC
+  vacps_base
+  vacps_quickjs
+  vacps_globals
+  vacps_modules
+)
+target_link_libraries(vacps_runtime PRIVATE
+  mimalloc-static
+)
+
+# ── Bootstrap (process initialization only; no domain policy) ──────
+vacps_layer(vacps_bootstrap
+  src/bootstrap/process_init.cpp
+)
+target_link_libraries(vacps_bootstrap PUBLIC
+  vacps_base
+)
+
+# ── Host composition (CLI + process entry support; no domain policy) ─
+vacps_layer(vacps_host
+  src/host/command_line.cpp
+  src/host/entry_module.cpp
+  src/host/application.cpp
+)
+target_link_libraries(vacps_host PUBLIC
+  vacps_runtime
+  vacps_process
+)
 
 # ── Agent binary ───────────────────────────────────────────────────
 add_executable(vacps-agent src/main.cpp)
+# Keep the global new/delete override in the final executable's object list;
+# placing it only in a static archive allows the linker to discard the TU.
+# TSan supplies strong new/delete interceptors that must own these symbols.
+if(NOT VACPS_ENABLE_TSAN)
+  target_sources(vacps-agent PRIVATE src/bootstrap/mimalloc_new_delete.cpp)
+endif()
 set_target_properties(vacps-agent PROPERTIES
   OUTPUT_NAME "vacps-agent-linux-x86_64"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
-target_link_libraries(vacps-agent PRIVATE vacps_native_core)
+target_link_libraries(vacps-agent PRIVATE
+  vacps_host
+  vacps_bootstrap
+)
+if(NOT VACPS_ENABLE_TSAN)
+  target_link_libraries(vacps-agent PRIVATE mimalloc-static)
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS vacps-agent RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# ── Unit tests (GoogleTest 1.17.0) ─────────────────────────────────
-if(VACPS_BUILD_TESTS)
-  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GTest.cmake")
-  enable_testing()
-
-  add_executable(vacps-native-tests
-    tests/test_crypto.cpp
-    tests/test_fs.cpp
-    tests/test_fs_sandbox.cpp
-    tests/test_fs_async.cpp
-    tests/test_db.cpp
-    tests/test_process.cpp
-    tests/test_host.cpp
-    tests/test_js_native_api.cpp
-    tests/test_promise_bridge.cpp
-    tests/test_url_global.cpp
-    tests/test_http_client.cpp
-    tests/test_js_tasks.cpp
-  )
-  target_link_libraries(vacps-native-tests PRIVATE
-    vacps_native_core
-    GTest::gtest_main
-  )
-  target_compile_definitions(vacps-native-tests PRIVATE
-    VACPS_NATIVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-  )
-  set_target_properties(vacps-native-tests PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-  )
-
-  include(GoogleTest)
-  gtest_discover_tests(vacps-native-tests
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-    DISCOVERY_TIMEOUT 30
-  )
-endif()
-
-message(STATUS "vacps-native ${PROJECT_VERSION}")
-message(STATUS "  C++ compiler: ${CMAKE_CXX_COMPILER}")
-message(STATUS "  VACPS_STATIC: ${VACPS_STATIC}")
-message(STATUS "  VACPS_BUILD_TESTS: ${VACPS_BUILD_TESTS}")
-message(STATUS "  Build type:   ${CMAKE_BUILD_TYPE}")
+message(STATUS "vacps-native ${PROJECT_VERSION} — Asio + QuickJS runtime")
+message(STATUS "  layers: vacps_base vacps_bootstrap vacps_url vacps_text vacps_crypto vacps_http vacps_storage vacps_fs vacps_process vacps_globals vacps_modules vacps_runtime vacps_host")
+message(STATUS "  binary: vacps-agent → vacps-agent-linux-x86_64")

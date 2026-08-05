@@ -14,10 +14,11 @@ struct DirEntry {
   std::string name;
   bool is_dir{false};
   bool is_file{false};
+  bool is_symlink{false};
   std::uint64_t size{0};
 };
 
-/** Metadata for vacps:fs.stat. */
+/** Metadata for vacps:fs.stat / File.stat. */
 struct FileStat {
   std::string path;
   /** "file" | "directory" | "symlink" | "other" */
@@ -30,15 +31,29 @@ struct FileStat {
   bool is_symlink{false};
 };
 
+struct MkdirOptions {
+  /** false (default): create last component only; true: create_directories. */
+  bool recursive{false};
+};
+
+struct RemoveOptions {
+  /** false (default): file or empty dir only; true: remove_all. */
+  bool recursive{false};
+};
+
+struct RenameOptions {
+  /** false (default): fail if target exists; true: allow replace. */
+  bool replace{false};
+};
+
 /**
- * Pure path resolution (no product policy).
+ * Pure path resolution (no product path policy).
  *
  * - Empty path / embedded NUL → error (cannot open).
  * - Absolute: returned lexically normalized.
  * - Relative: joined under workspace_root, then lexically normalized.
  *
- * Product policy for vacps:fs JS module is PathSandbox (openat2 + allowlist)
- * in resolve_user_path. MCP tool paths also use JS `runtime/path-guard.ts`.
+ * C++ vacps:fs is pure I/O — no path allowlist here or in the JS module surface.
  */
 [[nodiscard]] Result<std::filesystem::path> resolve_path(
     const std::filesystem::path& workspace_root,
@@ -50,36 +65,44 @@ struct FileStat {
   return resolve_path(root, user_path);
 }
 
-[[nodiscard]] Result<std::string> read_text(const std::filesystem::path& path);
-[[nodiscard]] Result<std::vector<std::uint8_t>> read_bytes(const std::filesystem::path& path);
+/** Build a structured I/O error (message + operation + errno). */
+[[nodiscard]] Error make_io_error(
+    std::string_view operation,
+    int errnum,
+    std::string_view path = {});
+
+[[nodiscard]] Error make_io_error(
+    std::string_view operation,
+    const std::error_code& ec,
+    std::string_view path = {});
+
+// Namespace / path ops (content I/O is File).
+[[nodiscard]] VoidResult mkdir(
+    const std::filesystem::path& path,
+    MkdirOptions opts = {});
+
+/** Convenience: mkdir with recursive=true (create_directories). */
+[[nodiscard]] inline VoidResult mkdir_p(const std::filesystem::path& path) {
+  return mkdir(path, MkdirOptions{.recursive = true});
+}
 
 /**
- * Read at most `max_bytes` starting at `offset` (does not load the whole file).
- * Short read at EOF is success with smaller vector.
+ * true if path exists; false for ENOENT / ENOTDIR;
+ * error for permission and other failures.
  */
-[[nodiscard]] Result<std::vector<std::uint8_t>> read_range(
-    const std::filesystem::path& path,
-    std::uint64_t offset,
-    std::size_t max_bytes);
+[[nodiscard]] Result<bool> exists(const std::filesystem::path& path);
 
-/** Streaming SHA-256 over the full file without buffering all content. */
-struct FileDigest {
-  std::uint64_t size_bytes{0};
-  std::string sha256_hex;
-};
-[[nodiscard]] Result<FileDigest> hash_file(const std::filesystem::path& path);
-[[nodiscard]] VoidResult write_text(const std::filesystem::path& path, std::string_view data);
-[[nodiscard]] VoidResult write_bytes(
+[[nodiscard]] VoidResult remove_path(
     const std::filesystem::path& path,
-    const std::vector<std::uint8_t>& data);
-[[nodiscard]] VoidResult append_text(const std::filesystem::path& path, std::string_view data);
-[[nodiscard]] VoidResult mkdir_p(const std::filesystem::path& path);
-[[nodiscard]] bool exists(const std::filesystem::path& path);
-[[nodiscard]] VoidResult remove_path(const std::filesystem::path& path);
+    RemoveOptions opts = {});
+
 [[nodiscard]] VoidResult rename_path(
     const std::filesystem::path& from,
-    const std::filesystem::path& to);
-[[nodiscard]] Result<std::vector<DirEntry>> list_dir(const std::filesystem::path& path);
+    const std::filesystem::path& to,
+    RenameOptions opts = {});
+
+[[nodiscard]] Result<std::vector<DirEntry>> list_dir(
+    const std::filesystem::path& path);
 [[nodiscard]] Result<FileStat> file_stat(const std::filesystem::path& path);
 
 }  // namespace vacps::fs

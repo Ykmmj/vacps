@@ -1,8 +1,9 @@
-import { taskDispatchSchema } from '@vacps/contracts';
+import type { BackendHealth } from '@vacps/contracts';
 import * as host from 'vacps:host';
 import * as http from 'vacps:http';
 import * as log from 'vacps:log';
-import * as store from 'vacps:store';
+import { Store } from 'vacps:store';
+import { sleep } from 'vacps:timer';
 
 import {
   loadConfig,
@@ -10,9 +11,6 @@ import {
   telemetryConfigured,
   type AgentConfig,
 } from './config';
-import type { HostRequest, HostResponse } from './contracts/http';
-import type { TaskRequest, TaskResult } from './contracts/task';
-import { TaskState } from './contracts/task';
 import { ShellExecutor } from './executor/shell-executor';
 import { TaskQueue } from './queue/task-queue';
 import { SchedulerStore } from './queue/scheduler-store';
@@ -27,31 +25,49 @@ import {
   type ControlPlaneState,
   type RegistrationStatus,
 } from './registration/control-plane-state';
-import { ProcessManager } from './runtime/process-manager';
-import { configurePathGuard } from './runtime/path-guard';
 import { assertControlPlaneAuthConfig } from './security/http-auth';
 import { createServer } from './server/app';
+import { createInboundRequestAdapter } from './server/inbound-request';
 import type { App } from './server/router';
 import { TaskStore } from './storage/task-store';
+import {
+  buildLivenessHealth,
+  deriveLiveHealthState,
+  type LiveHealthState,
+} from './telemetry/liveness-health';
 import { NativeTelemetryCollector } from './telemetry/native-telemetry';
 
-type Store = Awaited<ReturnType<typeof store.open>>;
-type HttpServer = ReturnType<typeof http.createServer>;
-
 /**
- * Composition root for native agent script (apps/vacps main wiring, class form).
- * Host C++ calls initialize / handleRequest / tickControlPlane / shutdown.
+ * Composition root for the native agent script.
+ * Host C++ calls only initialize / shutdown. Product scheduling lives here and
+ * is driven by the generic Asio-backed vacps:timer capability.
+ * Inbound HTTP: native transport event → JS Server onRequest callback (not a host export).
+ *
+ * Lifecycle contract:
+ * - Configuration is immutable for one Application lifetime after initialize starts.
+ * - `ready` is true only after registration/state work, listen, and both loop Promises.
+ * - initialize owns staged rollback; background loop rejection triggers one product close.
  */
 export class Application {
-  private config: AgentConfig = loadConfig();
+  /** Immutable after the start of initialize(). */
+  private config!: AgentConfig;
   private db: Store | undefined;
   private store: TaskStore | undefined;
   private queue: TaskQueue | undefined;
-  private processes: ProcessManager | undefined;
   private telemetry: NativeTelemetryCollector | undefined;
   private httpApp: App | undefined;
-  private server: HttpServer | undefined;
+  private server: http.Server | undefined;
+  /** Per-application inbound adapter (owns request-id sequence). */
+  private readonly adaptInboundRequest = createInboundRequestAdapter();
+  private readonly startedMs = host.nowMs();
   private ready = false;
+  private stopping = false;
+  private controlLoop: Promise<void> | undefined;
+  private workerLoop: Promise<void> | undefined;
+  /** First background-loop failure preserved for shutdown to rethrow. */
+  private loopFailure: Error | undefined;
+  /** Single idempotent product-close path (shutdown + emergency). */
+  private closePromise: Promise<void> | undefined;
   private cpState: ControlPlaneState = {
     registrationStatus: 'unknown',
     telemetryIntervalSeconds: 120,
@@ -60,19 +76,23 @@ export class Application {
   private nextTelemetryMs = 0;
 
   async initialize(): Promise<void> {
+    try {
+      await this.initializeResources();
+    } catch (error) {
+      await this.rollbackPartialInit();
+      throw error;
+    }
+  }
+
+  private async initializeResources(): Promise<void> {
     this.config = loadConfig();
     assertControlPlaneAuthConfig(this.config);
-    configurePathGuard({
-      dataDir: host.dataDir(),
-      extraRoots: this.config.FS_ALLOWED_ROOTS,
-    });
     const path = `${host.dataDir()}/agent.db`;
-    this.db = await store.open(path);
+    this.db = await Store.open(path);
     this.store = await TaskStore.create(this.db);
     const executor = new ShellExecutor(this.store);
     const schedulers = await SchedulerStore.create(this.db);
     this.queue = new TaskQueue(this.store, executor, schedulers);
-    this.processes = new ProcessManager(this.config.BACKEND_ID);
     this.telemetry = new NativeTelemetryCollector(this.config, this.store);
 
     const recovered = await this.queue.recoverInterruptedOnBoot();
@@ -88,24 +108,27 @@ export class Application {
     this.httpApp = await createServer({
       config: this.config,
       queue: this.queue,
-      processes: this.processes,
       telemetry: this.telemetry,
       getControlPlaneState: () => this.cpState,
       isReady: () => this.ready,
+      getLivenessHealth: () => this.getLivenessHealth(),
+      getLiveHealthState: () => this.getLiveHealthState(),
     });
 
-    // Bind address is agent policy (loadConfig / env) — C++ Server only gets options.
-    this.server = http.createServer({
-      host: this.config.LISTEN_HOST,
-      port: this.config.LISTEN_PORT,
-    });
-    this.server.listen();
-    this.ready = true;
-
-    log.info(
-      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path()} listening=${this.server.isListening()} controlPlane=${this.config.CONTROL_PLANE_URL ?? 'off'}`,
+    // Bind address is agent policy (loadConfig / env). Transport stays route-free;
+    // onRequest adapts the wire request into the business router contract.
+    this.server = new http.Server(
+      {
+        host: this.config.LISTEN_HOST,
+        port: this.config.LISTEN_PORT,
+      },
+      async (req) => {
+        // HostResponse (string body) is a valid ServerResponse.
+        return this.httpApp!.handleRequest(this.adaptInboundRequest(req));
+      },
     );
 
+    // Finish initial registration/state before listen + loops + ready.
     if (registrationConfigured(this.config)) {
       await this.runRegistration();
     } else {
@@ -113,55 +136,24 @@ export class Application {
       await saveControlPlaneState(this.db, this.cpState);
     }
     this.nextTelemetryMs = host.nowMs() + 5_000;
+
+    // Listen first. If listen fails, staged rollback closes the Server and no loops exist.
+    const addr = await this.server.listen();
+    // Install both loops then set ready with no await between — atomic at the JS-turn level.
+    this.stopping = false;
+    this.controlLoop = this.runControlLoop();
+    this.workerLoop = this.runWorkerLoop();
+    this.observeLoop('control', this.controlLoop);
+    this.observeLoop('worker', this.workerLoop);
+    this.ready = true;
+
+    log.info(
+      `application initialize host=${host.version()} platform=${host.platform()} db=${this.db.path} listening=${this.server.listening} addr=${addr.host}:${addr.port} controlPlane=${this.config.CONTROL_PLANE_URL ?? 'off'}`,
+    );
   }
 
-  async handleRequest(request: HostRequest): Promise<HostResponse> {
-    if (!this.httpApp) {
-      return {
-        status: 503,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-        body: JSON.stringify({
-          error: { code: 'service_unavailable', message: 'application not initialized' },
-        }),
-      };
-    }
-    return this.httpApp.handleRequest(request);
-  }
-
-  async runTask(task: TaskRequest): Promise<TaskResult> {
-    if (!this.ready || !this.queue || !this.store) {
-      throw new Error('application not initialized');
-    }
-    try {
-      const parsed = taskDispatchSchema.safeParse(JSON.parse(task.payload || '{}'));
-      if (parsed.success) {
-        await this.queue.enqueue(parsed.data);
-        await this.queue.pumpOnce();
-        const done = await this.queue.getTask(parsed.data.task_id);
-        return {
-          id: task.id,
-          state:
-            done?.status === 'succeeded'
-              ? TaskState.succeeded
-              : done?.status === 'cancelled'
-                ? TaskState.cancelled
-                : TaskState.failed,
-          message: done?.error?.message ?? done?.status ?? 'done',
-        };
-      }
-    } catch {
-      /* fall through */
-    }
-    return {
-      id: task.id,
-      state: TaskState.failed,
-      message: 'invalid task payload; expected TaskDispatch JSON',
-    };
-  }
-
-  async tickControlPlane(): Promise<void> {
-    if (!this.ready || !this.db || !this.queue) return;
-    this.config = loadConfig();
+  private async runControlPlaneIteration(): Promise<void> {
+    // Config is immutable for this Application lifetime — do not reload.
     const now = host.nowMs();
     if (registrationConfigured(this.config) && now >= this.nextRegistrationMs) {
       await this.runRegistration();
@@ -169,44 +161,239 @@ export class Application {
     if (telemetryConfigured(this.config) && now >= this.nextTelemetryMs) {
       await this.runTelemetry();
     }
-    // Absolute next_run_at claim → enqueue → best-effort CP occurrence ack → task pump
-    const fired = await this.queue.fireDueSchedulers();
+    // Absolute next_run_at claim → enqueue → concurrent best-effort CP occurrence acks
+    const fired = await this.queue!.fireDueSchedulers();
     if (fired.acks.length > 0 && telemetryConfigured(this.config)) {
-      for (const ack of fired.acks) {
-        await reportScheduleOccurrenceAck(this.config, {
-          schedule_id: ack.schedule_id,
-          revision: ack.revision,
-          scheduled_for: ack.scheduled_for,
-          enqueued_count: ack.enqueued_count,
-          claimed_at: this.isoNow(),
-          ...(ack.locally_advanced_to ? { locally_advanced_to: ack.locally_advanced_to } : {}),
-          ...(ack.occurrence_id ? { occurrence_id: ack.occurrence_id } : {}),
-        });
-      }
+      await Promise.all(
+        fired.acks.map((ack) =>
+          reportScheduleOccurrenceAck(this.config, {
+            schedule_id: ack.schedule_id,
+            revision: ack.revision,
+            scheduled_for: ack.scheduled_for,
+            enqueued_count: ack.enqueued_count,
+            claimed_at: this.isoNow(),
+            ...(ack.locally_advanced_to ? { locally_advanced_to: ack.locally_advanced_to } : {}),
+            ...(ack.occurrence_id ? { occurrence_id: ack.occurrence_id } : {}),
+          }),
+        ),
+      );
     }
-    await this.queue.pumpOnce();
   }
 
   getControlPlaneState(): ControlPlaneState {
     return this.cpState;
   }
 
+  /** Cheap public liveness snapshot (no df/uname/bash/telemetry collect). */
+  getLivenessHealth(): BackendHealth {
+    const live = this.getLiveHealthState();
+    const version = host.version().slice(0, 48) || '0.1.0';
+    return buildLivenessHealth({
+      ...live,
+      backendId: this.config.BACKEND_ID,
+      version,
+      uptimeSeconds: this.uptimeSeconds(),
+    });
+  }
+
+  getLiveHealthState(): LiveHealthState {
+    return deriveLiveHealthState({
+      ready: this.ready,
+      stopping: this.stopping,
+      hasControlLoop: this.controlLoop !== undefined,
+      hasWorkerLoop: this.workerLoop !== undefined,
+      hasLoopFailure: this.loopFailure !== undefined,
+      closing: this.closePromise !== undefined,
+    });
+  }
+
   async shutdown(): Promise<void> {
+    let closeError: Error | undefined;
+    try {
+      await this.beginProductClose();
+    } catch (error) {
+      closeError = toError(error);
+    }
+    if (this.loopFailure !== undefined) {
+      throw this.loopFailure;
+    }
+    if (closeError !== undefined) {
+      throw closeError;
+    }
+  }
+
+  private uptimeSeconds(): number {
+    return Math.max(0, Math.floor((host.nowMs() - this.startedMs) / 1000));
+  }
+
+  private async runControlLoop(): Promise<void> {
+    let lastRetentionMs = 0;
+    let lastWorkerWakeMs = 0;
+    while (!this.stopping) {
+      await sleep(1_000);
+      if (this.stopping) break;
+      await this.runControlPlaneIteration();
+      if (this.stopping) break;
+
+      const now = host.nowMs();
+      // Coarse reconciliation for missed/external DB work (not a second worker loop).
+      if (now - lastWorkerWakeMs >= 5_000) {
+        lastWorkerWakeMs = now;
+        this.queue!.wakeWorker();
+      }
+      // Bounded SQLite retention; Store failure rejects this loop.
+      if (now - lastRetentionMs >= 60_000) {
+        lastRetentionMs = now;
+        const pruned = await this.queue!.pruneRetention(now);
+        if (pruned.outputsPruned > 0 || pruned.tasksDeleted > 0) {
+          log.info(
+            `retention prune outputs=${pruned.outputsPruned} tasks_deleted=${pruned.tasksDeleted}`,
+          );
+        }
+      }
+    }
+  }
+
+  private async runWorkerLoop(): Promise<void> {
+    while (!this.stopping) {
+      const worked = await this.queue!.pumpOnce();
+      if (!worked && !this.stopping) {
+        await this.queue!.waitForWork();
+      }
+    }
+  }
+
+  private observeLoop(name: string, loop: Promise<void>): void {
+    void loop.then(
+      () => {
+        /* cooperative exit when stopping */
+      },
+      (error: unknown) => {
+        this.onBackgroundLoopFailure(name, error);
+      },
+    );
+  }
+
+  private onBackgroundLoopFailure(name: string, error: unknown): void {
+    if (this.loopFailure === undefined) {
+      this.loopFailure = toError(error);
+      log.error(`${name} loop failed: ${this.loopFailure.message}`);
+      this.ready = false;
+      this.stopping = true;
+      // One idempotent emergency product close so ingress is not left listening.
+      // Observe rejection so it is not unhandled; EntryModule shutdown awaits the same Promise.
+      void this.beginProductClose().then(
+        () => {
+          /* close fulfilled; shutdown prefers saved loopFailure */
+        },
+        (closeError: unknown) => {
+          log.error(`product close after ${name} loop failure: ${toError(closeError).message}`);
+        },
+      );
+      // First failure only: EntryModule shutdown; saved loopFailure → nonzero exit.
+      // A second requestStop is forced termination in C++ — never call it here again.
+      host.requestStop();
+    } else {
+      log.error(`${name} loop failed (already recorded): ${toError(error).message}`);
+    }
+  }
+
+  private beginProductClose(): Promise<void> {
+    if (this.closePromise !== undefined) {
+      return this.closePromise;
+    }
+    this.closePromise = this.runProductClose();
+    return this.closePromise;
+  }
+
+  /**
+   * Idempotent product close. Partial-state checks live only here (rollback boundary).
+   * Order: mark not ready → stop ingress → stop queue → join loops → Store.
+   * One-shot process exec owns start/wait/close inside the native coroutine; no process registry.
+   */
+  private async runProductClose(): Promise<void> {
     log.info('application shutdown');
-    if (this.server) {
-      this.server.close();
+    this.ready = false;
+    this.stopping = true;
+
+    // Best-effort Server → Queue → join loops → Store; first resource close error is thrown after.
+    let closeError: Error | undefined;
+
+    if (this.server !== undefined) {
+      try {
+        await this.server.close();
+      } catch (error) {
+        const err = toError(error);
+        if (closeError === undefined) {
+          closeError = err;
+          log.warn(`server close during product close: ${err.message}`);
+        } else {
+          log.warn(`server close during product close: ${err.message}`);
+        }
+      }
       this.server = undefined;
     }
-    if (this.db) {
-      await this.db.close();
+
+    if (this.queue !== undefined) {
+      try {
+        await this.queue.stop();
+      } catch (error) {
+        const err = toError(error);
+        if (closeError === undefined) {
+          closeError = err;
+        }
+        log.warn(`queue stop during product close: ${err.message}`);
+      }
+    }
+
+    await this.joinBackgroundLoops();
+
+    if (this.db !== undefined) {
+      try {
+        await this.db.close();
+      } catch (error) {
+        const err = toError(error);
+        if (closeError === undefined) {
+          closeError = err;
+        }
+        log.warn(`store close during product close: ${err.message}`);
+      }
       this.db = undefined;
     }
-    this.store = undefined;
+
     this.queue = undefined;
-    this.processes = undefined;
+    this.store = undefined;
     this.telemetry = undefined;
     this.httpApp = undefined;
-    this.ready = false;
+
+    if (closeError !== undefined) {
+      throw closeError;
+    }
+  }
+
+  /** initialize() failure path — same close sequence, no second failure channel. */
+  private async rollbackPartialInit(): Promise<void> {
+    try {
+      await this.beginProductClose();
+    } catch (error) {
+      log.warn(`rollback after initialize failure: ${toError(error).message}`);
+    }
+  }
+
+  private async joinBackgroundLoops(): Promise<void> {
+    const loops = [this.controlLoop, this.workerLoop];
+    this.controlLoop = undefined;
+    this.workerLoop = undefined;
+    for (const loop of loops) {
+      if (loop === undefined) continue;
+      try {
+        await loop;
+      } catch (error) {
+        if (this.loopFailure === undefined) {
+          this.loopFailure = toError(error);
+        }
+      }
+    }
   }
 
   private isoNow(): string {
@@ -214,7 +401,6 @@ export class Application {
   }
 
   private async runRegistration(): Promise<void> {
-    if (!this.db || !registrationConfigured(this.config)) return;
     try {
       const status = await registerWithControlPlane(this.config);
       const next: ControlPlaneState = {
@@ -224,22 +410,21 @@ export class Application {
       };
       if (this.cpState.lastTelemetryAt) next.lastTelemetryAt = this.cpState.lastTelemetryAt;
       this.cpState = next;
-      await saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db!, this.cpState);
       this.nextRegistrationMs = host.nowMs() + this.config.REGISTRATION_INTERVAL_SECONDS * 1000;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log.warn(`registration failed: ${msg}`);
       this.cpState = { ...this.cpState, lastError: msg };
-      await saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db!, this.cpState);
       this.nextRegistrationMs =
         host.nowMs() + Math.min(this.config.REGISTRATION_INTERVAL_SECONDS, 60) * 1000;
     }
   }
 
   private async runTelemetry(): Promise<void> {
-    if (!this.db || !telemetryConfigured(this.config) || !this.telemetry) return;
     try {
-      const status = await this.telemetry.collect();
+      const status = await this.telemetry!.collect(this.getLiveHealthState());
       const interval = await reportTelemetry(this.config, status);
       const seconds =
         interval ??
@@ -253,16 +438,21 @@ export class Application {
       if (this.cpState.lastRegistrationAt)
         next.lastRegistrationAt = this.cpState.lastRegistrationAt;
       this.cpState = next;
-      await saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db!, this.cpState);
       this.nextTelemetryMs = host.nowMs() + seconds * 1000;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log.warn(`telemetry failed: ${msg}`);
       this.cpState = { ...this.cpState, lastError: msg };
-      await saveControlPlaneState(this.db, this.cpState);
+      await saveControlPlaneState(this.db!, this.cpState);
       this.nextTelemetryMs = host.nowMs() + this.config.TELEMETRY_FALLBACK_INTERVAL_SECONDS * 1000;
     }
   }
+}
+
+/** Normalize catch/rejection values once so even `undefined` is preserved as Error. */
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function toRegistrationStatus(status: string | undefined): RegistrationStatus {

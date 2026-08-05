@@ -4,11 +4,38 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 
-import type { RunResult, SqlParam, Store } from 'vacps:store';
+import type {
+  ExpectedChanges,
+  RunResult,
+  SqlParam,
+  Store,
+  TransactionResult,
+  TransactionStep,
+} from 'vacps:store';
+
+function checkExpectedChanges(exp: ExpectedChanges, changes: number): void {
+  if ('exactly' in exp && changes !== exp.exactly) {
+    throw new Error(`store.transaction: expectedChanges exactly ${exp.exactly} but got ${changes}`);
+  }
+  if ('atLeast' in exp && changes < exp.atLeast) {
+    throw new Error(`store.transaction: expectedChanges atLeast ${exp.atLeast} but got ${changes}`);
+  }
+  if ('atMost' in exp && changes > exp.atMost) {
+    throw new Error(`store.transaction: expectedChanges atMost ${exp.atMost} but got ${changes}`);
+  }
+}
 
 export function openMemoryStore(): Store {
   const db = new DatabaseSync(':memory:');
-  return {
+  let closed = false;
+
+  const store: Store = {
+    get path(): string {
+      return ':memory:';
+    },
+    get closed(): boolean {
+      return closed;
+    },
     async exec(sql: string): Promise<void> {
       db.exec(sql);
     },
@@ -26,20 +53,29 @@ export function openMemoryStore(): Store {
       const rows = db.prepare(sql).all(...(params as SqlParam[]));
       return rows as Array<Record<string, unknown>>;
     },
-    async transaction(steps) {
+    async transaction(steps: readonly TransactionStep[]): Promise<TransactionResult[]> {
       db.exec('BEGIN IMMEDIATE;');
       try {
-        const out: RunResult[] = [];
+        const out: TransactionResult[] = [];
         for (const step of steps) {
-          if (step.exec) {
-            db.exec(step.sql);
-            out.push({ changes: 0, lastInsertRowid: 0 });
+          if (step.type === 'query') {
+            if (step.expectedChanges) {
+              throw new Error(
+                'store.transaction: expectedChanges is only valid for run steps, not query',
+              );
+            }
+            const rows = db.prepare(step.sql).all(...((step.params ?? []) as SqlParam[]));
+            out.push(rows as Array<Record<string, unknown>>);
           } else {
             const info = db.prepare(step.sql).run(...((step.params ?? []) as SqlParam[]));
-            out.push({
+            const rr: RunResult = {
               changes: Number(info.changes),
               lastInsertRowid: Number(info.lastInsertRowid),
-            });
+            };
+            if (step.expectedChanges) {
+              checkExpectedChanges(step.expectedChanges, rr.changes);
+            }
+            out.push(rr);
           }
         }
         db.exec('COMMIT;');
@@ -53,20 +89,12 @@ export function openMemoryStore(): Store {
         throw e;
       }
     },
-    async begin(): Promise<void> {
-      db.exec('BEGIN IMMEDIATE;');
-    },
-    async commit(): Promise<void> {
-      db.exec('COMMIT;');
-    },
-    async rollback(): Promise<void> {
-      db.exec('ROLLBACK;');
-    },
-    path(): string {
-      return ':memory:';
-    },
     async close(): Promise<void> {
-      db.close();
+      if (!closed) {
+        db.close();
+        closed = true;
+      }
     },
   };
+  return store;
 }

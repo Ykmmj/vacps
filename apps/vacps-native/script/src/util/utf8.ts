@@ -1,8 +1,8 @@
 /**
  * UTF-8 helpers for product code.
  *
- * Codec path: WHATWG TextEncoder / TextDecoder (installed by the native host
- * via simdutf). Do not re-implement UTF-8 here.
+ * Codec path: WHATWG TextEncoder / TextDecoder (installed via simdutf).
+ * Do not re-implement UTF-8 here.
  */
 
 function encoder(): TextEncoder {

@@ -9,9 +9,10 @@ export interface SignedRequestIdentity {
 }
 
 /**
- * Verifies the Agent-to-control-plane request signature. The signed representation deliberately
- * includes method, path, identity, timestamp, nonce and an exact-body digest, so a signature
- * cannot be moved to another endpoint or paired with a modified JSON body.
+ * Verifies the Agent-to-control-plane request signature (vacps-request-v2).
+ * Canonical fields: version, issuer, method, pathname+search, backend id, timestamp,
+ * nonce, body digest. A signature cannot be moved to another endpoint, query, body,
+ * or backend identity.
  */
 export async function verifyAgentRequestSignature(
   request: Request,
@@ -44,17 +45,28 @@ export async function verifyAgentRequestSignature(
   return { backendId, nonce };
 }
 
-/** Sign a control-plane request so the Agent can authenticate every health, task and scheduler call. */
+/**
+ * Sign a control-plane → agent request.
+ * `backendId` is the target backend audience (sent as x-vps-control-backend-id and
+ * field 5 of the canonical string) so a shared control key cannot cross-replay.
+ */
 export async function createControlPlaneSignatureHeaders(
   privateKey: string | undefined,
   request: Pick<Request, 'method' | 'url'>,
   body: string,
+  backendId: string,
 ): Promise<Record<string, string>> {
   if (!privateKey)
     throw new AppError(
       'control_plane_identity_unconfigured',
       'Control-plane signing key is not configured.',
       503,
+    );
+  if (!backendId.trim())
+    throw new AppError(
+      'control_plane_backend_id_required',
+      'Control-plane signatures require an explicit target backend id.',
+      500,
     );
   const timestamp = String(Math.floor(Date.now() / 1000));
   const nonce = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
@@ -69,10 +81,11 @@ export async function createControlPlaneSignatureHeaders(
     'Ed25519',
     key,
     toArrayBuffer(
-      encoder.encode(await canonicalRequest('control', request, undefined, timestamp, nonce, body)),
+      encoder.encode(await canonicalRequest('control', request, backendId, timestamp, nonce, body)),
     ),
   );
   return {
+    'x-vps-control-backend-id': backendId,
     'x-vps-control-timestamp': timestamp,
     'x-vps-control-nonce': nonce,
     'x-vps-control-signature': base64UrlEncode(new Uint8Array(signature)),
@@ -110,21 +123,26 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer;
 }
 
+/** pathname + search (search includes leading `?` when non-empty); fragments excluded. */
+export function requestTargetOf(url: string): string {
+  const parsed = new URL(url, 'http://vacps.invalid');
+  return `${parsed.pathname}${parsed.search}`;
+}
+
 async function canonicalRequest(
   issuer: 'agent' | 'control',
   request: Pick<Request, 'method' | 'url'>,
-  backendId: string | undefined,
+  backendId: string,
   timestamp: string,
   nonce: string,
   body: string,
 ): Promise<string> {
-  const path = new URL(request.url).pathname;
   return [
-    'vacps-request-v1',
+    'vacps-request-v2',
     issuer,
     request.method.toUpperCase(),
-    path,
-    backendId ?? '',
+    requestTargetOf(request.url),
+    backendId,
     timestamp,
     nonce,
     await sha256Base64Url(body),

@@ -1,9 +1,19 @@
+/**
+ * vacps:host — thin process info (not HTTP / SQL / process / fs / listen policy).
+ *
+ * getenv: design returns string | undefined (unset → undefined).
+ * Existing script uses `??` / `=== null`; both remain type-safe with undefined.
+ */
 declare module 'vacps:host' {
-  /** Thin process info (not HTTP / SQL / process / fs / listen policy). */
   export function version(): string;
+  export function platform(): string;
   export function dataDir(): string;
   export function nowMs(): number;
-  export function platform(): string;
-  /** Process environment variable, or null if unset. */
-  export function getenv(name: string): string | null;
+  /** Request the generic host lifecycle to run script shutdown and stop. */
+  export function requestStop(): void;
+  /**
+   * Process environment variable via live getenv.
+   * Unset → undefined; set empty → "".
+   */
+  export function getenv(name: string): string | undefined;
 }

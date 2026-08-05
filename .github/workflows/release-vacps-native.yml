@@ -75,8 +75,8 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --filter @vacps/contracts build
 
-      - name: Build agent (Docker + ctest)
-        run: bash apps/vacps-native/docker/build.sh release --test --rebuild-image
+      - name: Build agent (Docker + script validation)
+        run: bash apps/vacps-native/docker/build.sh release --rebuild-image
 
       - name: Collect artifacts
         id: art
@@ -156,6 +156,6 @@ jobs:
             ./vacps-agent-linux-x86_64 --script ./vacps.mjs --port 8788 --data-dir ./data
             ```
 
-            Built from `${{ github.sha }}` via `apps/vacps-native/docker/build.sh release --test`.
+            Built from `${{ github.sha }}` via `apps/vacps-native/docker/build.sh release`.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
