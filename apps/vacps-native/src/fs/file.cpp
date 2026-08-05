@@ -14,7 +14,6 @@
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/use_awaitable.hpp>
 #include <boost/system/error_code.hpp>
 
 #if defined(BOOST_ASIO_HAS_FILE)
@@ -861,7 +860,7 @@ asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read_at_impl(
         offset + got,
         asio::buffer(tmp.data(), want),
         asio::bind_cancellation_slot(
-            op->signal.slot(), asio::as_tuple(asio::use_awaitable)));
+            op->signal.slot(), asio::as_tuple));
     if (ec == asio::error::eof) {
       break;
     }
@@ -953,7 +952,7 @@ asio::awaitable<Result<std::size_t>> File::async_write_at_impl(
         offset + off,
         asio::buffer(data.data() + off, data.size() - off),
         asio::bind_cancellation_slot(
-            op->signal.slot(), asio::as_tuple(asio::use_awaitable)));
+            op->signal.slot(), asio::as_tuple));
     if (ec == asio::error::operation_aborted || stop.stop_requested()) {
       op->active = false;
       co_return std::unexpected(

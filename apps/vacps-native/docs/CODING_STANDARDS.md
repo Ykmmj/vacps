@@ -221,7 +221,9 @@
 
 1. **`Runtime::Async` 是唯一的** C++→JS Promise 生命周期拥有者与 settle 入口，并提供内部 `run_blocking`（worker 上的纯 C++ 阻塞工作）。需要单资源 FIFO 时使用其 per-resource `SerialWorker` strand；不得用 worker mutex 竞争冒充提交顺序。
 2. Workers **MUST** 为纯 C++：**MUST NOT** 携带 `JSContext*` / `JSValue` / `qjs::OwnedValue` / `ScopedCString` / `PromiseCapability`。
-3. Worker 完成后 **MUST** 经 Asio 完成路径回到 owner 再碰 JS（`post(fn, worker_executor, use_awaitable)`）。
+3. Worker 完成后 **MUST** 经 Asio completion 回到 owner 再碰 JS（协程内直接
+   `co_await post(fn, worker_executor)`，使用默认 deferred completion token；不得额外套
+   `use_awaitable` 桥接协程）。
 4. **MUST NOT** 阻塞 owner 循环（accept、job pump、JS 执行）。长 CPU / 阻塞 I/O 走 `Runtime::Async::run_blocking` 或域内 Asio 异步路径（如 Process 域既有规则）。
 5. 取消与寿命：**MUST** 有显式规则（runtime-wide 与调用方 `stop_token`、shutdown phase、`shared_ptr` 续命；见资源与 Process 文档及 `RUNTIME_LAYERING.md` natural drain）。正常关机：**唯一** runtime-wide `std::stop_source` 请求协作取消，释放 daemon work_guard，由 `main_io_.run()` 按 Asio outstanding work 自然排空；QuickJS **仅**在 drain 之后关闭。**MUST NOT** 实现 AsyncScope / ReverseAwaitTracker / JS shutdown cleanup registry / Promise 或 reverse-await abandon / shutdown deadline / late-completion drain，或在正常路径调用 `io_context::stop()` / `restart()` / `poll()` 来“赶”关机。JS **MUST** 在 shutdown 导出中显式关闭业务资源；失败或不协作 **MAY** 诚实阻止 shutdown 完成。排队中的单个 post **不能**被 Asio 移除；dequeued 时若已 stop 则跳过 callable。运行中仅当 callable 接受 `stop_token` 时可协作取消。**MUST NOT** 在 `co_await` 后假设未续命的栈对象仍有效。
 6. 提交到 `thread_pool` 的外层函数 **MUST** 为 `noexcept` 并将任务异常存为 `exception_ptr` 数据（Asio：worker 上未捕获异常 → `std::terminate`）。
@@ -303,7 +305,7 @@
 | --- | --- |
 | **Boost** Asio / Beast / Process v2 | 事件循环、HTTP、子进程 |
 | **QuickJS** | JS 引擎（owner 线程） |
-| **mimalloc** | QuickJS 专属 backing heap（显式 API；不覆盖全进程 allocator） |
+| **mimalloc** | QuickJS 专属 backing heap + 全局 C++ `new/delete`（TSan 配置由 sanitizer 拦截器接管）；不覆盖 C `malloc/free` |
 | **OpenSSL** | TLS / 加密原语 |
 | **SQLite** amalgamation | 本地存储 |
 | **spdlog** | 日志 |

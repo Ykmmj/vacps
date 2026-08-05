@@ -74,4 +74,29 @@ void Runtime::Async::complete_promise(
   schedule_job_pump();
 }
 
+void Runtime::Async::complete_void_promise(
+    runtime::PromiseCapability& capability,
+    std::exception_ptr ep,
+    runtime::VoidResult result) noexcept {
+  // Void-specialized sole settlement point. Avoid constructing an
+  // OwnedValue for undefined while preserving the same exception/error path.
+  if (ep != nullptr) {
+    settle_or_report(
+        capability,
+        runtime::error_from_exception_ptr(
+            std::move(ep),
+            runtime::Errc::native_failure,
+            "unknown exception in async task"));
+  } else if (!result) {
+    settle_or_report(capability, std::move(result.error()));
+  } else {
+    auto resolved = capability.resolve_undefined();
+    if (!resolved) {
+      report_error(resolved.error());
+    }
+  }
+
+  schedule_job_pump();
+}
+
 }  // namespace vacps

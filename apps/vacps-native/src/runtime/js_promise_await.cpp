@@ -6,7 +6,6 @@
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/use_awaitable.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -539,7 +538,7 @@ asio::awaitable<Result<vacps::qjs::OwnedValue>> JsPromiseAwaitAccess::await_valu
   }
 
   auto [ec] = co_await state->timer.async_wait(
-      asio::as_tuple(asio::use_awaitable));
+      asio::as_tuple);
 
   // ── After resume: interpret single-shot status ───────────────────────
   // Prefer terminal already set by settle/cancel (those mark status before

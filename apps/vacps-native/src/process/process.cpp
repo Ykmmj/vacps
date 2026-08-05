@@ -8,7 +8,6 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/writable_pipe.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/process.hpp>
@@ -371,7 +370,7 @@ struct Process::State {
       if (finished || status == ProcessStatus::Closed) {
         gate->cancel();
       }
-      co_await gate->async_wait(asio::as_tuple(asio::use_awaitable));
+      co_await gate->async_wait(asio::as_tuple);
     }
     co_return;
   }
@@ -560,7 +559,7 @@ asio::awaitable<VoidResult> Process::start() {
             boost::system::error_code ec;
             auto n = co_await pipe->async_read_some(
                 asio::buffer(buf),
-                asio::redirect_error(asio::use_awaitable, ec));
+                asio::redirect_error(ec));
             if (ec || n == 0) {
               st->out_eof = true;
               st->try_finish();
@@ -592,7 +591,7 @@ asio::awaitable<VoidResult> Process::start() {
             boost::system::error_code ec;
             auto n = co_await pipe->async_read_some(
                 asio::buffer(buf),
-                asio::redirect_error(asio::use_awaitable, ec));
+                asio::redirect_error(ec));
             if (ec || n == 0) {
               st->err_eof = true;
               st->try_finish();
@@ -619,7 +618,7 @@ asio::awaitable<VoidResult> Process::start() {
           }
           auto child = std::move(*st->proc);
           auto [ec, code] = co_await bp::async_execute(
-              std::move(child), asio::as_tuple(asio::use_awaitable));
+              std::move(child), asio::as_tuple);
           (void)ec;
           if (st->timed_out) {
             st->kill_group(SIGKILL);
@@ -656,7 +655,7 @@ asio::awaitable<Result<std::size_t>> Process::write(std::string data) {
     waiter->expires_at(asio::steady_timer::time_point::max());
     state_->write_waiters.push_back(waiter);
     auto [wec] =
-        co_await waiter->async_wait(asio::as_tuple(asio::use_awaitable));
+        co_await waiter->async_wait(asio::as_tuple);
     (void)wec;
     auto& w = state_->write_waiters;
     w.erase(std::remove(w.begin(), w.end(), waiter), w.end());
@@ -693,7 +692,7 @@ asio::awaitable<Result<std::size_t>> Process::write(std::string data) {
       co_return std::size_t{0};
     }
     auto [ec, n] = co_await asio::async_write(
-        *pipe, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
+        *pipe, asio::buffer(data), asio::as_tuple);
     if (ec) {
       if (ec == asio::error::operation_aborted) {
         co_return std::unexpected(
@@ -799,7 +798,7 @@ asio::awaitable<VoidResult> Process::async_close() {
     if (st->status == ProcessStatus::Closed || st->finished) {
       gate->cancel();
     }
-    co_await gate->async_wait(asio::as_tuple(asio::use_awaitable));
+    co_await gate->async_wait(asio::as_tuple);
   }
   co_return success();
 }

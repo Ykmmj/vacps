@@ -23,6 +23,7 @@ Native 侧以 **`vacps::Runtime`** 为公共门面：内部唯一实现对象 **
 
 ```text
 src/
+├── bootstrap/  # 进程级初始化 + 唯一全局 C++ new/delete override TU
 ├── qjs/        # OwnedValue、ScopedCString（vacps::qjs）
 ├── binding/    # Binding DSL（header-only，vacps::binding；ClassJsEdges）
 ├── runtime/    # vacps::Runtime 门面 + Async/Callbacks/Script
@@ -62,7 +63,11 @@ src/
 - API：`initialize` → `run(startup)` → `request_stop`；`async()` / `callbacks()` / `script()`（引用）；`post_to_owner` / `context` / `evaluate` / `await_value` / main executor。
 - **无**公共 `core()` / 内部状态 accessor。
 - **主线程**唯一驱动 `main_io` 并触碰 QuickJS；**worker 仅纯 C++**。
-- `JsEngine` 经 `JS_NewRuntime2` 为 QuickJS 创建独立 mimalloc heap；不覆盖全进程 allocator。关闭顺序固定为 `JS_FreeContext` → `JS_FreeRuntime` → `mi_heap_delete`，确保 allocator outlive 所有 QuickJS 分配。
+- `JsEngine` 经 `JS_NewRuntime2` 为 QuickJS 创建独立 mimalloc heap。进程的普通 C++
+  `new/delete` 经 `bootstrap/mimalloc_new_delete.cpp` 进入 mimalloc；TSan 配置不编入该
+  TU，由 sanitizer runtime 的强符号拦截器接管。`MI_OVERRIDE=OFF`，不覆盖 C
+  `malloc/free`。QuickJS 关闭顺序固定为 `JS_FreeContext` → `JS_FreeRuntime` →
+  `mi_heap_delete`，确保其专属 heap outlive 所有 QuickJS 分配。
 - 有界 job pump；仅 QuickJS 确有 pending job 时 post，并合并重复调度。`post_to_owner` 任意线程投递到 JS owner 线程（仅 `initialized`/`running` 接新工作）。posted callable **不得**抛异常（owner handler 为 `noexcept`）。
 - owner 建立后 Runtime 析构必须在 owner 线程（Narrow 寿命合同）。
 - **Wide/Narrow（摘要）**：owner/context/lifecycle 前置条件由调用方建立。Narrow 实现体不重复检查，也不把同一亲和性包装成可恢复 `Result`。
@@ -142,6 +147,7 @@ C++ 进程旋钮**仅**来自 CLI（`host::parse_command_line` → `Application:
 | JS 线程 | `initialize` 成功后的调用线程；之后所有 QuickJS API 仅此线程 |
 | Runtime 析构 | owner 建立后必须在 owner 线程销毁 |
 | QuickJS allocator | `JsEngine` 独占 mimalloc heap；outlive `JSRuntime`；不使用 `mi_heap_destroy` 隐藏 live allocation |
+| C++ allocator | 唯一 bootstrap TU 覆盖全局 `new/delete`（TSan 除外）；C `malloc/free` 保持 musl |
 | Worker / run_blocking | 禁止 `JSContext*` / `JSValue` / `qjs::OwnedValue` / `ScopedCString` / `PromiseCapability` |
 | `post_to_owner` | 成功则 callable 在 owner 销毁；失败则在调用线程销毁；callable 不得抛异常 |
 | JSContext opaque | `vacps::Runtime*`（若保留该槽；Host/modules 不得覆盖） |

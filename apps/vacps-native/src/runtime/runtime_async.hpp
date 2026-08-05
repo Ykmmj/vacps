@@ -58,7 +58,6 @@
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/use_awaitable.hpp>
 
 #include <quickjs.h>
 
@@ -68,7 +67,6 @@
 #include <stop_token>
 #include <type_traits>
 #include <utility>
-#include <variant>
 
 namespace vacps::runtime {
 
@@ -95,44 +93,6 @@ template <class Arg>
 concept PromiseArgMaterialize =
     std::is_nothrow_constructible_v<std::decay_t<Arg>, Arg&&> &&
     std::is_nothrow_move_constructible_v<std::decay_t<Arg>>;
-
-template <class T, PromiseStart Start>
-Task<T> invoke_start(Start& start, std::stop_token stop) {
-  if constexpr (std::invocable<Start&, std::stop_token>) {
-    co_return co_await std::invoke(start, stop);
-  } else {
-    co_return co_await std::invoke(start);
-  }
-}
-
-/**
- * Named coroutine helper for promise_void — not an IIFE coroutine lambda.
- * Adapts Start → Task<void> into Task<monostate> for promise<monostate>.
- */
-template <class Start>
-Task<std::monostate> promise_void_task(Start start, std::stop_token stop) {
-  Result<void> result;
-  if constexpr (std::invocable<Start&, std::stop_token>) {
-    result = co_await std::invoke(start, stop);
-  } else {
-    (void)stop;
-    result = co_await std::invoke(start);
-  }
-  if (!result) {
-    co_return std::unexpected(std::move(result.error()));
-  }
-  co_return std::monostate{};
-}
-
-/** Non-coroutine start object; preserves move-only Start support. */
-template <class Start>
-struct promise_void_start {
-  Start start;
-
-  Task<std::monostate> operator()(std::stop_token stop) {
-    return promise_void_task(std::move(start), std::move(stop));
-  }
-};
 
 }  // namespace detail
 
@@ -252,6 +212,10 @@ class Runtime::Async {
       runtime::PromiseCapability& capability,
       std::exception_ptr ep,
       runtime::Result<vacps::qjs::OwnedValue> result) noexcept;
+  void complete_void_promise(
+      runtime::PromiseCapability& capability,
+      std::exception_ptr ep,
+      runtime::VoidResult result) noexcept;
 
   Impl& impl_;
 };
@@ -292,8 +256,17 @@ JSValue Runtime::Async::promise(JSContext* ctx, Start&& start, Encode&& encode) 
        start = StartType(std::forward<Start>(start)),
        encode = EncodeType(std::forward<Encode>(encode))]() mutable
       -> runtime::Task<vacps::qjs::OwnedValue> {
-        runtime::Result<T> result =
-            co_await runtime::detail::invoke_start<T>(start, std::move(stop));
+        // Select the Start signature without another forwarding coroutine
+        // frame. This local lambda is ordinary (not a coroutine): it only
+        // materializes the awaitable returned by Start.
+        auto operation = [&]() {
+          if constexpr (std::invocable<StartType&, std::stop_token>) {
+            return std::invoke(start, std::move(stop));
+          } else {
+            return std::invoke(start);
+          }
+        }();
+        runtime::Result<T> result = co_await std::move(operation);
 
         if (!result) {
           co_return std::unexpected(std::move(result.error()));
@@ -315,12 +288,42 @@ template <PromiseStart Start>
   requires runtime::detail::PromiseArgMaterialize<Start>
 JSValue Runtime::Async::promise_void(JSContext* ctx, Start&& start) noexcept {
   using StartType = std::decay_t<Start>;
-  return promise<std::monostate>(
-      ctx,
-      runtime::detail::promise_void_start<StartType>{std::forward<Start>(start)},
-      [](JSContext* c, std::monostate) -> runtime::Result<vacps::qjs::OwnedValue> {
-        return vacps::qjs::OwnedValue{c, JS_DupValue(c, JS_UNDEFINED)};
+  JSContext* owner_ctx = ctx;
+
+  JSValue resolving[2] = {JS_UNDEFINED, JS_UNDEFINED};
+  JSValue raw_promise = JS_NewPromiseCapability(owner_ctx, resolving);
+  if (JS_IsException(raw_promise)) {
+    return raw_promise;
+  }
+  vacps::qjs::OwnedValue holder{owner_ctx, raw_promise};
+  runtime::PromiseCapability capability{owner_ctx, resolving[0], resolving[1]};
+  std::stop_token stop = shutdown_stop_token();
+
+  runtime::asio::co_spawn(
+      executor(),
+      [stop = std::move(stop),
+       start = StartType(std::forward<Start>(start))]() mutable
+      -> runtime::Task<void> {
+        auto operation = [&]() {
+          if constexpr (std::invocable<StartType&, std::stop_token>) {
+            return std::invoke(start, std::move(stop));
+          } else {
+            return std::invoke(start);
+          }
+        }();
+        runtime::VoidResult result = co_await std::move(operation);
+        if (!result) {
+          co_return std::unexpected(std::move(result.error()));
+        }
+        co_return runtime::success();
+      },
+      [self = this, capability = std::move(capability)](
+          std::exception_ptr ep,
+          runtime::VoidResult result) mutable noexcept {
+        self->complete_void_promise(
+            capability, std::move(ep), std::move(result));
       });
+  return holder.release();
 }
 
 template <runtime::BlockingCallable Fn>

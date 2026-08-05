@@ -12,7 +12,6 @@
 #include "runtime/runtime_async.hpp"
 
 #include <boost/asio/as_tuple.hpp>
-#include <boost/asio/use_awaitable.hpp>
 
 #include <quickjs.h>
 
@@ -108,7 +107,7 @@ acquire_operation_lease(
     std::stop_token stop,
     std::string_view op) {
   auto [ec, lease] = co_await operation_queue->async_acquire(
-      stop, asio::as_tuple(asio::use_awaitable));
+      stop, asio::as_tuple);
   if (ec || !lease) {
     co_return std::unexpected(cancelled_err(op));
   }

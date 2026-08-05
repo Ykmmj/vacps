@@ -11,7 +11,6 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/ssl.hpp>
-#include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
@@ -180,7 +179,7 @@ auto io_token(
       asio::cancellation_type::all)(
       asio::bind_cancellation_slot(
           slot,
-          asio::as_tuple(asio::use_awaitable)));
+          asio::as_tuple));
 }
 
 template <class Stream>

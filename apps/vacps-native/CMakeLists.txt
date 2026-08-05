@@ -262,6 +262,12 @@ target_link_libraries(vacps_host PUBLIC
 
 # ── Agent binary ───────────────────────────────────────────────────
 add_executable(vacps-agent src/main.cpp)
+# Keep the global new/delete override in the final executable's object list;
+# placing it only in a static archive allows the linker to discard the TU.
+# TSan supplies strong new/delete interceptors that must own these symbols.
+if(NOT VACPS_ENABLE_TSAN)
+  target_sources(vacps-agent PRIVATE src/bootstrap/mimalloc_new_delete.cpp)
+endif()
 set_target_properties(vacps-agent PROPERTIES
   OUTPUT_NAME "vacps-agent-linux-x86_64"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -270,6 +276,9 @@ target_link_libraries(vacps-agent PRIVATE
   vacps_host
   vacps_bootstrap
 )
+if(NOT VACPS_ENABLE_TSAN)
+  target_link_libraries(vacps-agent PRIVATE mimalloc-static)
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS vacps-agent RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

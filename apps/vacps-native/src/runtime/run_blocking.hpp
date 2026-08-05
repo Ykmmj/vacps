@@ -48,7 +48,6 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/use_awaitable.hpp>
 
 #include <exception>
 #include <optional>
@@ -76,7 +75,7 @@ struct BlockingWorkerOutcome {
  * Named coroutine helper — avoid IIFE coroutine (ASan stack-use-after-return).
  *
  * Posts a noexcept wrapper to worker_executor; completion resumes on the
- * caller's associated executor via asio::use_awaitable.
+ * caller's associated executor via Asio's deferred direct-await path.
  *
  * The posted function owns its callable and stop token. Its typed outcome is
  * moved back to the coroutine without operation-local shared allocation or a
@@ -98,7 +97,7 @@ asio::awaitable<Result<worker_value_result_t<Function>>> run_blocking_coro(
 
   // Exact lambda submitted to thread_pool: must be noexcept so exceptions
   // never reach the pool (which would std::terminate). Non-void post moves the
-  // returned outcome to use_awaitable's associated owner executor.
+  // returned outcome to the caller coroutine's associated owner executor.
   BlockingWorkerOutcome<Value> outcome = co_await asio::post(
       [fn = std::move(fn), stop]() mutable noexcept
       -> BlockingWorkerOutcome<Value> {
@@ -113,8 +112,7 @@ asio::awaitable<Result<worker_value_result_t<Function>>> run_blocking_coro(
         }
         return worker_outcome;
       },
-      worker_executor,
-      asio::use_awaitable);
+      worker_executor);
 
   // Owner / associated executor resumes here.
   if (stop.stop_requested()) {

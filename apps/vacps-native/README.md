@@ -93,7 +93,7 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 | spdlog 1.17.0 | stderr；CLI `--log-level` |
 | nlohmann/json 3.12.0 | JSON |
 | QuickJS 2026-06-04 | 经 `Runtime` / `JsEngine`；owner 线程 only；专属 mimalloc heap |
-| mimalloc 3.4.4 | 仅作 QuickJS backing allocator；不覆盖全进程 `malloc` |
+| mimalloc 3.4.4 | QuickJS 专属 heap + 全局 C++ `new/delete`（TSan 除外）；不覆盖 C `malloc/free` |
 | Runtime | phase 机、job pump、`await_value`、shutdown；内部 Runtime::Impl |
 | Runtime::Async / Callbacks / Script | JS→native Promise + `run_blocking`；native event→JS callback→await sync/thenable；host 模块求值。同步 binding 在 owner-thread QuickJS turn 内直接执行 |
 | Binding DSL + `qjs::OwnedValue` | `create_function` / `create_async_function` / `ClassBuilder` (`async_method` / `static_async_function` / `ClassJsEdges`) |

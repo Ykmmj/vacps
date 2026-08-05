@@ -139,7 +139,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(spdlog)
 message(STATUS "Using spdlog ${VACPS_SPDLOG_VERSION}")
 
-# ── mimalloc 3.4.4 (QuickJS backing heap only) ─────────────────────
+# ── mimalloc 3.4.4 (QuickJS heap + global C++ new/delete) ─────────────
 set(VACPS_MIMALLOC_VERSION 3.4.4)
 set(VACPS_MIMALLOC_URL
   "https://github.com/microsoft/mimalloc/archive/refs/tags/v${VACPS_MIMALLOC_VERSION}.tar.gz")

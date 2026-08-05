@@ -13,7 +13,6 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_awaitable.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
@@ -261,12 +260,12 @@ auto make_io_token(
       timeout,
       asio::cancellation_type::all)(
       asio::bind_cancellation_slot(
-          slot, asio::as_tuple(asio::use_awaitable)));
+          slot, asio::as_tuple));
 }
 
 auto make_cancel_token(asio::cancellation_slot slot) {
   return asio::bind_cancellation_slot(
-      slot, asio::as_tuple(asio::use_awaitable));
+      slot, asio::as_tuple);
 }
 
 std::vector<std::uint8_t> fixed_status_body(int status) {
@@ -550,7 +549,7 @@ asio::awaitable<void> Server::State::wait_children_drained() {
     if (child_count == 0) {
       gate->cancel();
     }
-    co_await gate->async_wait(asio::as_tuple(asio::use_awaitable));
+    co_await gate->async_wait(asio::as_tuple);
   }
   try_finalize_close();
   co_return;
@@ -564,7 +563,7 @@ asio::awaitable<void> Server::State::wait_close_complete() {
     if (phase == Phase::Closed) {
       gate->cancel();
     }
-    co_await gate->async_wait(asio::as_tuple(asio::use_awaitable));
+    co_await gate->async_wait(asio::as_tuple);
   }
   co_return;
 }
@@ -737,7 +736,7 @@ asio::awaitable<Result<ServerResponse>> Server::Session::run_handler(ServerReque
 
   while (!box->done) {
     box->wake.expires_at(asio::steady_timer::time_point::max());
-    co_await box->wake.async_wait(asio::as_tuple(asio::use_awaitable));
+    co_await box->wake.async_wait(asio::as_tuple);
   }
   timeout_timer.cancel();
 
