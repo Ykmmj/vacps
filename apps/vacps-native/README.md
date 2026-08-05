@@ -102,7 +102,7 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 | Application + EntryModule | 组合根；信号；入口 ESM `initialize`/`shutdown` |
 | 业务 script（ESM） | CLI `--script`（或默认路径候选）；产品路由在 JS |
 
-**`vacps:store`：** 仅导出 class `Store`（`Store.open`、只读 `path`/`closed`，async `exec`/`run`/`query`/`transaction`/`close`）。固定 `query(sql, params?, options?)`。所有权：`ClassHolder` + `shared_ptr`；显式 `close` awaitable；finalizer 只丢 holder。详见 [`docs/NATIVE_MODULES.md`](docs/NATIVE_MODULES.md) 与 [`docs/NATIVE_RESOURCE_OWNERSHIP.md`](docs/NATIVE_RESOURCE_OWNERSHIP.md)。
+**`vacps:store`：** 仅导出 class `Store`（`Store.open`、只读 `path`/`closed`，async `exec`/`run`/`query`/`transaction`/`close`）。固定 `query(sql, params?, options?)`；`transaction` 在单个 worker 作业内复用重复 SQL 的 prepared VM。所有权：`ClassHolder` + `shared_ptr`；显式 `close` awaitable；finalizer 只丢 holder。详见 [`docs/NATIVE_MODULES.md`](docs/NATIVE_MODULES.md) 与 [`docs/NATIVE_RESOURCE_OWNERSHIP.md`](docs/NATIVE_RESOURCE_OWNERSHIP.md)。
 
 **`vacps:fs`：** class `File` + 命名空间路径操作（async）。详见 [`docs/NATIVE_MODULES.md`](docs/NATIVE_MODULES.md)。
 

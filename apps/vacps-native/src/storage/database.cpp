@@ -9,6 +9,225 @@
 #include <utility>
 
 namespace vacps::storage {
+namespace {
+
+class StatementReset final {
+ public:
+  StatementReset(sqlite3_stmt* stmt, bool enabled) noexcept
+      : stmt_(stmt), enabled_(enabled) {}
+  ~StatementReset() {
+    if (enabled_) {
+      (void)sqlite3_reset(stmt_);
+      (void)sqlite3_clear_bindings(stmt_);
+    }
+  }
+
+  StatementReset(const StatementReset&) = delete;
+  StatementReset& operator=(const StatementReset&) = delete;
+
+ private:
+  sqlite3_stmt* stmt_;
+  bool enabled_;
+};
+
+std::size_t cell_bytes(const SqlValue& cell) {
+  return std::visit(
+      [](const auto& v) -> std::size_t {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, std::monostate>) {
+          return 0;
+        } else if constexpr (
+            std::is_same_v<T, std::int64_t> ||
+            std::is_same_v<T, double>) {
+          return 8;
+        } else {
+          return v.size();
+        }
+      },
+      cell);
+}
+
+}  // namespace
+
+Statement::Statement(sqlite3* db, sqlite3_stmt* stmt) noexcept
+    : db_(db), stmt_(stmt) {}
+
+Statement::~Statement() { finalize(); }
+
+Statement::Statement(Statement&& other) noexcept
+    : db_(std::exchange(other.db_, nullptr)),
+      stmt_(std::exchange(other.stmt_, nullptr)) {}
+
+Statement& Statement::operator=(Statement&& other) noexcept {
+  if (this != &other) {
+    finalize();
+    db_ = std::exchange(other.db_, nullptr);
+    stmt_ = std::exchange(other.stmt_, nullptr);
+  }
+  return *this;
+}
+
+void Statement::finalize() noexcept {
+  if (stmt_ != nullptr) {
+    (void)sqlite3_finalize(std::exchange(stmt_, nullptr));
+  }
+  db_ = nullptr;
+}
+
+VoidResult Statement::bind_all(const std::vector<SqlValue>& params) {
+  for (int i = 0; i < static_cast<int>(params.size()); ++i) {
+    const int idx = i + 1;
+    const auto& param = params[static_cast<std::size_t>(i)];
+    int rc = SQLITE_OK;
+    std::visit(
+        [&](const auto& value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            rc = sqlite3_bind_null(stmt_, idx);
+          } else if constexpr (std::is_same_v<T, std::int64_t>) {
+            rc = sqlite3_bind_int64(stmt_, idx, value);
+          } else if constexpr (std::is_same_v<T, double>) {
+            rc = sqlite3_bind_double(stmt_, idx, value);
+          } else if constexpr (std::is_same_v<T, std::string>) {
+            rc = sqlite3_bind_text(
+                stmt_,
+                idx,
+                value.data(),
+                static_cast<int>(value.size()),
+                SQLITE_TRANSIENT);
+          } else if constexpr (
+              std::is_same_v<T, std::vector<std::uint8_t>>) {
+            rc = sqlite3_bind_blob(
+                stmt_,
+                idx,
+                value.data(),
+                static_cast<int>(value.size()),
+                SQLITE_TRANSIENT);
+          }
+        },
+        param);
+    if (rc != SQLITE_OK) {
+      return std::unexpected(Error{std::format(
+          "sqlite bind failed at ?{}: {}", idx, sqlite3_errmsg(db_))});
+    }
+  }
+  return {};
+}
+
+SqlValue Statement::column_value(sqlite3_stmt* stmt, int col) {
+  switch (sqlite3_column_type(stmt, col)) {
+    case SQLITE_NULL:
+      return sql_null();
+    case SQLITE_INTEGER:
+      return sql_int(sqlite3_column_int64(stmt, col));
+    case SQLITE_FLOAT:
+      return sql_real(sqlite3_column_double(stmt, col));
+    case SQLITE_BLOB: {
+      const auto* data = static_cast<const std::uint8_t*>(
+          sqlite3_column_blob(stmt, col));
+      const int size = sqlite3_column_bytes(stmt, col);
+      if (data == nullptr || size <= 0) {
+        return sql_blob({});
+      }
+      return sql_blob(std::vector<std::uint8_t>(data, data + size));
+    }
+    case SQLITE_TEXT:
+    default: {
+      const auto* data = reinterpret_cast<const char*>(
+          sqlite3_column_text(stmt, col));
+      const int size = sqlite3_column_bytes(stmt, col);
+      if (data == nullptr) {
+        return sql_text({});
+      }
+      return sql_text(std::string(data, static_cast<std::size_t>(size)));
+    }
+  }
+}
+
+VoidResult Statement::execute(const std::vector<SqlValue>& params) {
+  return execute_impl(params, true);
+}
+
+VoidResult Statement::execute_impl(
+    const std::vector<SqlValue>& params,
+    bool reset_after) {
+  StatementReset reset{stmt_, reset_after};
+  if (auto bound = bind_all(params); !bound) {
+    return bound;
+  }
+  const int rc = sqlite3_step(stmt_);
+  if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+    return std::unexpected(Error{std::format(
+        "sqlite execute failed: {}", sqlite3_errmsg(db_))});
+  }
+  return {};
+}
+
+Result<QueryResult> Statement::query(
+    const std::vector<SqlValue>& params,
+    std::size_t max_rows,
+    std::optional<std::size_t> max_bytes) {
+  return query_impl(params, max_rows, max_bytes, true);
+}
+
+Result<QueryResult> Statement::query_impl(
+    const std::vector<SqlValue>& params,
+    std::size_t max_rows,
+    std::optional<std::size_t> max_bytes,
+    bool reset_after) {
+  StatementReset reset{stmt_, reset_after};
+  if (auto bound = bind_all(params); !bound) {
+    return std::unexpected(std::move(bound.error()));
+  }
+
+  QueryResult out;
+  const int column_count = sqlite3_column_count(stmt_);
+  out.columns.reserve(static_cast<std::size_t>(column_count));
+  std::size_t approximate_bytes = 0;
+  for (int column = 0; column < column_count; ++column) {
+    const char* name = sqlite3_column_name(stmt_, column);
+    out.columns.emplace_back(name != nullptr ? name : "");
+    approximate_bytes += out.columns.back().size();
+  }
+  if (max_bytes && approximate_bytes > *max_bytes) {
+    return std::unexpected(Error{std::format(
+        "sqlite query exceeded max_bytes={} (approx {})",
+        *max_bytes,
+        approximate_bytes)});
+  }
+
+  for (;;) {
+    const int rc = sqlite3_step(stmt_);
+    if (rc == SQLITE_DONE) {
+      break;
+    }
+    if (rc != SQLITE_ROW) {
+      return std::unexpected(Error{std::format(
+          "sqlite query failed: {}", sqlite3_errmsg(db_))});
+    }
+    if (out.rows.size() >= max_rows) {
+      return std::unexpected(Error{std::format(
+          "sqlite query exceeded max_rows={}", max_rows)});
+    }
+
+    std::vector<SqlValue> row;
+    row.reserve(static_cast<std::size_t>(column_count));
+    for (int column = 0; column < column_count; ++column) {
+      SqlValue cell = column_value(stmt_, column);
+      approximate_bytes += cell_bytes(cell);
+      row.push_back(std::move(cell));
+    }
+    if (max_bytes && approximate_bytes > *max_bytes) {
+      return std::unexpected(Error{std::format(
+          "sqlite query exceeded max_bytes={} (approx {})",
+          *max_bytes,
+          approximate_bytes)});
+    }
+    out.rows.push_back(std::move(row));
+  }
+
+  return out;
+}
 
 Database::Database(sqlite3* db, std::string path) noexcept
     : db_(db), path_(std::move(path)) {}
@@ -113,98 +332,25 @@ VoidResult Database::exec(std::string_view sql) {
   return {};
 }
 
-Result<sqlite3_stmt*> Database::prepare(std::string_view sql) {
+Result<Statement> Database::prepare(std::string_view sql) {
   sqlite3_stmt* stmt = nullptr;
   const int rc = sqlite3_prepare_v2(db_, sql.data(), static_cast<int>(sql.size()), &stmt, nullptr);
   if (rc != SQLITE_OK) {
     return std::unexpected(Error{std::format(
         "sqlite prepare failed: {}", sqlite3_errmsg(db_))});
   }
-  return stmt;
-}
-
-VoidResult Database::bind_all(sqlite3_stmt* stmt, const std::vector<SqlValue>& params) {
-  for (int i = 0; i < static_cast<int>(params.size()); ++i) {
-    const int idx = i + 1;
-    const auto& p = params[static_cast<std::size_t>(i)];
-    int rc = SQLITE_OK;
-    std::visit(
-        [&](const auto& v) {
-          using T = std::decay_t<decltype(v)>;
-          if constexpr (std::is_same_v<T, std::monostate>) {
-            rc = sqlite3_bind_null(stmt, idx);
-          } else if constexpr (std::is_same_v<T, std::int64_t>) {
-            rc = sqlite3_bind_int64(stmt, idx, v);
-          } else if constexpr (std::is_same_v<T, double>) {
-            rc = sqlite3_bind_double(stmt, idx, v);
-          } else if constexpr (std::is_same_v<T, std::string>) {
-            rc = sqlite3_bind_text(
-                stmt, idx, v.data(), static_cast<int>(v.size()), SQLITE_TRANSIENT);
-          } else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>>) {
-            rc = sqlite3_bind_blob(
-                stmt,
-                idx,
-                v.data(),
-                static_cast<int>(v.size()),
-                SQLITE_TRANSIENT);
-          }
-        },
-        p);
-    if (rc != SQLITE_OK) {
-      return std::unexpected(Error{std::format(
-          "sqlite bind failed at ?{}: {}", idx, sqlite3_errmsg(db_))});
-    }
+  if (stmt == nullptr) {
+    return std::unexpected(Error{"sqlite prepare produced no statement"});
   }
-  return {};
-}
-
-SqlValue Database::column_value(sqlite3_stmt* stmt, int col) {
-  switch (sqlite3_column_type(stmt, col)) {
-    case SQLITE_NULL:
-      return sql_null();
-    case SQLITE_INTEGER:
-      return sql_int(sqlite3_column_int64(stmt, col));
-    case SQLITE_FLOAT:
-      return sql_real(sqlite3_column_double(stmt, col));
-    case SQLITE_BLOB: {
-      const auto* p = static_cast<const std::uint8_t*>(sqlite3_column_blob(stmt, col));
-      const int n = sqlite3_column_bytes(stmt, col);
-      if (p == nullptr || n <= 0) {
-        return sql_blob({});
-      }
-      return sql_blob(std::vector<std::uint8_t>(p, p + n));
-    }
-    case SQLITE_TEXT:
-    default: {
-      const auto* p = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
-      const int n = sqlite3_column_bytes(stmt, col);
-      if (p == nullptr) {
-        return sql_text({});
-      }
-      return sql_text(std::string(p, static_cast<std::size_t>(n)));
-    }
-  }
+  return Statement{db_, stmt};
 }
 
 VoidResult Database::execute(std::string_view sql, const std::vector<SqlValue>& params) {
-  auto stmt_r = prepare(sql);
-  if (!stmt_r) {
-    return std::unexpected(std::move(stmt_r.error()));
+  auto statement = prepare(sql);
+  if (!statement) {
+    return std::unexpected(std::move(statement.error()));
   }
-  sqlite3_stmt* stmt = *stmt_r;
-  auto cleanup = [&] { sqlite3_finalize(stmt); };
-
-  if (auto b = bind_all(stmt, params); !b) {
-    cleanup();
-    return b;
-  }
-  const int rc = sqlite3_step(stmt);
-  cleanup();
-  if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-    return std::unexpected(Error{std::format(
-        "sqlite execute failed: {}", sqlite3_errmsg(db_))});
-  }
-  return {};
+  return statement->execute_impl(params, false);
 }
 
 Result<QueryResult> Database::query(
@@ -212,84 +358,11 @@ Result<QueryResult> Database::query(
     const std::vector<SqlValue>& params,
     std::size_t max_rows,
     std::optional<std::size_t> max_bytes) {
-  auto stmt_r = prepare(sql);
-  if (!stmt_r) {
-    return std::unexpected(std::move(stmt_r.error()));
+  auto statement = prepare(sql);
+  if (!statement) {
+    return std::unexpected(std::move(statement.error()));
   }
-  sqlite3_stmt* stmt = *stmt_r;
-  auto cleanup = [&] { sqlite3_finalize(stmt); };
-
-  if (auto b = bind_all(stmt, params); !b) {
-    cleanup();
-    return std::unexpected(std::move(b.error()));
-  }
-
-  QueryResult out;
-  const int ncols = sqlite3_column_count(stmt);
-  out.columns.reserve(static_cast<std::size_t>(ncols));
-  std::size_t approx_bytes = 0;
-  for (int c = 0; c < ncols; ++c) {
-    const char* name = sqlite3_column_name(stmt, c);
-    out.columns.emplace_back(name != nullptr ? name : "");
-    approx_bytes += out.columns.back().size();
-  }
-  if (max_bytes && approx_bytes > *max_bytes) {
-    cleanup();
-    return std::unexpected(Error{std::format(
-        "sqlite query exceeded max_bytes={} (approx {})", *max_bytes, approx_bytes)});
-  }
-
-  auto cell_bytes = [](const SqlValue& cell) -> std::size_t {
-    return std::visit(
-        [](const auto& v) -> std::size_t {
-          using T = std::decay_t<decltype(v)>;
-          if constexpr (std::is_same_v<T, std::monostate>) {
-            return 0;
-          } else if constexpr (std::is_same_v<T, std::int64_t> || std::is_same_v<T, double>) {
-            return 8;
-          } else if constexpr (std::is_same_v<T, std::string>) {
-            return v.size();
-          } else if constexpr (std::is_same_v<T, std::vector<std::uint8_t>>) {
-            return v.size();
-          } else {
-            return 0;
-          }
-        },
-        cell);
-  };
-
-  for (;;) {
-    const int rc = sqlite3_step(stmt);
-    if (rc == SQLITE_DONE) {
-      break;
-    }
-    if (rc != SQLITE_ROW) {
-      cleanup();
-      return std::unexpected(Error{std::format(
-          "sqlite query failed: {}", sqlite3_errmsg(db_))});
-    }
-    if (out.rows.size() >= max_rows) {
-      cleanup();
-      return std::unexpected(Error{std::format(
-          "sqlite query exceeded max_rows={}", max_rows)});
-    }
-    std::vector<SqlValue> row;
-    row.reserve(static_cast<std::size_t>(ncols));
-    for (int c = 0; c < ncols; ++c) {
-      SqlValue cell = column_value(stmt, c);
-      approx_bytes += cell_bytes(cell);
-      row.push_back(std::move(cell));
-    }
-    if (max_bytes && approx_bytes > *max_bytes) {
-      cleanup();
-      return std::unexpected(Error{std::format(
-          "sqlite query exceeded max_bytes={} (approx {})", *max_bytes, approx_bytes)});
-    }
-    out.rows.push_back(std::move(row));
-  }
-
-  cleanup();
-  return out;
+  return statement->query_impl(params, max_rows, max_bytes, false);
 }
 
 VoidResult Database::begin() { return exec("BEGIN IMMEDIATE;"); }

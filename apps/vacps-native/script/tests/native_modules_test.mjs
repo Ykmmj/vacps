@@ -457,6 +457,36 @@ await test('http.request rejects bad url', async () => {
   assert(threw, 'expected reject for bad url');
 });
 
+await test('http.request uses one absolute timeout and recovers', async () => {
+  const server = new http.Server(
+    { host: '127.0.0.1', port: 0 },
+    async (request) => {
+      if (request.url === '/slow') {
+        await process.run('/bin/sleep', ['0.1']);
+      }
+      return { status: 200, body: request.url };
+    },
+  );
+
+  try {
+    const address = await server.listen();
+    const origin = `http://${address.host}:${address.port}`;
+    let timeoutMessage = '';
+    try {
+      await http.request({ url: `${origin}/slow`, timeoutMs: 20 });
+    } catch (error) {
+      timeoutMessage = error && error.message ? error.message : String(error);
+    }
+    assert(timeoutMessage.includes('timed out'), `timeout message: ${timeoutMessage}`);
+
+    const recovered = await http.request({ url: `${origin}/fast`, timeoutMs: 1_000 });
+    assertEq(recovered.status, 200, 'request after timeout status');
+    assertEq(fsTextDecoder.decode(recovered.body), '/fast', 'request after timeout body');
+  } finally {
+    await server.close();
+  }
+});
+
 await test('http.request reuses connections, bounds concurrency, and recovers', async () => {
   const peers = new Set();
   let handled = 0;

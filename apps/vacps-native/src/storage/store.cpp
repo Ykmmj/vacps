@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <format>
+#include <unordered_map>
 #include <utility>
 
 namespace vacps::storage {
@@ -139,12 +140,35 @@ Result<std::vector<TransactionResult>> Store::transaction(
     std::vector<TransactionResult> out;
     out.reserve(steps.size());
 
+    // The cache is bounded by this transaction's distinct SQL strings and is
+    // destroyed before COMMIT returns. It removes repeated parser/codegen work
+    // without creating a connection-wide eviction or lifetime policy.
+    std::unordered_map<std::string_view, Statement> statements;
+    statements.reserve(steps.size());
+
+    auto statement_for = [&](std::string_view sql) -> Result<Statement*> {
+      if (auto existing = statements.find(sql); existing != statements.end()) {
+        return &existing->second;
+      }
+      auto prepared = self.prepare(sql);
+      if (!prepared) {
+        return std::unexpected(std::move(prepared.error()));
+      }
+      auto inserted = statements.emplace(sql, std::move(*prepared));
+      return &inserted.first->second;
+    };
+
     for (const auto& step : steps) {
+      auto statement = statement_for(step.sql);
+      if (!statement) {
+        return std::unexpected(std::move(statement.error()));
+      }
       switch (step.type) {
         case StepType::Query: {
           // expected_changes is not meaningful for SELECT / result sets —
           // do not check against sqlite3_changes (binding rejects the combo for JS).
-          auto qr = self.query(step.sql, step.params, step.max_rows, step.max_bytes);
+          auto qr = (*statement)->query(
+              step.params, step.max_rows, step.max_bytes);
           if (!qr) {
             return std::unexpected(std::move(qr.error()));
           }
@@ -152,7 +176,7 @@ Result<std::vector<TransactionResult>> Store::transaction(
           break;
         }
         case StepType::Run: {
-          if (auto r = self.execute(step.sql, step.params); !r) {
+          if (auto r = (*statement)->execute(step.params); !r) {
             return std::unexpected(std::move(r.error()));
           }
           RunResult rr{self.changes(), self.last_insert_rowid()};

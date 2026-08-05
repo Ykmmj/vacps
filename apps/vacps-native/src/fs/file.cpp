@@ -489,7 +489,7 @@ Result<std::vector<std::uint8_t>> File::read_at(
 #if defined(__linux__)
   constexpr std::size_t kChunk = 64 * 1024;
   std::vector<std::uint8_t> buf;
-  std::array<std::uint8_t, kChunk> tmp{};
+  std::array<std::uint8_t, kChunk> tmp;
   std::size_t got = 0;
   while (got < max_bytes) {
     const std::size_t want = std::min(kChunk, max_bytes - got);
@@ -581,7 +581,7 @@ Result<std::vector<std::uint8_t>> File::read(std::size_t max_bytes) {
 #if defined(__linux__)
   constexpr std::size_t kChunk = 64 * 1024;
   std::vector<std::uint8_t> buf;
-  std::array<std::uint8_t, kChunk> tmp{};
+  std::array<std::uint8_t, kChunk> tmp;
   std::size_t got = 0;
   const std::size_t max_b = *lim;
   while (got < max_b) {
@@ -847,7 +847,10 @@ asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read_at_impl(
 
   constexpr std::size_t kChunk = 64 * 1024;
   std::vector<std::uint8_t> buf;
-  std::array<std::uint8_t, kChunk> tmp{};
+  // Keep bulk storage outside the coroutine frame. Resize only the next
+  // requested chunk and let the file operation write directly into the final
+  // result buffer; this avoids a fixed 64 KiB frame memset and a second copy.
+  buf.reserve(std::min(kChunk, max_bytes));
   std::size_t got = 0;
   while (got < max_bytes) {
     if (stop.stop_requested()) {
@@ -856,12 +859,14 @@ asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read_at_impl(
           Error{"operation cancelled", "readAt", ECANCELED});
     }
     const std::size_t want = std::min(kChunk, max_bytes - got);
+    buf.resize(got + want);
     auto [ec, n] = co_await self->asio_->file.async_read_some_at(
         offset + got,
-        asio::buffer(tmp.data(), want),
+        asio::buffer(buf.data() + got, want),
         asio::bind_cancellation_slot(
             op->signal.slot(), asio::as_tuple));
     if (ec == asio::error::eof) {
+      buf.resize(got);
       break;
     }
     if (ec == asio::error::operation_aborted || stop.stop_requested()) {
@@ -878,10 +883,11 @@ asio::awaitable<Result<std::vector<std::uint8_t>>> File::async_read_at_impl(
           ec.value()});
     }
     if (n == 0) {
+      buf.resize(got);
       break;
     }
-    buf.insert(buf.end(), tmp.data(), tmp.data() + n);
     got += n;
+    buf.resize(got);
   }
   op->active = false;
   co_return buf;

@@ -30,6 +30,53 @@ struct QueryResult {
   std::vector<std::vector<SqlValue>> rows;
 };
 
+inline constexpr std::size_t kDefaultMaxQueryRows = 10'000;
+
+/**
+ * One prepared SQLite statement owned by its Database connection.
+ *
+ * Contract: Narrow
+ * Preconditions: the owning Database outlives this object; calls never overlap
+ *                and run in the same serialized connection lane as Database
+ * Lifetime: finalize is RAII; every execution resets the VM and clears binds
+ *           before returning or unwinding, so the statement remains reusable
+ */
+class Statement {
+ public:
+  Statement(const Statement&) = delete;
+  Statement& operator=(const Statement&) = delete;
+  Statement(Statement&& other) noexcept;
+  Statement& operator=(Statement&& other) noexcept;
+  ~Statement();
+
+  [[nodiscard]] VoidResult execute(
+      const std::vector<SqlValue>& params = {});
+  [[nodiscard]] Result<QueryResult> query(
+      const std::vector<SqlValue>& params = {},
+      std::size_t max_rows = kDefaultMaxQueryRows,
+      std::optional<std::size_t> max_bytes = std::nullopt);
+
+ private:
+  friend class Database;
+
+  Statement(sqlite3* db, sqlite3_stmt* stmt) noexcept;
+
+  void finalize() noexcept;
+  [[nodiscard]] VoidResult execute_impl(
+      const std::vector<SqlValue>& params,
+      bool reset_after);
+  [[nodiscard]] Result<QueryResult> query_impl(
+      const std::vector<SqlValue>& params,
+      std::size_t max_rows,
+      std::optional<std::size_t> max_bytes,
+      bool reset_after);
+  [[nodiscard]] VoidResult bind_all(const std::vector<SqlValue>& params);
+  [[nodiscard]] static SqlValue column_value(sqlite3_stmt* stmt, int col);
+
+  sqlite3* db_{nullptr};
+  sqlite3_stmt* stmt_{nullptr};
+};
+
 /**
  * SQLite open mode — maps 1:1 to sqlite3_open_v2 flags (plus NOMUTEX).
  *  - ReadOnly         → SQLITE_OPEN_READONLY
@@ -82,8 +129,11 @@ class Database {
   /** Single statement with optional bound parameters (? placeholders). */
   [[nodiscard]] VoidResult execute(std::string_view sql, const std::vector<SqlValue>& params = {});
 
+  /** Compile one reusable statement owned by this connection. */
+  [[nodiscard]] Result<Statement> prepare(std::string_view sql);
+
   /** Default max rows for query(); oversized results return an error. */
-  static constexpr std::size_t kDefaultMaxQueryRows = 10'000;
+  static constexpr std::size_t kDefaultMaxQueryRows = storage::kDefaultMaxQueryRows;
 
   /**
    * SELECT (or any statement with a result set) + optional binds.
@@ -165,9 +215,6 @@ class Database {
 
   void close() noexcept;
   [[nodiscard]] VoidResult apply_pragmas(OpenMode mode);
-  [[nodiscard]] Result<sqlite3_stmt*> prepare(std::string_view sql);
-  [[nodiscard]] VoidResult bind_all(sqlite3_stmt* stmt, const std::vector<SqlValue>& params);
-  [[nodiscard]] static SqlValue column_value(sqlite3_stmt* stmt, int col);
 
   /** Not public product API — only with_transaction / run_transaction. */
   [[nodiscard]] VoidResult begin();

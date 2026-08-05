@@ -4,13 +4,13 @@
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/bind_cancellation_slot.hpp>
-#include <boost/asio/cancel_at.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/experimental/channel_error.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
@@ -41,6 +41,10 @@ using steady_clock = std::chrono::steady_clock;
 struct OperationCancel {
   asio::cancellation_signal signal;
 };
+
+void emit_cancel(OperationCancel& operation) noexcept {
+  operation.signal.emit(asio::cancellation_type::all);
+}
 
 [[nodiscard]] bool ieq(std::string_view left, std::string_view right) {
   if (left.size() != right.size()) {
@@ -148,6 +152,13 @@ struct OperationCancel {
       ECANCELED};
 }
 
+[[nodiscard]] Error timeout_error(std::string_view operation) {
+  return Error{
+      std::format("{}: timed out", operation),
+      std::string{operation},
+      ETIMEDOUT};
+}
+
 [[nodiscard]] Error io_error(
     std::string_view operation,
     const boost::system::error_code& ec) {
@@ -158,28 +169,26 @@ struct OperationCancel {
 }
 
 /**
- * The stop flag is checked immediately before starting each sequential I/O
- * operation. This is required because cancellation_signal is edge-triggered:
- * a signal emitted between two operations is not replayed into the next slot.
+ * Stop and the absolute deadline are checked immediately before starting each
+ * sequential operation. This is required because cancellation_signal is
+ * edge-triggered: an edge between operations is not replayed into the next
+ * slot.
  */
 [[nodiscard]] std::optional<Error> stop_before_operation(
     const std::stop_token& stop,
+    steady_clock::time_point deadline,
     std::string_view operation) {
   if (stop.stop_requested()) {
     return stopped_error(operation);
   }
+  if (deadline_expired(deadline)) {
+    return timeout_error(operation);
+  }
   return std::nullopt;
 }
 
-auto io_token(
-    asio::cancellation_slot slot,
-    steady_clock::time_point deadline) {
-  return asio::cancel_at(
-      deadline,
-      asio::cancellation_type::all)(
-      asio::bind_cancellation_slot(
-          slot,
-          asio::as_tuple));
+auto io_token(asio::cancellation_slot slot) {
+  return asio::bind_cancellation_slot(slot, asio::as_tuple);
 }
 
 template <class Stream>
@@ -211,13 +220,13 @@ asio::awaitable<Result<ClientResponse>> exchange_stream(
     message.prepare_payload();
   }
 
-  if (auto stopped = stop_before_operation(stop, kWriteOperation)) {
+  if (auto stopped = stop_before_operation(stop, deadline, kWriteOperation)) {
     co_return std::unexpected(std::move(*stopped));
   }
   auto [write_ec, bytes_written] = co_await beast_http::async_write(
       stream,
       message,
-      io_token(cancel, deadline));
+      io_token(cancel));
   (void)bytes_written;
   if (write_ec) {
     co_return std::unexpected(
@@ -225,7 +234,7 @@ asio::awaitable<Result<ClientResponse>> exchange_stream(
   }
 
   for (;;) {
-    if (auto stopped = stop_before_operation(stop, kReadOperation)) {
+    if (auto stopped = stop_before_operation(stop, deadline, kReadOperation)) {
       co_return std::unexpected(std::move(*stopped));
     }
 
@@ -239,7 +248,7 @@ asio::awaitable<Result<ClientResponse>> exchange_stream(
         stream,
         buffer,
         parser,
-        io_token(cancel, deadline));
+        io_token(cancel));
     (void)bytes_read;
     if (read_ec == beast_http::error::body_limit) {
       co_return std::unexpected(Error{
@@ -565,14 +574,14 @@ asio::awaitable<Result<std::unique_ptr<Client::Connection>>> Client::connect(
     tls_context = *context;
   }
 
-  if (auto stopped = stop_before_operation(stop, kResolveOperation)) {
+  if (auto stopped = stop_before_operation(stop, deadline, kResolveOperation)) {
     co_return std::unexpected(std::move(*stopped));
   }
   tcp::resolver resolver{executor_};
   auto [resolve_ec, endpoints] = co_await resolver.async_resolve(
       url.host,
       url.port,
-      io_token(cancel, deadline));
+      io_token(cancel));
   if (resolve_ec) {
     co_return std::unexpected(
         phase_error(kResolveOperation, resolve_ec, stop, deadline));
@@ -580,12 +589,12 @@ asio::awaitable<Result<std::unique_ptr<Client::Connection>>> Client::connect(
 
   if (url.scheme == "http") {
     auto connection = std::make_unique<Connection>(executor_);
-    if (auto stopped = stop_before_operation(stop, kConnectOperation)) {
+    if (auto stopped = stop_before_operation(stop, deadline, kConnectOperation)) {
       co_return std::unexpected(std::move(*stopped));
     }
     auto [connect_ec, endpoint] = co_await connection->plain->async_connect(
         endpoints,
-        io_token(cancel, deadline));
+        io_token(cancel));
     (void)endpoint;
     if (connect_ec) {
       co_return std::unexpected(
@@ -606,25 +615,25 @@ asio::awaitable<Result<std::unique_ptr<Client::Connection>>> Client::connect(
   }
   connection->tls->set_verify_callback(ssl::host_name_verification(url.host));
 
-  if (auto stopped = stop_before_operation(stop, kConnectOperation)) {
+  if (auto stopped = stop_before_operation(stop, deadline, kConnectOperation)) {
     co_return std::unexpected(std::move(*stopped));
   }
   auto [connect_ec, endpoint] =
       co_await beast::get_lowest_layer(*connection->tls).async_connect(
           endpoints,
-          io_token(cancel, deadline));
+          io_token(cancel));
   (void)endpoint;
   if (connect_ec) {
     co_return std::unexpected(
         phase_error(kConnectOperation, connect_ec, stop, deadline));
   }
 
-  if (auto stopped = stop_before_operation(stop, kTlsOperation)) {
+  if (auto stopped = stop_before_operation(stop, deadline, kTlsOperation)) {
     co_return std::unexpected(std::move(*stopped));
   }
   auto [handshake_ec] = co_await connection->tls->async_handshake(
       ssl::stream_base::client,
-      io_token(cancel, deadline));
+      io_token(cancel));
   if (handshake_ec) {
     co_return std::unexpected(
         phase_error(kTlsOperation, handshake_ec, stop, deadline));
@@ -721,42 +730,48 @@ asio::awaitable<Result<ClientResponse>> Client::request(
 
   auto cancellation = std::make_shared<OperationCancel>();
   std::weak_ptr<OperationCancel> weak_cancellation = cancellation;
+
+  // One absolute timer owns the entire request budget. Sequential phases bind
+  // the same edge-triggered slot instead of allocating one cancel_at timer per
+  // gate / resolve / connect / TLS / write / read operation.
+  asio::steady_timer deadline_timer{executor_, deadline};
+  deadline_timer.async_wait(
+      [cancellation](const boost::system::error_code& ec) noexcept {
+        if (!ec) {
+          emit_cancel(*cancellation);
+        }
+      });
+
   std::stop_callback on_stop{
       stop,
       [weak_cancellation, executor = executor_]() noexcept {
-        try {
-          asio::post(executor, [weak_cancellation]() noexcept {
-            if (auto operation = weak_cancellation.lock()) {
-              try {
-                operation->signal.emit(asio::cancellation_type::all);
-              } catch (...) {
-                // Cancellation handlers are terminal notification only.
-              }
-            }
-          });
-        } catch (...) {
-          // Executor teardown is already terminal for this operation.
-        }
+        asio::post(executor, [weak_cancellation]() noexcept {
+          if (auto operation = weak_cancellation.lock()) {
+            emit_cancel(*operation);
+          }
+        });
       }};
 
-  if (auto stopped = stop_before_operation(stop, kOriginAcquireOperation)) {
+  if (auto stopped = stop_before_operation(
+          stop, deadline, kOriginAcquireOperation)) {
     co_return std::unexpected(std::move(*stopped));
   }
   auto [acquire_ec] = co_await pool.gate.async_send(
       boost::system::error_code{},
-      io_token(cancellation->signal.slot(), deadline));
+      io_token(cancellation->signal.slot()));
   if (acquire_ec) {
     co_return std::unexpected(
         phase_error(kOriginAcquireOperation, acquire_ec, stop, deadline));
   }
   GateLease origin_permit{pool.gate};
 
-  if (auto stopped = stop_before_operation(stop, kGlobalAcquireOperation)) {
+  if (auto stopped = stop_before_operation(
+          stop, deadline, kGlobalAcquireOperation)) {
     co_return std::unexpected(std::move(*stopped));
   }
   auto [global_acquire_ec] = co_await request_gate_->gate.async_send(
       boost::system::error_code{},
-      io_token(cancellation->signal.slot(), deadline));
+      io_token(cancellation->signal.slot()));
   if (global_acquire_ec) {
     co_return std::unexpected(phase_error(
         kGlobalAcquireOperation,

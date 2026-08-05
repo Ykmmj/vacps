@@ -333,7 +333,47 @@
 
 ---
 
-## 8. 测试与验证（与风险成比例）
+## 8. 性能优化、测试与验证
+
+### 8.1 性能优化的真实性（不可改变问题定义）
+
+性能任务在实施前 **MUST** 先分类为以下两者之一，不得混合汇报：
+
+| 类型 | 定义 | 允许的结论 |
+| --- | --- | --- |
+| **原路径热点优化** | 保持被测公共 API、可观测语义与工作负载不变，优化同一条执行路径 | 可以声称原 API / 原热路径提速 |
+| **新能力或工作负载改造** | 新增 batch/coalescing API、减少返回结果、改变操作数量/数据分布，或放宽保证 | 只能单独报告新 API / 新工作负载的结果，不得算作原路径优化 |
+
+#### 不可变比较条件
+
+声称“原路径热点优化”时，before/after **MUST** 保持下列条件一致：
+
+1. 同一公共 API、参数形状、返回值形状与返回结果数量。
+2. 同一可观测语义：错误、事务/持久性、顺序、并发/FIFO、取消、寿命与资源关闭保证均不变。
+3. 同一操作数量、数据规模/分布、冷/热状态和预热方式；不得把原本计时区间内的必要工作移到区间外。
+4. 同一 Release/Sanitizer 配置、二进制参数、运行命令、机器/容器条件和并发度。
+
+**MUST NOT** 使用下列方式制造原路径提速结论：
+
+- 以新增 `runMany` / batch API 代替原来的逐次或逐 step API；
+- 聚合或删减原 API 必须物化的结果，跳过 encode/decode、Promise settle 或资源管理工作；
+- 改变 transaction/durability/ordering/cancellation 等保证；
+- 使用产品路径不存在的预计算、持久缓存或预热；
+- 只报告最佳单次数据，或把系统噪声当作改进。
+
+合法的原路径优化包括：删除不必要的拷贝/分配/调度跳转、在**相同调用边界内**复用已有元数据或 native 资源、优化算法/数据布局，以及其他不改变上述语义的实现替换。
+
+#### QuickJS Atom 热路径
+
+1. 当 perf 证据显示重复的字符串属性解码/编码为热点时，**SHOULD** 在同一次同步 decode 或 encode 调用中建立 operation-local Atom set，使用 `JS_GetProperty` / `JS_SetProperty` 复用 Atom，避免每个 element 重复走 `JS_GetPropertyStr` / `JS_SetPropertyStr` 的字符串到 Atom 路径。
+2. Atom set **MUST** 保持调用级 RAII/对称 `JS_FreeAtom`；默认不跨 `co_await`、不跨 worker 投递，不存入纯 C++ 域对象。
+3. `JSAtom` 属于特定 `JSRuntime`；**MUST NOT** 使用 process-global/static Atom 缓存，也 **MUST NOT** 将 Atom 复用到其它 Runtime。只有 perf 证据证明调用级复用仍不足时，才 **MAY** 由 Runtime-owned RAII 延长寿命，并必须文档化 engine shutdown 释放顺序。
+4. 一个 `TransactionStep[]` 的固定键应在整次数组解码期间复用；一个 `TransactionResult[]` 的 `changes` / `lastInsertRowid` 应在整次数组编码期间复用。Query 的动态列名 Atom 应限定于单个 `QueryResult` 并为其所有行复用。
+5. Atom 复用 **MUST NOT** 改变 getter/proxy 可观测行为、属性写入顺序、pending exception/所有权转移规则、返回对象形状或任何 Wide 边界错误语义。
+
+性能结论 **MUST** 附带可复现的 before/after 命令与工作负载、多次运行结果（或噪声说明），以及 perf 热点变化；仅有 throughput 数字而没有热点证据时，不得声称已修复指定热点。
+
+### 8.2 测试与验证（与风险成比例）
 
 1. 验证 **MUST** 与改动风险成比例；公共契约、生命周期、并发与资源释放优先。
 2. JavaScript 单元行为使用 `script/tests`；native 集成行为编译产品二进制后，通过真实
@@ -390,6 +430,11 @@ VACPS-NATIVE AGENT GATE (mandatory):
 6. Do not git commit unless the user explicitly requests it.
 7. End with an explicit verification report: commands run, results, and
    checks skipped (and why).
+8. For performance work, freeze the public API, observable semantics, workload,
+   data scale/distribution, and build/run configuration before editing. Do not
+   count a new batch API, reduced output, moved work, relaxed guarantees, or a
+   different workload as an optimization of the original hot path. Report such
+   changes separately as new capability or workload results.
 ```
 
 ### 10.2 其它流程规则
@@ -419,6 +464,8 @@ VACPS-NATIVE AGENT GATE (mandatory):
 - [ ] 未发明 FS 沙箱/额外安全策略；**无 nlohmann/json**；无未立项依赖
 - [ ] 风格：UTF-8、LF、final newline、2-space、无脏 trailing whitespace；匹配周围代码
 - [ ] **测试**与风险成比例；库 API 已用 **Context7**（如适用）
+- [ ] **性能真实性**：原路径优化的 before/after 保持 API、语义、工作负载和运行配置不变；新 batch/聚合 API 单独汇报；无移出必要工作/减少输出/放宽保证的基准作弊
+- [ ] **QuickJS Atom**（如适用）：调用级缓存与 Runtime 寿命绑定正确；无 global/static 或跨 Runtime Atom；不跨 worker 持有
 - [ ] 构建仅 `docker/build.sh`，**≤4 核**；按风险选择 `release|asan|tsan`
 - [ ] 未把 `--native-only` 当成 full validation
 - [ ] **验证报告**含命令、结果、跳过项
@@ -432,10 +479,11 @@ VACPS-NATIVE AGENT GATE (mandatory):
 4. Ownership, thread affinity, lifetime correct
 5. No compatibility scaffolding without a released contract
 6. Correct layer, file placement, and naming
-7. Verification proportionate to risk; native integration runs real JavaScript through the product binary
-8. Context7 used for dependency/API questions when applicable
-9. Docker-only build via `docker/build.sh`, **max 4 cores**
-10. Verification report written; unrelated dirty work preserved; no drive-by edits
+7. Performance claims preserve the same API, semantics, workload, output, and configuration; new batching/coalescing is reported separately
+8. Verification proportionate to risk; native integration runs real JavaScript through the product binary
+9. Context7 used for dependency/API questions when applicable
+10. Docker-only build via `docker/build.sh`, **max 4 cores**
+11. Verification report written; unrelated dirty work preserved; no drive-by edits
 
 ---
 

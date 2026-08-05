@@ -53,6 +53,11 @@ VACPS-NATIVE AGENT GATE (mandatory):
 6. Do not git commit unless the user explicitly requests it.
 7. End with an explicit verification report: commands run, results, and
    checks skipped (and why).
+8. For performance work, freeze the public API, observable semantics, workload,
+   data scale/distribution, and build/run configuration before editing. Do not
+   count a new batch API, reduced output, moved work, relaxed guarantees, or a
+   different workload as an optimization of the original hot path. Report such
+   changes separately as new capability or workload results.
 ```
 
 ### Gate rules
@@ -70,6 +75,12 @@ VACPS-NATIVE AGENT GATE (mandatory):
 - Do not add dual-track APIs, useless aliases, or speculative Node/N-API shims.
 - Place files in the owning layer; follow Wide/Narrow API contracts and failure taxonomy in the coding standards.
 - Synchronous binding callbacks run directly in the owner-thread QuickJS turn; do not add per-callback Runtime gates.
+- Performance claims **MUST** compare the same API and observable semantics under
+  the same workload and configuration. New batching/coalescing APIs are separate
+  features, not evidence that the original path became faster.
+- Optimize the measured hot path itself. Internal scoped reuse (for example,
+  operation-local QuickJS atoms) is valid only when lifetime, output, ordering,
+  error, transaction, cancellation, and concurrency semantics remain unchanged.
 - Protect the dirty worktree: edit only task-scoped paths.
 
 ## Verification (proportionate)
@@ -91,4 +102,4 @@ Hard rules:
 
 ## Pre-submit (agents)
 
-Use the concise checklist in `docs/CODING_STANDARDS.md` §11.2, including: contract chosen/documented; boundary validation once; no recovery for programmer misuse; ownership/thread/lifetime; no compatibility scaffolding; correct layer/file/name; tests; Context7 for dependency APIs; docker-only build ≤4 cores; verification report; no unrelated edits.
+Use the concise checklist in `docs/CODING_STANDARDS.md` §11.2, including: contract chosen/documented; boundary validation once; no recovery for programmer misuse; ownership/thread/lifetime; no compatibility scaffolding; performance comparisons preserve API/semantics/workload; correct layer/file/name; tests; Context7 for dependency APIs; docker-only build ≤4 cores; verification report; no unrelated edits.

@@ -165,7 +165,7 @@ type ExpectedChanges =
   | { atMost: number };
 ```
 
-- 整段作为同一连接 FIFO lane 上的一个不可交错作业执行；无独立 begin/commit/rollback API。
+- 整段作为同一连接 FIFO lane 上的一个不可交错作业执行；无独立 begin/commit/rollback API。事务内部按 SQL 文本复用 prepared VM，缓存最多为本次 steps 的 distinct SQL 数量，并在 transaction 返回前销毁；没有连接级淘汰策略。
 - **空 steps 数组**（`transaction([])`）在绑定 decode 期同步拒绝。
 - 每个 **run** 步在 `sqlite3_changes` 后立即校验 `expectedChanges`；不匹配 → 整段 rollback，后续步骤不执行。
 - **交叉字段校验（绑定 decode 同步拒绝）**：
