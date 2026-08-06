@@ -18,6 +18,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 if(VACPS_STATIC)
+  # A fresh Alpine configure otherwise prefers the co-installed .so files,
+  # which cannot participate in the final -static link. Keep dependency
+  # discovery consistent with the product link mode instead of relying on a
+  # previously cached .a path.
+  set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+  set(OPENSSL_USE_STATIC_LIBS TRUE)
   add_link_options(-fuse-ld=lld)
   add_link_options(-static)
   add_link_options(-Wl,--gc-sections)
