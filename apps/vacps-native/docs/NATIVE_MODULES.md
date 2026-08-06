@@ -372,12 +372,12 @@ TS：`script/types/vacps-process.d.ts`。
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `new Process(command, args?, options?)` | 未 spawn；options 同步解码；产品 composition 必须提供 `Runtime::Async` / `ProcessRuntime`                                                                         |
 | `start(): Promise<void>`                | 在 `main_executor` 上 spawn（`setpgid` 进程组）                                                                                                                   |
-| `write(data, closeStdin?)`              | 串行 stdin 写；`string` / `ArrayBuffer` / `TypedArray`。可在同一串行操作末尾关闭 stdin                                                                             |
-| `read(options?)`                        | 从 `(sequence, byteOffset)` 游标增量读取 stdout/stderr；`maxBytes` ≤ 1MiB，`waitMs` ≤ 60s                                                                           |
-| `waitForExit(timeoutMs?)`               | 等待真实 reap + 两条 pipe drain；有 timeout 时超时返回 `completed=false`，不复制完整 capture                                                                        |
-| `snapshot(options?)`                    | 当前状态、stdin 可用性、精确 produced bytes/truncation，以及独立限额的 stdout/stderr preview                                                                        |
+| `write(data, closeStdin?)`              | 串行 stdin 写；`string` / `ArrayBuffer` / `TypedArray`。可在同一串行操作末尾关闭 stdin                                                                            |
+| `read(options?)`                        | 从 `(sequence, byteOffset)` 游标增量读取 stdout/stderr；`maxBytes` ≤ 1MiB，`waitMs` ≤ 60s                                                                         |
+| `waitForExit(timeoutMs?)`               | 等待真实 reap + 两条 pipe drain；有 timeout 时超时返回 `completed=false`，不复制完整 capture                                                                      |
+| `snapshot(options?)`                    | 当前状态、stdin 可用性、精确 produced bytes/truncation，以及独立限额的 stdout/stderr preview                                                                      |
 | `wait(): Promise<ProcessResult>`        | 进程退出 **且** stdout/stderr drain 完成后返回 capture（handle 仍 open 时）；本身不释放 buffer                                                                    |
-| `terminate(signal?, gracePeriodMs?)`    | 信号进程组；在请求发出后 resolve（非等待退出）。非 SIGKILL 可在 grace 后升级；未知信号名同步 TypeError                                                             |
+| `terminate(signal?, gracePeriodMs?)`    | 信号进程组；在请求发出后 resolve（非等待退出）。非 SIGKILL 可在 grace 后升级；未知信号名同步 TypeError                                                            |
 | `close(): Promise<void>`                | `async_close`：SIGKILL + 取消管道，await 真实 reap/drain 后释放 slot/buffer（使 native capture 失效；并发 outstanding `wait` 可能失败）。幂等；忽略 injected stop |
 | `run(command, args?, options?)`         | create→start→wait→close；默认 stdin `ignore`                                                                                                                      |
 
