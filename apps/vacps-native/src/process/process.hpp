@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -58,10 +59,67 @@ enum class ProcessStatus : std::uint8_t {
   Starting,
   Running,
   Exited,
+  Signaled,
   TimedOut,
   Cancelled,
   Closing,
   Closed,
+};
+
+enum class ProcessStream : std::uint8_t {
+  Stdout = 0,
+  Stderr,
+};
+
+struct OutputCursor {
+  std::uint64_t sequence{1};
+  std::size_t byte_offset{0};
+};
+
+struct ReadOptions {
+  OutputCursor cursor{};
+  std::size_t max_bytes{64 * 1024};
+  std::chrono::milliseconds wait{0};
+};
+
+struct OutputChunk {
+  std::uint64_t sequence{0};
+  ProcessStream stream{ProcessStream::Stdout};
+  std::string data;
+  std::int64_t observed_at_ms{0};
+  std::size_t offset_start{0};
+  std::size_t offset_end{0};
+};
+
+struct ExitResult {
+  ProcessStatus status{ProcessStatus::Created};
+  std::optional<std::int32_t> exit_code;
+  std::optional<int> signal;
+  bool timed_out{false};
+};
+
+struct ExitWaitResult {
+  ExitResult exit;
+  bool completed{false};
+};
+
+struct ReadResult {
+  ExitResult exit;
+  std::vector<OutputChunk> chunks;
+  OutputCursor next_cursor{};
+  bool eof{false};
+  std::size_t returned_bytes{0};
+};
+
+struct ProcessSnapshot {
+  ExitResult exit;
+  bool stdin_available{false};
+  std::string stdout_str;
+  std::string stderr_str;
+  std::uint64_t stdout_bytes{0};
+  std::uint64_t stderr_bytes{0};
+  bool stdout_truncated{false};
+  bool stderr_truncated{false};
 };
 
 /** Result of Process::wait() / one-shot run (public fields only). */
@@ -107,8 +165,50 @@ class Process final : public std::enable_shared_from_this<Process> {
 
   [[nodiscard]] asio::awaitable<VoidResult> start();
 
-  /** Serialized stdin write. Does not close stdin. */
-  [[nodiscard]] asio::awaitable<Result<std::size_t>> write(std::string data);
+  /**
+   * Contract: Narrow
+   * Preconditions: owner executor; successful start; explicit close not begun.
+   * Errors: expected pipe I/O failure.
+   * Threading: owner executor only.
+   * Lifetime: the coroutine retains the pipe and Process state.
+   *
+   * Serialized stdin write. When close_stdin is true, the pipe is closed in
+   * the same serialized operation after the payload is written.
+   */
+  [[nodiscard]] asio::awaitable<Result<std::size_t>> write(
+      std::string data,
+      bool close_stdin = false);
+
+  /**
+   * Contract: Narrow
+   * Preconditions: owner executor; successful start; explicit close not begun;
+   *   cursor/ranges were validated by the caller.
+   * Errors: none; deadline expiry is an empty successful read.
+   * Threading: owner executor only.
+   * Lifetime: returned chunks own their copied bytes.
+   */
+  [[nodiscard]] asio::awaitable<ReadResult> read(ReadOptions options);
+
+  /**
+   * Contract: Narrow
+   * Preconditions: owner executor; successful start; explicit close not begun.
+   * Errors: none.
+   * Threading: owner executor only.
+   * Lifetime: returned value owns no Process resources.
+   */
+  [[nodiscard]] asio::awaitable<ExitWaitResult> wait_for_exit(
+      std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+
+  /**
+   * Contract: Narrow
+   * Preconditions: owner executor; preview sizes are caller-validated.
+   * Errors: none.
+   * Threading: owner executor only.
+   * Lifetime: returned previews own their bytes.
+   */
+  [[nodiscard]] ProcessSnapshot snapshot(
+      std::size_t stdout_preview_bytes,
+      std::size_t stderr_preview_bytes) const;
 
   /**
    * Wait until process exit and both stdout/stderr drains finish.
@@ -122,7 +222,9 @@ class Process final : public std::enable_shared_from_this<Process> {
    * Signal the process group. Resolves after the kill request, not after exit.
    * No-op success if already exited.
    */
-  [[nodiscard]] VoidResult terminate(int signal);
+  [[nodiscard]] VoidResult terminate(
+      int signal,
+      std::chrono::milliseconds grace = std::chrono::milliseconds{3000});
 
   /**
    * Idempotent close: request SIGKILL, cancel stdin+read pipes, await real

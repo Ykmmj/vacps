@@ -140,7 +140,7 @@ JS 对象不可达
 
 对 domain `http::Server`：析构 / `dispose()` **只 post 非阻塞取消**到 owner executor，不 join、不 `stop()` executor；State 自持有直到 accept loop 与 sessions drain 至 Closed。
 
-对 domain `process::Process`：析构 / `dispose()` **只 post 非阻塞**进程组 SIGKILL + 取消管道/定时器到 owner executor；不 join、不 `stop()` executor；不在完成前回写伪造的 exit/eof。State 自持有直到 `async_execute` reap 与 stdout/stderr drain 完成。
+对 domain `process::Process`：析构 / `dispose()` **只 post 非阻塞**进程组 SIGKILL + 取消管道/定时器到 owner executor；不 join、不 `stop()` executor；不在完成前回写伪造的 exit/eof。State 自持有直到 Boost.Process async wait 的真实 reap 与 stdout/stderr drain 完成。
 
 ---
 
@@ -168,7 +168,7 @@ http::ServerHandler ──weak_ptr<ServerNative>──▶   # 无 self-root / �
 
 ## 六、异步延长生命周期
 
-异步操作（含 `Store.open` / `exec` / `run` / `query` / `transaction` / `close`，`Server.listen` / `Server.close`，以及 `Process.start` / `write` / `wait` / `terminate` / `close`）在 **call-entry** unwrap 后把 **non-null `shared_ptr<T>` 移入方法协程帧**；run_blocking/worker 只碰 C++，靠该 `shared_ptr`（或等价共享 state）续命。Store 的 `T` 是 module-private `StoreNative`（唯一拥有 domain Store + serial worker）。Process 域工作不经 `Runtime::Async::run_blocking`。
+异步操作（含 `Store.open` / `exec` / `run` / `query` / `transaction` / `close`，`Server.listen` / `Server.close`，以及 `Process.start` / `write` / `read` / `waitForExit` / `wait` / `terminate` / `close`）在 **call-entry** unwrap 后把 **non-null `shared_ptr<T>` 移入方法协程帧**；run_blocking/worker 只碰 C++，靠该 `shared_ptr`（或等价共享 state）续命。Store 的 `T` 是 module-private `StoreNative`（唯一拥有 domain Store + serial worker）。Process 域工作不经 `Runtime::Async::run_blocking`。
 
 - **禁止**裸 `this` 跨 `co_await` / 跨 worker 边界。
 - JS 对象被 GC、finalizer 已 drop holder 后，只要帧内仍持有 `shared_ptr`，进行中的 native operation 仍须安全完成；最后一份 `shared_ptr` 释放时才跑 `~T`。
@@ -190,6 +190,10 @@ http::ServerHandler ──weak_ptr<ServerNative>──▶   # 无 self-root / �
 
 C++ 不知道哪个 Server 是 API Server、哪个 Store 必须在 Process 之后关。
 业务顺序只写在 script 的 `shutdown()` 里（例如先停 HTTP，再 `await store.close()`）。
+
+产品脚本需要把共享协议 `process_id` 映射到 JS-owned `Process` 时，该映射由
+JavaScript `Application` 的 `ProcessSessions` 持有并在产品 shutdown 显式关闭；
+它不是 Host/Runtime registry，也不改变每个 native `Process` 仍由 JS 对象拥有的模型。
 
 ---
 

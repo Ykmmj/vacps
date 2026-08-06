@@ -40,6 +40,58 @@ declare module 'vacps:process' {
     readonly stderrTruncated: boolean;
   }
 
+  export type ProcessStatus = 'running' | 'exited' | 'signaled' | 'timed_out' | 'cancelled';
+
+  export interface ProcessExit {
+    readonly status: ProcessStatus;
+    readonly exitCode: number | null;
+    readonly signal: string | null;
+    readonly timedOut: boolean;
+  }
+
+  export interface ProcessExitWait extends ProcessExit {
+    readonly completed: boolean;
+  }
+
+  export interface ProcessReadOptions {
+    readonly sequence?: number;
+    readonly byteOffset?: number;
+    readonly maxBytes?: number;
+    readonly waitMs?: number;
+  }
+
+  export interface ProcessOutputChunk {
+    readonly sequence: number;
+    readonly stream: 'stdout' | 'stderr';
+    readonly data: string;
+    readonly observedAtMs: number;
+    readonly offsetStart: number;
+    readonly offsetEnd: number;
+  }
+
+  export interface ProcessReadResult extends ProcessExit {
+    readonly chunks: readonly ProcessOutputChunk[];
+    readonly nextSequence: number;
+    readonly nextByteOffset: number;
+    readonly eof: boolean;
+    readonly returnedBytes: number;
+  }
+
+  export interface ProcessSnapshotOptions {
+    readonly stdoutMaxBytes?: number;
+    readonly stderrMaxBytes?: number;
+  }
+
+  export interface ProcessSnapshot extends ProcessExit {
+    readonly stdinAvailable: boolean;
+    readonly stdout: string;
+    readonly stderr: string;
+    readonly stdoutBytes: number;
+    readonly stderrBytes: number;
+    readonly stdoutTruncated: boolean;
+    readonly stderrTruncated: boolean;
+  }
+
   /**
    * Long-lived process handle. Construct with command/args; not spawned until start().
    * JS object is the resource handle (no registry id).
@@ -48,9 +100,12 @@ declare module 'vacps:process' {
     constructor(command: string, args?: readonly string[], options?: ProcessOptions);
 
     start(): Promise<void>;
-    write(data: string | ArrayBuffer | ArrayBufferView): Promise<number>;
+    write(data: string | ArrayBuffer | ArrayBufferView, closeStdin?: boolean): Promise<number>;
+    read(options?: ProcessReadOptions): Promise<ProcessReadResult>;
+    waitForExit(timeoutMs?: number): Promise<ProcessExitWait>;
+    snapshot(options?: ProcessSnapshotOptions): ProcessSnapshot;
     wait(): Promise<ProcessResult>;
-    terminate(signal?: 'SIGTERM' | 'SIGINT' | 'SIGKILL'): Promise<void>;
+    terminate(signal?: 'SIGTERM' | 'SIGINT' | 'SIGKILL', gracePeriodMs?: number): Promise<void>;
     close(): Promise<void>;
   }
 

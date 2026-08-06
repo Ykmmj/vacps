@@ -537,9 +537,13 @@ EOF
 # Optional runtime deps for tools (root provisioning; agent does not need sudo).
 install_agent_runtime_packages() {
   export DEBIAN_FRONTEND=noninteractive
-  # ripgrep accelerates files.grep/glob; Node fallback remains if install fails.
+  # ripgrep accelerates files.grep/glob; runtime falls back if install fails.
   apt-get install -y --no-install-recommends ripgrep 2>/dev/null || \
-    echo 'Note: ripgrep not installed; files.grep will use node_fallback.' >&2
+    echo 'Note: ripgrep not installed; files.grep will use a slower fallback.' >&2
+  # git enables MCP vacps.git.* helpers (compositions over /usr/bin/git + command.exec).
+  # Capability probe is authoritative if this optional package install fails.
+  apt-get install -y --no-install-recommends git 2>/dev/null || \
+    echo 'Note: git not installed; vacps.git tools remain unavailable until /usr/bin/git is present.' >&2
 }
 
 write_systemd_unit_node() {

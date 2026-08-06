@@ -372,15 +372,18 @@ TS：`script/types/vacps-process.d.ts`。
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `new Process(command, args?, options?)` | 未 spawn；options 同步解码；产品 composition 必须提供 `Runtime::Async` / `ProcessRuntime`                                                                         |
 | `start(): Promise<void>`                | 在 `main_executor` 上 spawn（`setpgid` 进程组）                                                                                                                   |
-| `write(data): Promise<number>`          | 串行 stdin 写；`string` / `ArrayBuffer` / `TypedArray`                                                                                                            |
+| `write(data, closeStdin?)`              | 串行 stdin 写；`string` / `ArrayBuffer` / `TypedArray`。可在同一串行操作末尾关闭 stdin                                                                             |
+| `read(options?)`                        | 从 `(sequence, byteOffset)` 游标增量读取 stdout/stderr；`maxBytes` ≤ 1MiB，`waitMs` ≤ 60s                                                                           |
+| `waitForExit(timeoutMs?)`               | 等待真实 reap + 两条 pipe drain；有 timeout 时超时返回 `completed=false`，不复制完整 capture                                                                        |
+| `snapshot(options?)`                    | 当前状态、stdin 可用性、精确 produced bytes/truncation，以及独立限额的 stdout/stderr preview                                                                        |
 | `wait(): Promise<ProcessResult>`        | 进程退出 **且** stdout/stderr drain 完成后返回 capture（handle 仍 open 时）；本身不释放 buffer                                                                    |
-| `terminate(signal?): Promise<void>`     | 信号进程组；在请求发出后 resolve（非等待退出）。`signal` 仅 `SIGTERM`/`SIGINT`/`SIGKILL`（缺省 SIGTERM）；未知字符串 **同步** TypeError                           |
+| `terminate(signal?, gracePeriodMs?)`    | 信号进程组；在请求发出后 resolve（非等待退出）。非 SIGKILL 可在 grace 后升级；未知信号名同步 TypeError                                                             |
 | `close(): Promise<void>`                | `async_close`：SIGKILL + 取消管道，await 真实 reap/drain 后释放 slot/buffer（使 native capture 失效；并发 outstanding `wait` 可能失败）。幂等；忽略 injected stop |
 | `run(command, args?, options?)`         | create→start→wait→close；默认 stdin `ignore`                                                                                                                      |
 
-`ProcessOptions`（诚实窄面）：`cwd?`、`timeoutMs?`（0/omit=无）、`stdin?: 'pipe' | 'ignore'`、`maxStdoutBytes?` / `maxStderrBytes?`（0..64MiB，0 不保留）。提供 `env` 或 `stdout`/`stderr` 模式键 → 同步 TypeError。无 `pid`/`running`/`read`。
+`ProcessOptions`（诚实窄面）：`cwd?`、`timeoutMs?`（0/omit=无）、`stdin?: 'pipe' | 'ignore'`、`maxStdoutBytes?` / `maxStderrBytes?`（0..64MiB，0 不保留）。提供 `env` 或 `stdout`/`stderr` 模式键 → 同步 TypeError。无 public `pid`/`running`。
 
-`ProcessResult`：`{ exitCode, timedOut, stdout, stderr }` 仅此四字段。
+`ProcessResult` 另含 `stdoutBytes` / `stderrBytes` 与各自 `*Truncated`，区分 retained preview 与实际 drained bytes。`ProcessExit` / `ProcessReadResult` / `ProcessSnapshot` 以 TS 声明为准。
 
 默认：`Process` 类 stdin pipe/open；`run` stdin ignore/closed。所有域工作在 `detail::Runtime::Impl::main_executor`；stop_token 经 dispose 桥到 owner executor（不在 callback 线程改域状态）。
 

@@ -17,18 +17,23 @@ import type { ControlPlaneState } from '../registration/control-plane-state';
 import { probeShellEnvironment } from '../runtime/shell-environment';
 import * as files from '../runtime/files';
 import { hashRequest, IdempotencyStore } from '../runtime/idempotency';
-import { execOneShot, NATIVE_STREAM_MAX_BYTES } from '../runtime/process-exec';
+import {
+  NATIVE_STREAM_MAX_BYTES,
+  PROCESS_READ_MAX_BYTES,
+  type ProcessSessions,
+} from '../runtime/process-sessions';
 import { allowUnsignedWhenNoKey, isPublicHttpPath } from '../security/http-auth';
 import { verifyControlPlaneRequest } from '../security/control-plane-verify';
 import type { LiveHealthState } from '../telemetry/liveness-health';
 import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
-import { utf8ByteSlice } from '../util/utf8';
+import { utf8ByteLengthOfString, utf8ByteSlice } from '../util/utf8';
 import { createApp, type App, type Reply } from './router';
 
 export interface CreateServerInput {
   config: AgentConfig;
   queue: TaskQueue;
   telemetry: NativeTelemetryCollector;
+  processes: ProcessSessions;
   getControlPlaneState: () => ControlPlaneState;
   isReady: () => boolean;
   /** Cheap public /health body (no telemetry/shell probes). */
@@ -758,7 +763,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  // ── Command / shell (completed one-shot via vacps:process run) ─────
+  // ── Command / shell / interactive process sessions ───────────────
   app.post('/exec/command', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.program !== 'string' || !body.program) {
@@ -797,24 +802,38 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return runtimeError(reply, error);
     }
     try {
-      return await withIdempotency(
+      return await withProcessIdempotency(
         idempotency,
+        input.processes,
         input.config.BACKEND_ID,
         'command.exec',
         body,
+        canonicalProcessArguments(body, ['yield_time_ms', 'stdout_max_bytes', 'stderr_max_bytes']),
+        {
+          stdoutMaxBytes: numeric.stdoutMaxBytes,
+          stderrMaxBytes: numeric.stderrMaxBytes,
+        },
         async () => ({
           ok: true,
-          ...(await execOneShot(input.config.BACKEND_ID, {
-            kind: 'command',
-            program: body.program as string,
-            ...(args ? { arguments: args } : {}),
-            ...(typeof body.working_directory === 'string'
-              ? { workingDirectory: body.working_directory }
-              : {}),
-            timeoutMs: numeric.timeoutMs,
-            stdoutMaxBytes: numeric.stdoutMaxBytes,
-            stderrMaxBytes: numeric.stderrMaxBytes,
-          })),
+          ...(await input.processes.exec(
+            {
+              kind: 'command',
+              program: body.program as string,
+              ...(args ? { arguments: args } : {}),
+              ...(typeof body.working_directory === 'string'
+                ? { workingDirectory: body.working_directory }
+                : {}),
+              timeoutMs: numeric.timeoutMs,
+              stdoutHardMaxBytes: 16 * 1024 * 1024,
+              stderrHardMaxBytes: 16 * 1024 * 1024,
+              stdin: 'ignore',
+            },
+            {
+              stdoutMaxBytes: numeric.stdoutMaxBytes,
+              stderrMaxBytes: numeric.stderrMaxBytes,
+            },
+            numeric.yieldMs,
+          )),
         }),
       );
     } catch (error) {
@@ -882,27 +901,294 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return runtimeError(reply, error);
     }
     try {
-      return await withIdempotency(
+      return await withProcessIdempotency(
         idempotency,
+        input.processes,
         input.config.BACKEND_ID,
         'shell.exec',
         body,
+        canonicalProcessArguments(body, ['yield_time_ms', 'stdout_max_bytes', 'stderr_max_bytes']),
+        {
+          stdoutMaxBytes: numeric.stdoutMaxBytes,
+          stderrMaxBytes: numeric.stderrMaxBytes,
+        },
         async () => ({
           ok: true,
-          ...(await execOneShot(input.config.BACKEND_ID, {
-            kind: 'shell',
-            command: body.command as string,
-            shell,
-            loadUserEnvironment,
-            ...(typeof body.working_directory === 'string'
-              ? { workingDirectory: body.working_directory }
-              : {}),
-            timeoutMs: numeric.timeoutMs,
-            stdoutMaxBytes: numeric.stdoutMaxBytes,
-            stderrMaxBytes: numeric.stderrMaxBytes,
-          })),
+          ...(await input.processes.exec(
+            {
+              kind: 'shell',
+              command: body.command as string,
+              shell,
+              loadUserEnvironment,
+              ...(typeof body.working_directory === 'string'
+                ? { workingDirectory: body.working_directory }
+                : {}),
+              timeoutMs: numeric.timeoutMs,
+              stdoutHardMaxBytes: 16 * 1024 * 1024,
+              stderrHardMaxBytes: 16 * 1024 * 1024,
+              stdin: 'ignore',
+            },
+            {
+              stdoutMaxBytes: numeric.stdoutMaxBytes,
+              stderrMaxBytes: numeric.stderrMaxBytes,
+            },
+            numeric.yieldMs,
+          )),
         }),
       );
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/start_command', async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.program !== 'string' || body.program.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'program is required.' } });
+    }
+    const unsupported = rejectUnsupportedProcessStartFields(body);
+    if (unsupported) return reply.code(unsupported.status).send(unsupported.body);
+    if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'working_directory must be a string when present.',
+        },
+      });
+    }
+    let args: string[] | undefined;
+    if (body.arguments !== undefined) {
+      if (!isStringArray(body.arguments)) {
+        return reply.code(400).send({
+          error: {
+            code: 'validation_error',
+            message: 'arguments must be an array of strings when present.',
+          },
+        });
+      }
+      args = body.arguments;
+    }
+    try {
+      const options = parseProcessStartOptions(body);
+      return await withProcessIdempotency(
+        idempotency,
+        input.processes,
+        input.config.BACKEND_ID,
+        'process.start_command',
+        body,
+        canonicalProcessArguments(body),
+        { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
+        async () => ({
+          ok: true,
+          ...(await input.processes.start(
+            {
+              kind: 'command',
+              program: body.program as string,
+              ...(args ? { arguments: args } : {}),
+              ...(typeof body.working_directory === 'string'
+                ? { workingDirectory: body.working_directory }
+                : {}),
+              timeoutMs: options.timeoutMs,
+              stdoutHardMaxBytes: options.stdoutHardMaxBytes,
+              stderrHardMaxBytes: options.stderrHardMaxBytes,
+              stdin: 'pipe',
+            },
+            { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
+          )),
+        }),
+      );
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/start_shell', async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.command !== 'string' || body.command.trim().length === 0) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'command is required.' } });
+    }
+    const unsupported = rejectUnsupportedProcessStartFields(body);
+    if (unsupported) return reply.code(unsupported.status).send(unsupported.body);
+    if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'working_directory must be a string when present.',
+        },
+      });
+    }
+    let shell: '/bin/bash' | '/bin/sh' = '/bin/bash';
+    if (body.shell !== undefined) {
+      if (body.shell !== '/bin/bash' && body.shell !== '/bin/sh') {
+        return reply.code(400).send({
+          error: {
+            code: 'validation_error',
+            message: 'shell must be exactly /bin/bash or /bin/sh when present.',
+          },
+        });
+      }
+      shell = body.shell;
+    }
+    if (
+      body.load_user_environment !== undefined &&
+      typeof body.load_user_environment !== 'boolean'
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'load_user_environment must be a boolean when present.',
+        },
+      });
+    }
+    if (shell === '/bin/sh' && body.load_user_environment === true) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message:
+            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or omit/false.',
+        },
+      });
+    }
+    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
+    try {
+      const options = parseProcessStartOptions(body);
+      return await withProcessIdempotency(
+        idempotency,
+        input.processes,
+        input.config.BACKEND_ID,
+        'process.start_shell',
+        body,
+        canonicalProcessArguments(body),
+        { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
+        async () => ({
+          ok: true,
+          ...(await input.processes.start(
+            {
+              kind: 'shell',
+              command: body.command as string,
+              shell,
+              loadUserEnvironment,
+              ...(typeof body.working_directory === 'string'
+                ? { workingDirectory: body.working_directory }
+                : {}),
+              timeoutMs: options.timeoutMs,
+              stdoutHardMaxBytes: options.stdoutHardMaxBytes,
+              stderrHardMaxBytes: options.stderrHardMaxBytes,
+              stdin: 'pipe',
+            },
+            { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
+          )),
+        }),
+      );
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/read', async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.process_id !== 'string' || body.process_id.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+    }
+    if (body.cursor !== undefined && typeof body.cursor !== 'string') {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'cursor must be a string when present.' },
+      });
+    }
+    try {
+      const maxBytes = readOptionalIntField(body, 'max_bytes', 65_536, 1, PROCESS_READ_MAX_BYTES);
+      const waitMs = readOptionalIntField(body, 'wait_ms', 0, 0, 60_000);
+      return {
+        ok: true,
+        ...(await input.processes.read(
+          body.process_id,
+          typeof body.cursor === 'string' ? body.cursor : undefined,
+          maxBytes,
+          waitMs,
+        )),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/write', async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.process_id !== 'string' || body.process_id.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+    }
+    if (typeof body.data !== 'string') {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'data must be a string.' } });
+    }
+    if (utf8ByteLengthOfString(body.data) > PROCESS_READ_MAX_BYTES) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: `data must be at most ${PROCESS_READ_MAX_BYTES} UTF-8 bytes.`,
+        },
+      });
+    }
+    if (body.close_stdin !== undefined && typeof body.close_stdin !== 'boolean') {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'close_stdin must be a boolean when present.',
+        },
+      });
+    }
+    try {
+      const written = await input.processes.write(
+        body.process_id,
+        body.data,
+        body.close_stdin === true,
+      );
+      return { ok: true, process_id: body.process_id, written_bytes: written };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/process/terminate', async (request, reply) => {
+    const body = asRecord(request.body);
+    if (typeof body.process_id !== 'string' || body.process_id.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+    }
+    if (
+      body.signal !== undefined &&
+      body.signal !== 'sigterm' &&
+      body.signal !== 'sigint' &&
+      body.signal !== 'sigkill'
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'signal must be sigterm, sigint, or sigkill.',
+        },
+      });
+    }
+    try {
+      const gracePeriodMs = readOptionalIntField(body, 'grace_period_ms', 3_000, 0, 60_000);
+      return {
+        ok: true,
+        ...(await input.processes.terminate(
+          body.process_id,
+          body.signal === 'sigint' || body.signal === 'sigkill' ? body.signal : 'sigterm',
+          gracePeriodMs,
+          { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
+        )),
+      };
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -1073,7 +1359,7 @@ function processStreamMeta(
   return { totalBytes, nativeTruncated };
 }
 
-/** Shared in-memory idempotency for mutating file tools and completed /exec results. */
+/** Shared in-memory idempotency for mutating file tools and process creation. */
 async function withIdempotency(
   store: IdempotencyStore,
   backendId: string,
@@ -1089,6 +1375,48 @@ async function withIdempotency(
   });
   const { result, replayed } = await store.execute(toolName, key, requestHash, run);
   return store.withIdempotencyMeta(key, requestHash, replayed, result);
+}
+
+/**
+ * Process idempotency stores only the initial protocol snapshot. Replays are
+ * refreshed from the still-owned JS Process session so status/output never go
+ * stale. Observation-only yield/preview fields are excluded by the caller from
+ * the work identity.
+ */
+async function withProcessIdempotency(
+  store: IdempotencyStore,
+  processes: ProcessSessions,
+  backendId: string,
+  toolName: string,
+  body: Record<string, unknown>,
+  workArguments: Record<string, unknown>,
+  preview: { stdoutMaxBytes: number; stderrMaxBytes: number },
+  run: () => Promise<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  const key = typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined;
+  const requestHash = hashRequest({
+    tool_name: toolName,
+    backend_id: backendId,
+    arguments: workArguments,
+  });
+  const { result: initial, replayed } = await store.execute(toolName, key, requestHash, run);
+  const processId = initial.process_id;
+  if (typeof processId !== 'string') {
+    throw new Error(`${toolName} did not return a process_id.`);
+  }
+  if (key !== undefined && !replayed) {
+    processes.retainForIdempotencyReplay(processId);
+  }
+  const result = replayed ? { ok: true, ...processes.snapshotById(processId, preview) } : initial;
+  return store.withIdempotencyMeta(key, requestHash, replayed, result);
+}
+
+function canonicalProcessArguments(
+  body: Record<string, unknown>,
+  observationFields: readonly string[] = [],
+): Record<string, unknown> {
+  const excluded = new Set(['backend_id', 'idempotency_key', ...observationFields]);
+  return Object.fromEntries(Object.entries(body).filter(([key]) => !excluded.has(key)));
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -1111,19 +1439,6 @@ function rejectUnsupportedExecFields(
       },
     };
   }
-  if (body.yield_time_ms !== undefined) {
-    return {
-      status: 409,
-      body: {
-        error: {
-          code: 'capability_unavailable',
-          message:
-            'yield_time_ms is not supported; native one-shot execution does not return a live queryable handle.',
-          details: { capability: 'yield_time_ms' },
-        },
-      },
-    };
-  }
   // Shared command/shell protocol does not define hard-max capture fields.
   for (const field of ['stdout_hard_max_bytes', 'stderr_hard_max_bytes'] as const) {
     if (body[field] !== undefined) {
@@ -1132,7 +1447,7 @@ function rejectUnsupportedExecFields(
         body: {
           error: {
             code: 'validation_error',
-            message: `${field} is not supported on /exec; native one-shot capture uses a fixed internal cap.`,
+            message: `${field} is not supported on /exec; native exec sessions use a fixed internal cap.`,
             details: { field },
           },
         },
@@ -1142,20 +1457,97 @@ function rejectUnsupportedExecFields(
   return null;
 }
 
+function rejectUnsupportedProcessStartFields(
+  body: Record<string, unknown>,
+): { status: number; body: Record<string, unknown> } | null {
+  if (body.environment !== undefined) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message: 'Process environment injection is not supported on this backend.',
+          details: { capability: 'environment' },
+        },
+      },
+    };
+  }
+  if (body.tty !== undefined && typeof body.tty !== 'boolean') {
+    return {
+      status: 400,
+      body: {
+        error: {
+          code: 'validation_error',
+          message: 'tty must be a boolean when present.',
+        },
+      },
+    };
+  }
+  if (body.tty === true) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'capability_unavailable',
+          message: 'PTY/TTY processes are not supported on this backend.',
+          details: { capability: 'tty' },
+        },
+      },
+    };
+  }
+  return null;
+}
+
+function parseProcessStartOptions(body: Record<string, unknown>): {
+  timeoutMs: number;
+  stdoutHardMaxBytes: number;
+  stderrHardMaxBytes: number;
+} {
+  return {
+    timeoutMs: readOptionalIntField(body, 'timeout_ms', 3_600_000, 1, 3_600_000),
+    stdoutHardMaxBytes: readOptionalIntField(
+      body,
+      'stdout_hard_max_bytes',
+      NATIVE_STREAM_MAX_BYTES,
+      0,
+      NATIVE_STREAM_MAX_BYTES,
+    ),
+    stderrHardMaxBytes: readOptionalIntField(
+      body,
+      'stderr_hard_max_bytes',
+      NATIVE_STREAM_MAX_BYTES,
+      0,
+      NATIVE_STREAM_MAX_BYTES,
+    ),
+  };
+}
+
 /**
  * Wide-boundary optional integer fields for /exec.
  * Defaults applied only when absent; invalid values throw validation_error (no clamp).
  */
 function parseExecNumericOptions(body: Record<string, unknown>): {
   timeoutMs: number;
+  yieldMs: number | undefined;
   stdoutMaxBytes: number;
   stderrMaxBytes: number;
 } {
   return {
     timeoutMs: readOptionalIntField(body, 'timeout_ms', 120_000, 1, 3_600_000),
+    yieldMs: readOptionalIntFieldWhenPresent(body, 'yield_time_ms', 1, 120_000),
     stdoutMaxBytes: readOptionalIntField(body, 'stdout_max_bytes', 16_384, 0, 1_048_576),
     stderrMaxBytes: readOptionalIntField(body, 'stderr_max_bytes', 16_384, 0, 1_048_576),
   };
+}
+
+function readOptionalIntFieldWhenPresent(
+  body: Record<string, unknown>,
+  field: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (body[field] === undefined) return undefined;
+  return readOptionalIntField(body, field, min, min, max);
 }
 
 function readOptionalIntField(
