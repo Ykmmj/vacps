@@ -14,7 +14,7 @@ export NVM_DIR=/usr/local/lib/vacps/nvm
 NODE_MAJOR_VERSION=24
 # Agent runtime: node (default, apps/vacps) | native (static musl binary + vacps.mjs)
 AGENT_RUNTIME=node
-NATIVE_VERSION=0.1.7
+NATIVE_VERSION=0.1.8
 NATIVE_INSTALL_DIR=/opt/vacps/native
 NATIVE_BIN_NAME=vacps-agent-linux-x86_64
 NATIVE_SCRIPT_NAME=vacps.mjs
@@ -87,7 +87,7 @@ Required for --runtime node:
   --redis-url <url>         Redis URL: prefer rediss://; redis:// only on private networks.
 
 Optional for --runtime native:
-  --native-version <ver>    GitHub release version (default: 0.1.7 → tag vacps-native-v0.1.7).
+  --native-version <ver>    GitHub release version (default: 0.1.8 → tag vacps-native-v0.1.8).
   --native-github-repo <o/r>
                             owner/repo for release assets (default: Ykmmj/vacps).
   --repo <git-url>          Optional; used only if you prefer building from source later.
@@ -581,11 +581,9 @@ Environment=USER=$SERVICE_USER
 Environment=LOGNAME=$SERVICE_USER
 Environment=SHELL=/bin/bash
 EnvironmentFile=$ENVIRONMENT_FILE
-Environment=VACPS_DATA_DIR=$DATA_DIRECTORY
-Environment=VACPS_SCRIPT=$NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME
 Environment=VACPS_LISTEN_HOST=127.0.0.1
 Environment=VACPS_LISTEN_PORT=$agent_port
-ExecStart=$NATIVE_INSTALL_DIR/$NATIVE_BIN_NAME --script $NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME --data-dir $DATA_DIRECTORY --host 127.0.0.1 --port $agent_port
+ExecStart=$NATIVE_INSTALL_DIR/$NATIVE_BIN_NAME --script $NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME --data-dir $DATA_DIRECTORY
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -845,6 +843,12 @@ refresh_env_keys() {
   fi
 }
 
+remove_obsolete_native_env_keys() {
+  # Native process options are CLI-only. Listening remains JavaScript product
+  # policy through VACPS_LISTEN_HOST / VACPS_LISTEN_PORT.
+  sed -i -e '/^VACPS_DATA_DIR=/d' -e '/^VACPS_SCRIPT=/d' "$ENVIRONMENT_FILE"
+}
+
 upgrade_agent() {
   while (($#)); do
     case "$1" in
@@ -887,6 +891,7 @@ upgrade_agent() {
     echo "Upgrading native VACPS installation for $BACKEND_ID (version: $NATIVE_VERSION)."
     install_native_binaries "$NATIVE_VERSION"
     refresh_env_keys
+    remove_obsolete_native_env_keys
     ensure_service_user
     install_agent_runtime_packages
     install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
@@ -969,8 +974,6 @@ CONTROL_PLANE_URL=$CONTROL_PLANE_URL
 PUBLIC_BASE_URL=$PUBLIC_BASE_URL
 REGISTRATION_INTERVAL_SECONDS=300
 TELEMETRY_FALLBACK_INTERVAL_SECONDS=120
-VACPS_DATA_DIR=$DATA_DIRECTORY
-VACPS_SCRIPT=$NATIVE_INSTALL_DIR/$NATIVE_SCRIPT_NAME
 VACPS_LISTEN_HOST=127.0.0.1
 VACPS_LISTEN_PORT=3100
 DATABASE_PATH=$DATA_DIRECTORY/agent.db
