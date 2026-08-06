@@ -153,7 +153,8 @@ jobs:
             ```bash
             tar -xzf vacps-native-${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz
             ./vacps-agent-linux-x86_64 --version
-            ./vacps-agent-linux-x86_64 --script ./vacps.mjs --port 8788 --data-dir ./data
+            VACPS_ALLOW_INSECURE_NO_AUTH=1 VACPS_LISTEN_PORT=8788 \
+              ./vacps-agent-linux-x86_64 --script ./vacps.mjs --data-dir ./data
             ```
 
             Built from `${{ github.sha }}` via `apps/vacps-native/docker/build.sh release`.
