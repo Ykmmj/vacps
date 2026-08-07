@@ -1169,7 +1169,6 @@ export function createMcpServer(env: Env): McpServer {
         arguments: ['status', '--short'],
         working_directory: parsed.working_directory,
         timeout_ms: 60_000,
-        yield_time_ms: 5_000,
       })) as Record<string, unknown>;
       return withOperationSucceeded(raw);
     }),
@@ -1192,7 +1191,6 @@ export function createMcpServer(env: Env): McpServer {
         arguments: arguments_,
         working_directory: parsed.working_directory,
         timeout_ms: 60_000,
-        yield_time_ms: 5_000,
         stdout_max_bytes: 65_536,
       })) as Record<string, unknown>;
       return withOperationSucceeded(raw);
@@ -1229,7 +1227,6 @@ export function createMcpServer(env: Env): McpServer {
           arguments: parsed.check === true ? ['apply', '--check', path] : ['apply', path],
           working_directory: parsed.working_directory,
           timeout_ms: 60_000,
-          yield_time_ms: 5_000,
           ...(parsed.idempotency_key
             ? { idempotency_key: `git-apply:${parsed.idempotency_key}` }
             : {}),

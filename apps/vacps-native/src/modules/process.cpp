@@ -73,11 +73,8 @@ struct StopBridge {
   return StopBridge{
       std::move(stop),
       [weak = std::move(weak)]() noexcept {
-        try {
-          if (auto p = weak.lock()) {
-            p->dispose();
-          }
-        } catch (...) {
+        if (auto process = weak.lock()) {
+          process->dispose();
         }
       }};
 }
@@ -183,18 +180,65 @@ int initialize_process(JSContext* ctx, JSModuleDef* m) noexcept {
                 "write",
                 [](std::stop_token stop,
                    std::shared_ptr<proc::Process> self,
-                   pm::WritePayload payload) mutable
+                   pm::WritePayload payload,
+                   pm::CloseStdin close_stdin) mutable
                     -> runtime::Task<std::size_t> {
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled_err("write"));
                   }
                   auto bridge = make_process_stop_bridge(stop, self);
                   auto written = map_proc_result(
-                      co_await self->write(std::move(payload.data)));
+                      co_await self->write(
+                          std::move(payload.data), close_stdin.value));
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled_err("write"));
                   }
                   co_return written;
+                },
+                2)
+            .async_method(
+                "read",
+                [](std::stop_token stop,
+                   std::shared_ptr<proc::Process> self,
+                   pm::ReadOptionsDecode decoded) mutable
+                    -> runtime::Task<proc::ReadResult> {
+                  if (stop.stop_requested()) {
+                    co_return std::unexpected(cancelled_err("read"));
+                  }
+                  auto bridge = make_process_stop_bridge(stop, self);
+                  proc::ReadResult result =
+                      co_await self->read(std::move(decoded.options));
+                  if (stop.stop_requested()) {
+                    co_return std::unexpected(cancelled_err("read"));
+                  }
+                  co_return result;
+                },
+                1)
+            .async_method(
+                "waitForExit",
+                [](std::stop_token stop,
+                   std::shared_ptr<proc::Process> self,
+                   pm::ExitWait wait) mutable
+                    -> runtime::Task<proc::ExitWaitResult> {
+                  if (stop.stop_requested()) {
+                    co_return std::unexpected(cancelled_err("waitForExit"));
+                  }
+                  auto bridge = make_process_stop_bridge(stop, self);
+                  proc::ExitWaitResult result =
+                      co_await self->wait_for_exit(wait.timeout);
+                  if (stop.stop_requested()) {
+                    co_return std::unexpected(cancelled_err("waitForExit"));
+                  }
+                  co_return result;
+                },
+                1)
+            .method(
+                "snapshot",
+                [](const proc::Process& self,
+                   pm::SnapshotOptionsDecode decoded)
+                    -> proc::ProcessSnapshot {
+                  return self.snapshot(
+                      decoded.stdout_bytes, decoded.stderr_bytes);
                 },
                 1)
             .async_method(
@@ -217,15 +261,17 @@ int initialize_process(JSContext* ctx, JSModuleDef* m) noexcept {
                 "terminate",
                 [](std::stop_token stop,
                    std::shared_ptr<proc::Process> self,
-                   pm::TerminateSignal sig) mutable
+                   pm::TerminateSignal sig,
+                   pm::GracePeriod grace) mutable
                     -> runtime::Task<void> {
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled_err("terminate"));
                   }
                   // Resolves after the signal request, not after exit.
-                  co_return map_proc_void(self->terminate(sig.signo));
+                  co_return map_proc_void(
+                      self->terminate(sig.signo, grace.value));
                 },
-                1)
+                2)
             .async_method(
                 "close",
                 [](std::stop_token /*stop*/,

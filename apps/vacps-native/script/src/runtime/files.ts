@@ -819,16 +819,23 @@ export async function detectCapabilities() {
   } catch {
     rgAvailable = false;
   }
+  // MCP Git helpers compose over this exact path via command.exec.
+  let gitTools = false;
+  try {
+    const r = await process.run('/usr/bin/git', ['--version'], { timeoutMs: 3_000 });
+    gitTools = r.exitCode === 0;
+  } catch {
+    gitTools = false;
+  }
   // Schema v3 nested shape used by control-worker (no process start/read/write object).
   return {
     schema_version: '3.0',
     features: {
       command_exec: true,
       shell_exec: true,
-      interactive_process: false,
+      interactive_process: true,
       file_patch: true,
-      // No git tool routes registered on this script.
-      git_tools: false,
+      git_tools: gitTools,
     },
     engines: {
       grep: {
@@ -846,8 +853,7 @@ export async function detectCapabilities() {
     },
     limits: {
       command_timeout_max_ms: 3_600_000,
-      // Interactive process read is unsupported on native.
-      process_read_max_bytes: 0,
+      process_read_max_bytes: 1_048_576,
       file_read_max_bytes: 262_144,
     },
     pi: { available: false },

@@ -55,6 +55,27 @@ struct WritePayload {
   std::string data;
 };
 
+struct CloseStdin {
+  bool value{false};
+};
+
+struct GracePeriod {
+  std::chrono::milliseconds value{3000};
+};
+
+struct ExitWait {
+  std::optional<std::chrono::milliseconds> timeout;
+};
+
+struct ReadOptionsDecode {
+  vacps::process::ReadOptions options;
+};
+
+struct SnapshotOptionsDecode {
+  std::size_t stdout_bytes{16 * 1024};
+  std::size_t stderr_bytes{16 * 1024};
+};
+
 }  // namespace vacps::js::process_module
 
 namespace vacps::binding {
@@ -69,6 +90,9 @@ inline constexpr std::int64_t k_max_timeout_ms = 3'600'000;  // 1 hour
 inline constexpr std::uint64_t k_min_max_bytes = 0;
 inline constexpr std::uint64_t k_max_max_bytes = 64ull * 1024ull * 1024ull;
 inline constexpr std::uint64_t k_default_max_bytes = 16ull * 1024ull * 1024ull;
+inline constexpr std::uint64_t k_max_protocol_read_bytes = 1024ull * 1024ull;
+inline constexpr std::int64_t k_max_read_wait_ms = 60'000;
+inline constexpr std::uint64_t k_max_safe_integer = 9'007'199'254'740'991ull;
 
 [[nodiscard]] inline bool is_nullish(JSValueConst v) noexcept {
   return JS_IsUndefined(v) || JS_IsNull(v);
@@ -189,6 +213,85 @@ inline constexpr std::uint64_t k_default_max_bytes = 16ull * 1024ull * 1024ull;
     out.push_back(std::move(*s));
   }
   return out;
+}
+
+[[nodiscard]] inline std::string_view status_name(
+    vacps::process::ProcessStatus status) noexcept {
+  using vacps::process::ProcessStatus;
+  switch (status) {
+    case ProcessStatus::Created:
+    case ProcessStatus::Starting:
+    case ProcessStatus::Running:
+      return "running";
+    case ProcessStatus::Exited:
+      return "exited";
+    case ProcessStatus::Signaled:
+      return "signaled";
+    case ProcessStatus::TimedOut:
+      return "timed_out";
+    case ProcessStatus::Cancelled:
+    case ProcessStatus::Closing:
+    case ProcessStatus::Closed:
+      return "cancelled";
+  }
+  return "cancelled";
+}
+
+[[nodiscard]] inline std::string signal_name(int signal) {
+  switch (signal) {
+    case SIGTERM:
+      return "SIGTERM";
+    case SIGINT:
+      return "SIGINT";
+    case SIGKILL:
+      return "SIGKILL";
+    default:
+      return std::format("SIG{}", signal);
+  }
+}
+
+[[nodiscard]] inline bool set_property(
+    Env env,
+    JSValueConst object,
+    const char* key,
+    qjs::OwnedValue value) {
+  if (value.is_exception()) {
+    return false;
+  }
+  return JS_SetPropertyStr(env.context(), object, key, value.release()) >= 0;
+}
+
+[[nodiscard]] inline bool set_exit_properties(
+    Env env,
+    JSValueConst object,
+    const vacps::process::ExitResult& exit) {
+  if (!set_property(
+          env,
+          object,
+          "status",
+          env.string(status_name(exit.status)))) {
+    return false;
+  }
+  if (!set_property(
+          env,
+          object,
+          "exitCode",
+          exit.exit_code.has_value()
+              ? Converter<std::int32_t>::to_js(env, *exit.exit_code)
+              : env.null_value())) {
+    return false;
+  }
+  if (!set_property(
+          env,
+          object,
+          "signal",
+          exit.signal.has_value()
+              ? env.string(signal_name(*exit.signal))
+              : env.null_value())) {
+    return false;
+  }
+  return set_property(
+      env, object, "timedOut", Converter<bool>::to_js(env, exit.timed_out));
 }
 
 }  // namespace process_detail
@@ -412,6 +515,190 @@ struct Converter<vacps::js::process_module::WritePayload> {
 };
 
 template <>
+struct Converter<vacps::js::process_module::CloseStdin> {
+  static Result<vacps::js::process_module::CloseStdin> from_js(
+      Env env,
+      JSValueConst v) {
+    if (process_detail::is_nullish(v)) {
+      return vacps::js::process_module::CloseStdin{};
+    }
+    auto close = Converter<bool>::from_js(env, v);
+    if (!close) {
+      return std::unexpected(Error::type("closeStdin must be a boolean"));
+    }
+    return vacps::js::process_module::CloseStdin{*close};
+  }
+};
+
+template <>
+struct Converter<vacps::js::process_module::GracePeriod> {
+  static Result<vacps::js::process_module::GracePeriod> from_js(
+      Env env,
+      JSValueConst v) {
+    if (process_detail::is_nullish(v)) {
+      return vacps::js::process_module::GracePeriod{};
+    }
+    auto ms = process_detail::bounded_u64(
+        env, v, "gracePeriodMs", 0, process_detail::k_max_read_wait_ms);
+    if (!ms) {
+      return std::unexpected(std::move(ms.error()));
+    }
+    return vacps::js::process_module::GracePeriod{
+        std::chrono::milliseconds{static_cast<std::int64_t>(*ms)}};
+  }
+};
+
+template <>
+struct Converter<vacps::js::process_module::ExitWait> {
+  static Result<vacps::js::process_module::ExitWait> from_js(
+      Env env,
+      JSValueConst v) {
+    if (process_detail::is_nullish(v)) {
+      return vacps::js::process_module::ExitWait{};
+    }
+    auto ms = process_detail::bounded_u64(
+        env, v, "timeoutMs", 0, process_detail::k_max_timeout_ms);
+    if (!ms) {
+      return std::unexpected(std::move(ms.error()));
+    }
+    return vacps::js::process_module::ExitWait{
+        std::chrono::milliseconds{static_cast<std::int64_t>(*ms)}};
+  }
+};
+
+template <>
+struct Converter<vacps::js::process_module::ReadOptionsDecode> {
+  static Result<vacps::js::process_module::ReadOptionsDecode> from_js(
+      Env env,
+      JSValueConst v) {
+    vacps::js::process_module::ReadOptionsDecode out;
+    if (process_detail::is_nullish(v)) {
+      return out;
+    }
+    if (auto ok = process_detail::require_plain_object(env, v, "read options"); !ok) {
+      return std::unexpected(std::move(ok.error()));
+    }
+
+    auto sequence_v = process_detail::get_prop(env, v, "sequence");
+    if (!sequence_v) {
+      return std::unexpected(std::move(sequence_v.error()));
+    }
+    if (!process_detail::is_nullish(sequence_v->get())) {
+      auto sequence = process_detail::bounded_u64(
+          env,
+          sequence_v->get(),
+          "sequence",
+          1,
+          process_detail::k_max_safe_integer);
+      if (!sequence) {
+        return std::unexpected(std::move(sequence.error()));
+      }
+      out.options.cursor.sequence = *sequence;
+    }
+
+    auto offset_v = process_detail::get_prop(env, v, "byteOffset");
+    if (!offset_v) {
+      return std::unexpected(std::move(offset_v.error()));
+    }
+    if (!process_detail::is_nullish(offset_v->get())) {
+      auto offset = process_detail::bounded_u64(
+          env,
+          offset_v->get(),
+          "byteOffset",
+          0,
+          process_detail::k_max_protocol_read_bytes);
+      if (!offset) {
+        return std::unexpected(std::move(offset.error()));
+      }
+      out.options.cursor.byte_offset = static_cast<std::size_t>(*offset);
+    }
+
+    auto max_v = process_detail::get_prop(env, v, "maxBytes");
+    if (!max_v) {
+      return std::unexpected(std::move(max_v.error()));
+    }
+    if (!process_detail::is_nullish(max_v->get())) {
+      auto max_bytes = process_detail::bounded_u64(
+          env,
+          max_v->get(),
+          "maxBytes",
+          1,
+          process_detail::k_max_protocol_read_bytes);
+      if (!max_bytes) {
+        return std::unexpected(std::move(max_bytes.error()));
+      }
+      out.options.max_bytes = static_cast<std::size_t>(*max_bytes);
+    }
+
+    auto wait_v = process_detail::get_prop(env, v, "waitMs");
+    if (!wait_v) {
+      return std::unexpected(std::move(wait_v.error()));
+    }
+    if (!process_detail::is_nullish(wait_v->get())) {
+      auto wait = process_detail::bounded_u64(
+          env,
+          wait_v->get(),
+          "waitMs",
+          0,
+          process_detail::k_max_read_wait_ms);
+      if (!wait) {
+        return std::unexpected(std::move(wait.error()));
+      }
+      out.options.wait =
+          std::chrono::milliseconds{static_cast<std::int64_t>(*wait)};
+    }
+
+    return out;
+  }
+};
+
+template <>
+struct Converter<vacps::js::process_module::SnapshotOptionsDecode> {
+  static Result<vacps::js::process_module::SnapshotOptionsDecode> from_js(
+      Env env,
+      JSValueConst v) {
+    vacps::js::process_module::SnapshotOptionsDecode out;
+    if (process_detail::is_nullish(v)) {
+      return out;
+    }
+    if (auto ok = process_detail::require_plain_object(env, v, "snapshot options"); !ok) {
+      return std::unexpected(std::move(ok.error()));
+    }
+
+    auto decode_limit = [env, v](
+                            const char* key,
+                            std::size_t& target) -> Result<void> {
+      auto value = process_detail::get_prop(env, v, key);
+      if (!value) {
+        return std::unexpected(std::move(value.error()));
+      }
+      if (process_detail::is_nullish(value->get())) {
+        return {};
+      }
+      auto bytes = process_detail::bounded_u64(
+          env,
+          value->get(),
+          key,
+          0,
+          process_detail::k_max_protocol_read_bytes);
+      if (!bytes) {
+        return std::unexpected(std::move(bytes.error()));
+      }
+      target = static_cast<std::size_t>(*bytes);
+      return {};
+    };
+
+    if (auto decoded = decode_limit("stdoutMaxBytes", out.stdout_bytes); !decoded) {
+      return std::unexpected(std::move(decoded.error()));
+    }
+    if (auto decoded = decode_limit("stderrMaxBytes", out.stderr_bytes); !decoded) {
+      return std::unexpected(std::move(decoded.error()));
+    }
+    return out;
+  }
+};
+
+template <>
 struct Converter<vacps::process::RunResult> {
   static qjs::OwnedValue to_js(
       Env env,
@@ -469,6 +756,200 @@ struct Converter<vacps::process::RunResult> {
 
   static qjs::OwnedValue to_js(Env env, vacps::process::RunResult&& r) {
     return to_js(env, static_cast<const vacps::process::RunResult&>(r));
+  }
+};
+
+template <>
+struct Converter<vacps::process::ExitResult> {
+  static qjs::OwnedValue to_js(
+      Env env,
+      const vacps::process::ExitResult& result) {
+    qjs::OwnedValue object = env.new_object();
+    if (object.is_exception()) {
+      return object;
+    }
+    if (!process_detail::set_exit_properties(env, object.get(), result)) {
+      return qjs::OwnedValue::take(env.context(), JS_EXCEPTION);
+    }
+    return object;
+  }
+
+  static qjs::OwnedValue to_js(Env env, vacps::process::ExitResult&& result) {
+    return to_js(env, static_cast<const vacps::process::ExitResult&>(result));
+  }
+};
+
+template <>
+struct Converter<vacps::process::ExitWaitResult> {
+  static qjs::OwnedValue to_js(
+      Env env,
+      const vacps::process::ExitWaitResult& result) {
+    qjs::OwnedValue object = env.new_object();
+    if (object.is_exception()) {
+      return object;
+    }
+    if (!process_detail::set_exit_properties(env, object.get(), result.exit) ||
+        !process_detail::set_property(
+            env,
+            object.get(),
+            "completed",
+            env.boolean(result.completed))) {
+      return qjs::OwnedValue::take(env.context(), JS_EXCEPTION);
+    }
+    return object;
+  }
+
+  static qjs::OwnedValue to_js(
+      Env env,
+      vacps::process::ExitWaitResult&& result) {
+    return to_js(env, static_cast<const vacps::process::ExitWaitResult&>(result));
+  }
+};
+
+template <>
+struct Converter<vacps::process::ReadResult> {
+  static qjs::OwnedValue to_js(
+      Env env,
+      const vacps::process::ReadResult& result) {
+    JSContext* ctx = env.context();
+    qjs::OwnedValue object = env.new_object();
+    if (object.is_exception()) {
+      return object;
+    }
+    if (!process_detail::set_exit_properties(env, object.get(), result.exit)) {
+      return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+    }
+
+    qjs::OwnedValue chunks = env.new_array();
+    if (chunks.is_exception()) {
+      return chunks;
+    }
+    for (std::size_t i = 0; i < result.chunks.size(); ++i) {
+      const vacps::process::OutputChunk& chunk = result.chunks[i];
+      qjs::OwnedValue item = env.new_object();
+      if (item.is_exception()) {
+        return item;
+      }
+      const bool encoded =
+          process_detail::set_property(
+              env,
+              item.get(),
+              "sequence",
+              env.float64(static_cast<double>(chunk.sequence))) &&
+          process_detail::set_property(
+              env,
+              item.get(),
+              "stream",
+              env.string(
+                  chunk.stream == vacps::process::ProcessStream::Stdout
+                      ? "stdout"
+                      : "stderr")) &&
+          process_detail::set_property(
+              env, item.get(), "data", env.string(chunk.data)) &&
+          process_detail::set_property(
+              env,
+              item.get(),
+              "observedAtMs",
+              env.float64(static_cast<double>(chunk.observed_at_ms))) &&
+          process_detail::set_property(
+              env,
+              item.get(),
+              "offsetStart",
+              env.float64(static_cast<double>(chunk.offset_start))) &&
+          process_detail::set_property(
+              env,
+              item.get(),
+              "offsetEnd",
+              env.float64(static_cast<double>(chunk.offset_end)));
+      if (!encoded ||
+          JS_SetPropertyUint32(
+              ctx, chunks.get(), static_cast<std::uint32_t>(i), item.release()) < 0) {
+        return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+      }
+    }
+
+    const bool encoded =
+        process_detail::set_property(
+            env, object.get(), "chunks", std::move(chunks)) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "nextSequence",
+            env.float64(static_cast<double>(result.next_cursor.sequence))) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "nextByteOffset",
+            env.float64(static_cast<double>(result.next_cursor.byte_offset))) &&
+        process_detail::set_property(
+            env, object.get(), "eof", env.boolean(result.eof)) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "returnedBytes",
+            env.float64(static_cast<double>(result.returned_bytes)));
+    if (!encoded) {
+      return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+    }
+    return object;
+  }
+
+  static qjs::OwnedValue to_js(Env env, vacps::process::ReadResult&& result) {
+    return to_js(env, static_cast<const vacps::process::ReadResult&>(result));
+  }
+};
+
+template <>
+struct Converter<vacps::process::ProcessSnapshot> {
+  static qjs::OwnedValue to_js(
+      Env env,
+      const vacps::process::ProcessSnapshot& snapshot) {
+    JSContext* ctx = env.context();
+    qjs::OwnedValue object = env.new_object();
+    if (object.is_exception()) {
+      return object;
+    }
+    const bool encoded =
+        process_detail::set_exit_properties(env, object.get(), snapshot.exit) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "stdinAvailable",
+            env.boolean(snapshot.stdin_available)) &&
+        process_detail::set_property(
+            env, object.get(), "stdout", env.string(snapshot.stdout_str)) &&
+        process_detail::set_property(
+            env, object.get(), "stderr", env.string(snapshot.stderr_str)) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "stdoutBytes",
+            env.float64(static_cast<double>(snapshot.stdout_bytes))) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "stderrBytes",
+            env.float64(static_cast<double>(snapshot.stderr_bytes))) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "stdoutTruncated",
+            env.boolean(snapshot.stdout_truncated)) &&
+        process_detail::set_property(
+            env,
+            object.get(),
+            "stderrTruncated",
+            env.boolean(snapshot.stderr_truncated));
+    if (!encoded) {
+      return qjs::OwnedValue::take(ctx, JS_EXCEPTION);
+    }
+    return object;
+  }
+
+  static qjs::OwnedValue to_js(
+      Env env,
+      vacps::process::ProcessSnapshot&& snapshot) {
+    return to_js(env, static_cast<const vacps::process::ProcessSnapshot&>(snapshot));
   }
 };
 

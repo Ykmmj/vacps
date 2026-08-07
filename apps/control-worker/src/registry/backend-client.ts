@@ -161,20 +161,18 @@ export class BackendClient {
     backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
-    const yieldMs = typeof body.yield_time_ms === 'number' ? body.yield_time_ms : 10_000;
     return this.request(backend, '/exec/command', {
       method: 'POST',
       body: JSON.stringify(body),
-      timeoutMs: Math.min(yieldMs + 5_000, 125_000),
+      timeoutMs: execTransportTimeoutMs(body),
     });
   }
 
   async execShell(backend: BackendRequestTarget, body: Record<string, unknown>): Promise<unknown> {
-    const yieldMs = typeof body.yield_time_ms === 'number' ? body.yield_time_ms : 10_000;
     return this.request(backend, '/exec/shell', {
       method: 'POST',
       body: JSON.stringify(body),
-      timeoutMs: Math.min(yieldMs + 5_000, 125_000),
+      timeoutMs: execTransportTimeoutMs(body),
     });
   }
 
@@ -344,6 +342,20 @@ export class BackendClient {
       clearTimeout(timer);
     }
   }
+}
+
+/**
+ * HTTP client budget for /exec/command and /exec/shell.
+ * yield_time_ms keeps live-handle meaning (bounded yield wait).
+ * Without it, cover the full command timeout so one-shot exec can finish.
+ * Does not mutate the request JSON body.
+ */
+function execTransportTimeoutMs(body: Record<string, unknown>): number {
+  if (typeof body.yield_time_ms === 'number') {
+    return Math.min(body.yield_time_ms + 5_000, 125_000);
+  }
+  const responseBudget = typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000;
+  return Math.min(responseBudget + 5_000, 3_605_000);
 }
 
 function joinBackendUrl(baseUrl: string, path: string): string {
