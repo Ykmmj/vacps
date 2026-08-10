@@ -1005,8 +1005,8 @@ async function probeAgentEnvironment(): Promise<{
 }> {
   const { access, constants } = await import('node:fs/promises');
   const { spawn } = await import('node:child_process');
-  let user = process.env.USER || 'agent';
-  let home = process.env.HOME || `/home/${user}`;
+  let user = process.env.USER || 'unknown';
+  let home = process.env.HOME || '/tmp';
   try {
     const info = userInfo();
     if (typeof info.username === 'string') user = info.username;
@@ -1031,7 +1031,7 @@ async function probeAgentEnvironment(): Promise<{
     await access(home, constants.W_OK);
     home_writable = true;
   } catch {
-    notes.push(`HOME ${home} is not writable by the agent user.`);
+    notes.push(`HOME ${home} is not writable by the deployment user.`);
   }
   try {
     await access(bashrc, constants.R_OK);

@@ -9,12 +9,14 @@ RUNTIME_MARKER_FILE=/etc/vacps/agent-runtime
 TUNNEL_TOKEN_FILE=/etc/vacps/tunnel.env
 TUNNEL_SERVICE=vacps-tunnel
 TUNNEL_UNIT_FILE=/etc/systemd/system/vacps-tunnel.service
-SERVICE_USER=agent
+SERVICE_USER=''
+SERVICE_GROUP=''
+SERVICE_HOME=''
 export NVM_DIR=/usr/local/lib/vacps/nvm
 NODE_MAJOR_VERSION=24
 # Agent runtime: node (default, apps/vacps) | native (static musl binary + vacps.mjs)
 AGENT_RUNTIME=node
-NATIVE_VERSION=0.1.9
+NATIVE_VERSION=0.1.10
 NATIVE_INSTALL_DIR=/opt/vacps/native
 NATIVE_BIN_NAME=vacps-agent-linux-x86_64
 NATIVE_SCRIPT_NAME=vacps.mjs
@@ -32,10 +34,9 @@ CONTROL_PLANE_URL=''
 CONTROL_PLANE_PUBLIC_KEY=''
 PUBLIC_BASE_URL=''
 QUICK_TUNNEL=false
-ALLOW_APT=false
+ALLOW_ROOT=false
 RESUME_INSTALL=false
 PURGE_DATA=false
-REMOVE_USER=false
 REMOVE_MANAGED_TUNNEL=false
 HEALTH_CHECK_TIMEOUT_SECONDS=90
 HEALTH_CHECK_DELAY_SECONDS=2
@@ -87,7 +88,7 @@ Required for --runtime node:
   --redis-url <url>         Redis URL: prefer rediss://; redis:// only on private networks.
 
 Optional for --runtime native:
-  --native-version <ver>    GitHub release version (default: 0.1.9 → tag vacps-native-v0.1.9).
+  --native-version <ver>    GitHub release version (default: 0.1.10 → tag vacps-native-v0.1.10).
   --native-github-repo <o/r>
                             owner/repo for release assets (default: Ykmmj/vacps).
   --repo <git-url>          Optional; used only if you prefer building from source later.
@@ -98,7 +99,7 @@ Shared optional:
   --tags <csv>              Comma-separated tags, such as production,full.
   --tunnel-token <token>    Remotely managed Cloudflare Tunnel token.
   --ref <git-ref>           Git branch/tag for node runtime, default: main.
-  --allow-apt               Permit sudo apt-get for the agent. This is root-equivalent.
+  --allow-root              Permit passwordless root command execution. Disabled by default.
 EOF
 }
 
@@ -122,7 +123,7 @@ Optional:
   --control-plane-url <url> Refresh CONTROL_PLANE_URL in the env file.
   --control-plane-public-key <key>
                             Refresh CONTROL_PLANE_PUBLIC_KEY in the env file.
-  --allow-apt               Ensure the apt sudoers rule and unit drop-in are present.
+  --allow-root              Enable passwordless root command execution.
   --help, -h                Show this help message.
 EOF
 }
@@ -131,13 +132,12 @@ reinstall_usage() {
   cat <<'EOF'
 Usage: sudo bash agent.sh reinstall [uninstall-options] --repo <git-url> --registration-token <token> ...
 
-Stops and removes the current service (same defaults as uninstall: data and
-agent user are preserved), then runs a full install with the given options.
+Stops and removes the current service (same defaults as uninstall: data is
+preserved), then runs a full install with the given options.
 A fresh registration token is required.
 
 Uninstall options (before or mixed with install options):
   --purge-data              Delete /var/lib/vacps before reinstalling.
-  --remove-user             Delete the agent system user (requires --purge-data).
   --remove-managed-tunnel   Accepted for compatibility; vacps-tunnel is always removed on uninstall.
 
 Install options: same as "agent.sh install --help".
@@ -149,13 +149,12 @@ uninstall_usage() {
 Usage: sudo bash agent.sh uninstall [options]
 
 Stops and removes the Vacps service, its configuration, vacps-tunnel /
-vacps-quick-tunnel helpers, Agent-scoped NVM runtime, and the optional apt
+vacps-quick-tunnel helpers, VACPS-scoped NVM runtime, and the optional root
 sudoers rule. Task records and logs are preserved by default. Host-level
 cloudflared (other tunnels) is never modified.
 
 Options:
   --purge-data              Delete /var/lib/vacps, including SQLite task records and logs.
-  --remove-user             Delete the agent system user. Requires --purge-data.
   --remove-managed-tunnel   Accepted for compatibility; vacps-tunnel is always removed.
   --help, -h                Show this help message.
 EOF
@@ -448,90 +447,43 @@ EOF
   echo "Quick Tunnel helper targets $agent_port (runtime: $AGENT_RUNTIME)."
 }
 
-# Create/repair the agent system user with a full login home (required for shell.exec).
-# Idempotent: existing users keep their files; missing homes and bad /home modes are fixed.
-ensure_service_user() {
-  # /home MUST be traversable by agent (0755 or 0711). Mode 000 is a hard failure for bash -lc.
-  if [[ ! -d /home ]]; then
-    install -d -m 755 -o root -g root /home
-  fi
-  chown root:root /home 2>/dev/null || true
-  # Always ensure o+x (and preferably 0755). Some images ship /home as 000 or 700.
-  chmod u=rwx,g=rx,o=rx /home 2>/dev/null || chmod 755 /home || true
+# Resolve the account that invoked the deployment. sudo sets SUDO_USER to the
+# original login account; direct root execution therefore intentionally selects
+# root. New installations persist this identity, and upgrades retain it.
+resolve_service_identity() {
+  local configured_user=''
+  local candidate
+  local passwd_entry
 
-  if ! getent group "$SERVICE_USER" >/dev/null 2>&1; then
-    groupadd --system "$SERVICE_USER"
+  if [[ -f $ENVIRONMENT_FILE ]]; then
+    configured_user=$(sed -n 's/^VACPS_SERVICE_USER=//p' "$ENVIRONMENT_FILE" | head -n 1)
   fi
+  candidate=${configured_user:-${SUDO_USER:-}}
+  if [[ -z $candidate ]]; then candidate=$(id -un); fi
 
-  local home_dir="/home/$SERVICE_USER"
-  if ! id "$SERVICE_USER" >/dev/null 2>&1; then
-    useradd \
-      --system \
-      --gid "$SERVICE_USER" \
-      --create-home \
-      --home-dir "$home_dir" \
-      --shell /bin/bash \
-      --skel /etc/skel \
-      "$SERVICE_USER"
-  else
-    # Migrate legacy installs (nologin, no home) without deleting existing homes.
-    usermod -s /bin/bash -d "$home_dir" -g "$SERVICE_USER" "$SERVICE_USER" 2>/dev/null || true
-    if [[ ! -d $home_dir ]]; then
-      if command -v mkhomedir_helper >/dev/null 2>&1; then
-        mkhomedir_helper "$SERVICE_USER" 2>/dev/null || true
-      fi
-      if [[ ! -d $home_dir ]]; then
-        install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$home_dir"
-        if [[ -d /etc/skel ]]; then
-          # Copy skel only into a brand-new empty home.
-          if [[ -z $(find "$home_dir" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1) ]]; then
-            cp -a /etc/skel/. "$home_dir"/ 2>/dev/null || true
-            chown -R "$SERVICE_USER:$SERVICE_USER" "$home_dir"
-          fi
-        fi
-      fi
-    fi
+  if [[ ! $candidate =~ ^[A-Za-z_][A-Za-z0-9_.-]*[$]?$ ]] || ! id "$candidate" >/dev/null 2>&1; then
+    echo "Deployment user '$candidate' is not an existing local account." >&2
+    return 1
+  fi
+  passwd_entry=$(getent passwd "$candidate")
+  SERVICE_USER=${passwd_entry%%:*}
+  SERVICE_GROUP=$(id -gn "$SERVICE_USER")
+  SERVICE_HOME=$(printf '%s\n' "$passwd_entry" | cut -d: -f6)
+
+  if [[ $SERVICE_HOME != /* || ! -d $SERVICE_HOME ]]; then
+    echo "Deployment user '$SERVICE_USER' must already have an absolute, existing HOME directory." >&2
+    return 1
+  fi
+  if ! runuser -u "$SERVICE_USER" -- test -x "$SERVICE_HOME"; then
+    echo "Deployment user '$SERVICE_USER' cannot access HOME '$SERVICE_HOME'." >&2
+    return 1
   fi
 
-  chown "$SERVICE_USER:$SERVICE_USER" "$home_dir"
-  chmod 750 "$home_dir"
-  # Ensure common rc files exist and are readable by the agent (do not overwrite custom content).
-  for rc in .bashrc .profile .bash_profile; do
-    if [[ ! -e $home_dir/$rc && -f /etc/skel/$rc ]]; then
-      install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" "/etc/skel/$rc" "$home_dir/$rc"
-    elif [[ -e $home_dir/$rc ]]; then
-      chown "$SERVICE_USER:$SERVICE_USER" "$home_dir/$rc" 2>/dev/null || true
-      chmod u+rw "$home_dir/$rc" 2>/dev/null || true
-    fi
-  done
-  if [[ ! -e $home_dir/.bashrc ]]; then
-    cat >"$home_dir/.bashrc" <<'EOF'
-# Vacps agent shell environment (loaded by bash -lc for non-interactive too via BASH_ENV unset path).
-# Keep this readable by the agent user so shell.exec does not emit Permission denied.
-EOF
-    chown "$SERVICE_USER:$SERVICE_USER" "$home_dir/.bashrc"
-    chmod 644 "$home_dir/.bashrc"
-  fi
+  # A deployment invoked directly from a root login necessarily runs the
+  # service as root; report that capability truthfully without a sudoers rule.
+  if [[ $SERVICE_USER == root ]]; then ALLOW_ROOT=true; fi
 
-  # Final smoke: agent must traverse /home and load a login shell without Permission denied.
-  if ! runuser -u "$SERVICE_USER" -- test -x /home 2>/dev/null; then
-    chmod 755 /home || true
-  fi
-  if ! runuser -u "$SERVICE_USER" -- test -x "$home_dir" 2>/dev/null; then
-    chmod 750 "$home_dir" || true
-    chown "$SERVICE_USER:$SERVICE_USER" "$home_dir" || true
-  fi
-  if ! runuser -u "$SERVICE_USER" -- \
-    env HOME="$home_dir" USER="$SERVICE_USER" LOGNAME="$SERVICE_USER" SHELL=/bin/bash \
-    /bin/bash -lc 'test -x "$HOME" && id -un' >/dev/null 2>&1; then
-    echo "Warning: agent login shell smoke failed. Check: stat /home /home/$SERVICE_USER" >&2
-    stat -c '%U:%G %a %n' /home "$home_dir" 2>/dev/null || true
-    runuser -u "$SERVICE_USER" -- \
-      env HOME="$home_dir" USER="$SERVICE_USER" LOGNAME="$SERVICE_USER" SHELL=/bin/bash \
-      /bin/bash -lc 'id; ls -ld /home "$HOME"' 2>&1 | head -n 20 || true
-  else
-    echo "Agent login environment OK for $SERVICE_USER ($home_dir)."
-  fi
+  echo "VACPS service identity: $SERVICE_USER:$SERVICE_GROUP (HOME=$SERVICE_HOME)."
 }
 
 # Optional runtime deps for tools (root provisioning; agent does not need sudo).
@@ -547,21 +499,36 @@ install_agent_runtime_packages() {
 }
 
 write_systemd_unit_node() {
+  local node_binary
+  node_binary=$(command -v node)
   install -d /etc/systemd/system/vacps.service.d
-  install -m 644 "$APP_DIRECTORY/apps/vacps/systemd/vacps.service" /etc/systemd/system/vacps.service
-  NODE_BINARY=$(command -v node)
-  cat >/etc/systemd/system/vacps.service.d/node.conf <<EOF
+  cat >/etc/systemd/system/vacps.service <<EOF
+[Unit]
+Description=VACPS Backend
+After=network-online.target
+Wants=network-online.target
+
 [Service]
-ExecStart=
-ExecStart=$NODE_BINARY /opt/vacps/apps/vacps/dist/main.js
-Environment=HOME=/home/$SERVICE_USER
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+WorkingDirectory=$APP_DIRECTORY
+Environment=HOME=$SERVICE_HOME
 Environment=USER=$SERVICE_USER
 Environment=LOGNAME=$SERVICE_USER
 Environment=SHELL=/bin/bash
-# Force home visibility even if an older unit drop-in re-enabled ProtectHome.
+EnvironmentFile=$ENVIRONMENT_FILE
+ExecStart=$node_binary $APP_DIRECTORY/apps/vacps/dist/main.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
 ProtectHome=false
+ReadWritePaths=$DATA_DIRECTORY $SERVICE_HOME $APP_DIRECTORY
+
+[Install]
+WantedBy=multi-user.target
 EOF
-  rm -f /etc/systemd/system/vacps.service.d/native.conf 2>/dev/null || true
 }
 
 write_systemd_unit_native() {
@@ -578,9 +545,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$SERVICE_USER
-Group=$SERVICE_USER
+Group=$SERVICE_GROUP
 WorkingDirectory=$NATIVE_INSTALL_DIR
-Environment=HOME=/home/$SERVICE_USER
+Environment=HOME=$SERVICE_HOME
 Environment=USER=$SERVICE_USER
 Environment=LOGNAME=$SERVICE_USER
 Environment=SHELL=/bin/bash
@@ -593,42 +560,37 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=false
-ReadWritePaths=$DATA_DIRECTORY /home/$SERVICE_USER $NATIVE_INSTALL_DIR
+ReadWritePaths=$DATA_DIRECTORY $SERVICE_HOME $NATIVE_INSTALL_DIR
 
 [Install]
 WantedBy=multi-user.target
-EOF
-  # Clear node-specific drop-ins; keep allow-apt if present.
-  rm -f /etc/systemd/system/vacps.service.d/node.conf 2>/dev/null || true
-  cat >/etc/systemd/system/vacps.service.d/native.conf <<EOF
-[Service]
-Environment=HOME=/home/$SERVICE_USER
-Environment=USER=$SERVICE_USER
-Environment=LOGNAME=$SERVICE_USER
-Environment=SHELL=/bin/bash
-ProtectHome=false
 EOF
 }
 
 write_systemd_unit() {
   install -d /etc/systemd/system/vacps.service.d
+  rm -f \
+    /etc/systemd/system/vacps.service.d/node.conf \
+    /etc/systemd/system/vacps.service.d/native.conf \
+    /etc/systemd/system/vacps.service.d/protect-home.conf \
+    /etc/systemd/system/vacps.service.d/allow-apt.conf \
+    /etc/systemd/system/vacps.service.d/allow-root.conf
+  rm -f /etc/sudoers.d/vacps-apt /etc/sudoers.d/vacps-root
+
   if is_native_runtime; then
     write_systemd_unit_native
   else
     write_systemd_unit_node
   fi
 
-  # Remove stale drop-ins that might re-hide /home.
-  rm -f /etc/systemd/system/vacps.service.d/protect-home.conf 2>/dev/null || true
-
-  if [[ $ALLOW_APT == true ]]; then
-    cat >/etc/sudoers.d/vacps-apt <<EOF
-# apt-get can execute package maintainer scripts as root. Treat this as root access.
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/apt-get
+  if [[ $ALLOW_ROOT == true && $SERVICE_USER != root ]]; then
+    cat >/etc/sudoers.d/vacps-root <<EOF
+# Explicit opt-in: authenticated VACPS commands may execute arbitrary root operations.
+$SERVICE_USER ALL=(root) NOPASSWD: ALL
 EOF
-    chmod 440 /etc/sudoers.d/vacps-apt
-    visudo -cf /etc/sudoers.d/vacps-apt
-    cat >/etc/systemd/system/vacps.service.d/allow-apt.conf <<'EOF'
+    chmod 440 /etc/sudoers.d/vacps-root
+    visudo -cf /etc/sudoers.d/vacps-root
+    cat >/etc/systemd/system/vacps.service.d/allow-root.conf <<'EOF'
 [Service]
 NoNewPrivileges=false
 EOF
@@ -646,7 +608,6 @@ build_agent_packages() {
 is_installed_layout_node() {
   [[ -d $APP_DIRECTORY/.git &&
     -f $APP_DIRECTORY/apps/vacps/package.json &&
-    -f $APP_DIRECTORY/apps/vacps/systemd/vacps.service &&
     -f $APP_DIRECTORY/packages/contracts/package.json &&
     -f $ENVIRONMENT_FILE &&
     -f /etc/systemd/system/vacps.service ]]
@@ -694,9 +655,8 @@ parse_install_options() {
       --runtime) AGENT_RUNTIME=${2:?missing value for --runtime}; shift 2 ;;
       --native-version) NATIVE_VERSION=${2:?missing value for --native-version}; shift 2 ;;
       --native-github-repo) NATIVE_GITHUB_REPO=${2:?missing value for --native-github-repo}; shift 2 ;;
-      --allow-apt) ALLOW_APT=true; shift ;;
+      --allow-root) ALLOW_ROOT=true; shift ;;
       --purge-data) PURGE_DATA=true; shift ;;
-      --remove-user) REMOVE_USER=true; shift ;;
       --remove-managed-tunnel) REMOVE_MANAGED_TUNNEL=true; shift ;;
       --help|-h) return 100 ;;
       *) echo "Unknown option: $1" >&2; return 2 ;;
@@ -771,18 +731,12 @@ uninstall_agent() {
   while (($#)); do
     case "$1" in
       --purge-data) PURGE_DATA=true; shift ;;
-      --remove-user) REMOVE_USER=true; shift ;;
       --remove-managed-tunnel) REMOVE_MANAGED_TUNNEL=true; shift ;;
       --help|-h) uninstall_usage; return 0 ;;
       *) echo "Unknown uninstall option: $1" >&2; uninstall_usage >&2; return 2 ;;
     esac
   done
   require_root
-  if [[ $REMOVE_USER == true && $PURGE_DATA != true ]]; then
-    echo '--remove-user requires --purge-data so no agent-owned data is left behind.' >&2
-    return 2
-  fi
-
   systemctl disable --now vacps 2>/dev/null || true
   systemctl disable --now vacps-quick-tunnel 2>/dev/null || true
   systemctl disable --now "$TUNNEL_SERVICE" 2>/dev/null || true
@@ -800,7 +754,7 @@ uninstall_agent() {
   rm -rf "$NATIVE_INSTALL_DIR"
   rmdir /usr/local/lib/vacps 2>/dev/null || true
   rmdir /opt/vacps 2>/dev/null || true
-  rm -f /etc/sudoers.d/vacps-apt
+  rm -f /etc/sudoers.d/vacps-apt /etc/sudoers.d/vacps-root
   # ENVIRONMENT_DIRECTORY includes tunnel.env; remove after stopping the unit.
   rm -rf "$ENVIRONMENT_DIRECTORY" "$APP_DIRECTORY"
   if [[ $PURGE_DATA == true ]]; then
@@ -808,7 +762,6 @@ uninstall_agent() {
   else
     echo "Preserved $DATA_DIRECTORY (SQLite task records and logs). Re-run with --purge-data to delete it."
   fi
-  if [[ $REMOVE_USER == true ]] && id "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER"; fi
   systemctl daemon-reload
   systemctl reset-failed vacps vacps-quick-tunnel "$TUNNEL_SERVICE" 2>/dev/null || true
   echo 'Vacps service files have been removed (including vacps-tunnel when present).'
@@ -853,6 +806,18 @@ remove_obsolete_native_env_keys() {
   sed -i -e '/^VACPS_DATA_DIR=/d' -e '/^VACPS_SCRIPT=/d' "$ENVIRONMENT_FILE"
 }
 
+persist_service_policy() {
+  sed -i -e '/^VACPS_SERVICE_USER=/d' -e '/^VACPS_ALLOW_ROOT=/d' "$ENVIRONMENT_FILE"
+  printf 'VACPS_SERVICE_USER=%s\n' "$SERVICE_USER" >>"$ENVIRONMENT_FILE"
+  if [[ $ALLOW_ROOT == true ]]; then
+    printf 'VACPS_ALLOW_ROOT=1\n' >>"$ENVIRONMENT_FILE"
+  else
+    printf 'VACPS_ALLOW_ROOT=0\n' >>"$ENVIRONMENT_FILE"
+  fi
+  chown root:root "$ENVIRONMENT_FILE"
+  chmod 600 "$ENVIRONMENT_FILE"
+}
+
 upgrade_agent() {
   while (($#)); do
     case "$1" in
@@ -862,7 +827,7 @@ upgrade_agent() {
       --native-github-repo) NATIVE_GITHUB_REPO=${2:?missing value for --native-github-repo}; shift 2 ;;
       --control-plane-url) CONTROL_PLANE_URL=${2:?missing value for --control-plane-url}; shift 2 ;;
       --control-plane-public-key) CONTROL_PLANE_PUBLIC_KEY=${2:?missing value for --control-plane-public-key}; shift 2 ;;
-      --allow-apt) ALLOW_APT=true; shift ;;
+      --allow-root) ALLOW_ROOT=true; shift ;;
       --help|-h) upgrade_usage; return 0 ;;
       *) echo "Unknown upgrade option: $1" >&2; upgrade_usage >&2; return 2 ;;
     esac
@@ -871,6 +836,9 @@ upgrade_agent() {
   require_installed
 
   AGENT_RUNTIME=$(detect_installed_runtime)
+  if grep -q '^VACPS_ALLOW_ROOT=1$' "$ENVIRONMENT_FILE"; then ALLOW_ROOT=true; fi
+  resolve_service_identity
+  persist_service_policy
 
   if [[ -n $CONTROL_PLANE_URL && $CONTROL_PLANE_URL != https://* ]]; then
     echo 'Control-plane URL must use HTTPS.' >&2
@@ -896,11 +864,10 @@ upgrade_agent() {
     install_native_binaries "$NATIVE_VERSION"
     refresh_env_keys
     remove_obsolete_native_env_keys
-    ensure_service_user
     install_agent_runtime_packages
-    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
-    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$NATIVE_INSTALL_DIR"
+    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY"
+    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY/logs"
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIRECTORY" "$NATIVE_INSTALL_DIR"
     write_runtime_marker
     write_systemd_unit
     systemctl daemon-reload
@@ -931,11 +898,10 @@ upgrade_agent() {
     update_checkout "$REPOSITORY_REF"
     build_agent_packages
     refresh_env_keys
-    ensure_service_user
     install_agent_runtime_packages
-    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
-    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
+    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY"
+    install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY/logs"
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIRECTORY" "$APP_DIRECTORY"
     write_runtime_marker
     write_systemd_unit
     systemctl daemon-reload
@@ -944,8 +910,8 @@ upgrade_agent() {
     wait_for_agent_health
 
     if systemctl show vacps -p FragmentPath --value >/dev/null 2>&1; then
-      if systemctl show vacps -p Environment --value 2>/dev/null | grep -q "HOME=/home/$SERVICE_USER"; then
-        echo "vacps unit HOME=/home/$SERVICE_USER is set."
+      if systemctl show vacps -p Environment --value 2>/dev/null | grep -Fq "HOME=$SERVICE_HOME"; then
+        echo "vacps unit HOME=$SERVICE_HOME is set."
       fi
       if systemctl show vacps -p ProtectHome --value 2>/dev/null | grep -qi 'yes\|true'; then
         echo 'Warning: ProtectHome is still enabled on vacps; agent cannot use /home. Check drop-ins under /etc/systemd/system/vacps.service.d/' >&2
@@ -954,19 +920,26 @@ upgrade_agent() {
     echo "VACPS $BACKEND_ID upgraded successfully (ref: $REPOSITORY_REF)."
   fi
 
-  if [[ $ALLOW_APT == true ]]; then
-    echo 'apt enabled: Agent tasks may run sudo apt-get install -y <package>; this is root-equivalent access.'
+  if [[ $ALLOW_ROOT == true ]]; then
+    echo 'root execution enabled: authenticated Agent commands may run sudo -n without a password.'
   fi
 }
 
 write_environment_file() {
+  local allow_root_value=0
+  if [[ $ALLOW_ROOT == true ]]; then allow_root_value=1; fi
   install -d /etc/vacps
-  install -m 640 -o root -g "$SERVICE_USER" /dev/null "$ENVIRONMENT_FILE"
+  # systemd reads EnvironmentFile before applying User=/Group=. Keep node
+  # identity keys private to root instead of exposing them to a shared primary
+  # group that the deployment user may belong to.
+  install -m 600 -o root -g root /dev/null "$ENVIRONMENT_FILE"
   # Always write PUBLIC_BASE_URL= so quick-tunnel sed can update the line later.
   # For --quick-tunnel the value starts empty; discovery fills it before re-register.
   if is_native_runtime; then
     cat >"$ENVIRONMENT_FILE" <<EOF
 AGENT_RUNTIME=native
+VACPS_SERVICE_USER=$SERVICE_USER
+VACPS_ALLOW_ROOT=$allow_root_value
 BACKEND_ID=$BACKEND_ID
 BACKEND_NAME=$BACKEND_NAME
 BACKEND_TAGS=$BACKEND_TAGS
@@ -986,6 +959,8 @@ EOF
   else
     cat >"$ENVIRONMENT_FILE" <<EOF
 AGENT_RUNTIME=node
+VACPS_SERVICE_USER=$SERVICE_USER
+VACPS_ALLOW_ROOT=$allow_root_value
 BACKEND_ID=$BACKEND_ID
 BACKEND_NAME=$BACKEND_NAME
 BACKEND_TAGS=$BACKEND_TAGS
@@ -1009,7 +984,7 @@ PI_COMMAND=pi
 PI_COMMAND_ARGS_JSON=[]
 EOF
   fi
-  chmod 640 "$ENVIRONMENT_FILE"
+  chmod 600 "$ENVIRONMENT_FILE"
 }
 
 recover_or_allocate_backend_id() {
@@ -1056,8 +1031,8 @@ finish_tunnel_and_report() {
   fi
 
   echo "VACPS $BACKEND_ID is running (runtime: $AGENT_RUNTIME)."
-  if [[ $ALLOW_APT == true ]]; then
-    echo 'apt enabled: Agent tasks may run sudo apt-get install -y <package>; this is root-equivalent access.'
+  if [[ $ALLOW_ROOT == true ]]; then
+    echo 'root execution enabled: authenticated Agent commands may run sudo -n without a password.'
   fi
 }
 
@@ -1091,12 +1066,11 @@ install_agent_native() {
     install_native_binaries "$NATIVE_VERSION"
   fi
 
-  ensure_service_user
   install_agent_runtime_packages
-  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
-  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY"
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY/logs"
   install -d /etc/vacps /etc/systemd/system/vacps.service.d
-  chown -R "$SERVICE_USER:$SERVICE_USER" "$NATIVE_INSTALL_DIR"
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIRECTORY" "$NATIVE_INSTALL_DIR"
 
   write_environment_file
   write_runtime_marker
@@ -1142,12 +1116,11 @@ install_agent_node() {
     build_agent_packages
   fi
 
-  ensure_service_user
   install_agent_runtime_packages
-  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY"
-  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIRECTORY/logs"
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY"
+  install -d -m 750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIRECTORY/logs"
   install -d /etc/vacps /etc/systemd/system/vacps.service.d
-  chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIRECTORY"
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIRECTORY" "$APP_DIRECTORY"
 
   write_environment_file
   write_runtime_marker
@@ -1161,6 +1134,7 @@ install_agent_node() {
 
 install_agent() {
   require_root
+  resolve_service_identity
   validate_install_options
   if is_native_runtime; then
     install_agent_native
@@ -1184,10 +1158,9 @@ reinstall_agent() {
   validate_install_options
 
   echo 'Reinstalling VACPS: removing the current service, then installing again.'
-  # PURGE_DATA / REMOVE_USER / REMOVE_MANAGED_TUNNEL already parsed above.
+  # PURGE_DATA / REMOVE_MANAGED_TUNNEL already parsed above.
   uninstall_args=()
   if [[ $PURGE_DATA == true ]]; then uninstall_args+=(--purge-data); fi
-  if [[ $REMOVE_USER == true ]]; then uninstall_args+=(--remove-user); fi
   if [[ $REMOVE_MANAGED_TUNNEL == true ]]; then uninstall_args+=(--remove-managed-tunnel); fi
   uninstall_agent "${uninstall_args[@]}"
 
@@ -1217,8 +1190,8 @@ case "$COMMAND" in
     if ((parse_status == 100)); then install_usage; exit 0; fi
     if ((parse_status != 0)); then install_usage >&2; exit "$parse_status"; fi
     # Reject reinstall-only flags on plain install.
-    if [[ $PURGE_DATA == true || $REMOVE_USER == true || $REMOVE_MANAGED_TUNNEL == true ]]; then
-      echo 'Use "agent.sh reinstall" or "agent.sh uninstall" for --purge-data / --remove-user / --remove-managed-tunnel.' >&2
+    if [[ $PURGE_DATA == true || $REMOVE_MANAGED_TUNNEL == true ]]; then
+      echo 'Use "agent.sh reinstall" or "agent.sh uninstall" for --purge-data / --remove-managed-tunnel.' >&2
       exit 2
     fi
     install_agent

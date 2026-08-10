@@ -48,10 +48,10 @@
   >();
   let generatingToken = $state(false);
   let now = $state(Date.now());
-  let installAllowApt = $state(false);
+  let installAllowRoot = $state(false);
   /** node = apps/vacps; native = vacps-native static binary. */
   let installRuntime = $state<'node' | 'native'>('node');
-  let installNativeVersion = $state('0.1.0');
+  let installNativeVersion = $state('0.1.10');
   let installTunnelMode = $state<TunnelMode>('managed');
   let managedProvision = $state<any>();
   let provisioningTunnel = $state(false);
@@ -164,8 +164,8 @@
       registrationTokenReady: m.registrationTokenReady(),
       registrationTokenFailed: m.registrationTokenFailed(),
       installTokenPending: m.installTokenPending(),
-      allowApt: m.allowApt(),
-      allowAptHint: m.allowAptHint(),
+      allowRoot: m.allowRoot(),
+      allowRootHint: m.allowRootHint(),
       copy: m.copy(),
       copied: m.copied(),
       syncFailed: m.syncFailed(),
@@ -716,7 +716,7 @@
       );
     } else {
       lines[lines.length - 1] += ' \\';
-      lines.push(`  --native-version ${shellQuote(installNativeVersion.trim() || '0.1.0')}`);
+      lines.push(`  --native-version ${shellQuote(installNativeVersion.trim() || '0.1.10')}`);
     }
     if (installTunnelMode === 'managed') {
       lines[lines.length - 1] += ' \\';
@@ -738,9 +738,9 @@
       lines[lines.length - 1] += ' \\';
       lines.push(`  --tags ${shellQuote(installTags.trim())}`);
     }
-    if (installAllowApt) {
+    if (installAllowRoot) {
       lines[lines.length - 1] += ' \\';
-      lines.push('  --allow-apt');
+      lines.push('  --allow-root');
     }
     return lines.join('\n');
   }
@@ -751,7 +751,7 @@
         backendName: installBackendName,
         tags: installTags,
         redisUrl: installRedisUrl,
-        allowApt: installAllowApt,
+        allowRoot: installAllowRoot,
         runtime: installRuntime,
         nativeVersion: installNativeVersion,
         tunnelMode: installTunnelMode,
@@ -766,7 +766,7 @@
       installBackendName = draft.backendName ?? '';
       installTags = draft.tags ?? installTags;
       installRedisUrl = draft.redisUrl ?? '';
-      installAllowApt = draft.allowApt === true;
+      installAllowRoot = draft.allowRoot === true;
       installRuntime = draft.runtime === 'native' ? 'native' : 'node';
       installNativeVersion =
         typeof draft.nativeVersion === 'string' && draft.nativeVersion
@@ -883,7 +883,7 @@
           bind:installBackendName
           bind:installTags
           bind:installRedisUrl
-          bind:installAllowApt
+          bind:installAllowRoot
           bind:installRuntime
           bind:installNativeVersion
           bind:installTunnelMode

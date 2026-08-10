@@ -22,7 +22,7 @@ Cloudflare does not connect to Redis or execute Shell commands. A task UUID is c
 
 ## Prerequisites
 
-- Node.js 24 LTS and pnpm 10.14.0 (the VPS installer installs these through an Agent-scoped NVM directory)
+- Node.js 24 LTS and pnpm 10.14.0 (the VPS installer installs these through a VACPS-scoped NVM directory)
 - A Redis instance reachable from each VPS. Use TLS (`rediss://`) whenever traffic crosses a public or untrusted network; a non-TLS `redis://` endpoint must be private and firewall-restricted.
 - A Cloudflare account with Workers, D1, Access, and (recommended) Tunnel
 - A Pi adapter that implements the included NDJSON protocol
@@ -63,7 +63,7 @@ Open the deployed Web UI and choose one of its connection modes before copying t
 - **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. A one-time local bootstrap uses an API Token to create a scoped OAuth client, then discards the Token; it never reaches the Worker, browser, VPS, or installer command. The bootstrap saves only the selected Cloudflare account context, and the Web UI loads Zones automatically after browser authorization.
 - **Quick Tunnel** creates a temporary `trycloudflare.com` URL on the VPS and re-registers the Agent whenever that URL changes. Use it only for demos or testing.
 
-Before copying an installer command, use the Web UI to generate a one-time registration Token. It is shown once, lasts ten minutes, and is consumed when the Agent binds its locally generated Ed25519 public key. The installer installs Node.js 24 and pnpm 10.14.0 through an Agent-scoped NVM directory, generates that key pair locally, builds the agent, creates its systemd unit, configures SQLite/log directories, and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
+Before copying an installer command, use the Web UI to generate a one-time registration Token. It is shown once, lasts ten minutes, and is consumed when the Agent binds its locally generated Ed25519 public key. The installer installs Node.js 24 and pnpm 10.14.0 through a VACPS-scoped NVM directory, generates that key pair locally, builds the agent, and runs the systemd service as the user who invoked the deployment (`SUDO_USER` when invoked through `sudo`). It does not create or modify a login account. The installer also configures SQLite/log directories and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
 
 Each report writes one current snapshot containing CPU, memory, root-disk usage, queue state, operating system, and upload/download byte rates. D1 keeps only the latest snapshot, which makes the UI inexpensive to poll and leaves a clean input for future roll-up charts; it is not raw time-series retention.
 
@@ -80,9 +80,9 @@ Example upgrade:
 curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- upgrade
 ```
 
-To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. Use `--purge-data --remove-user` only when deleting its SQLite task history, logs, and service user is intended.
+To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. Add `--purge-data` only when deleting its SQLite task history and logs is intended. The deployment user's account and HOME are never removed or modified.
 
-To allow the Agent to install system packages, add `--allow-apt`. This writes an `apt-get` sudoers rule and is root-equivalent; it is intentionally disabled by default.
+To allow authenticated Agent commands to administer the host, add `--allow-root`. This writes an explicit passwordless sudoers rule for the deployment user and is intentionally disabled by default. Without it, the Agent has only the deployment user's normal operating-system permissions. When enabled, privileged command requests use non-interactive `sudo -n -- ...`; a deployment run directly as root needs no sudoers rule because the service itself runs as root.
 
 ## Local development
 

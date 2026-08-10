@@ -1126,6 +1126,7 @@ export async function detectCapabilities() {
       command_exec: true,
       shell_exec: true,
       interactive_process: true,
+      privileged_exec: process.env.VACPS_ALLOW_ROOT === '1',
       file_patch: true,
       git_tools: true,
     },
