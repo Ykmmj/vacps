@@ -18,7 +18,9 @@ export type BackendRequestTarget =
 
 /** Contract: Narrow — caller supplies a typed BackendRequestTarget discriminant. */
 function backendAudienceId(backend: BackendRequestTarget): string {
-  return 'id' in backend ? backend.id : backend.backendId;
+  // A BackendRegistration also has its own `id` (the registration-row UUID).
+  // Prefer the explicit Agent audience whenever both properties are present.
+  return 'backendId' in backend ? backend.backendId : backend.id;
 }
 
 export class BackendClient {
