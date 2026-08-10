@@ -38,7 +38,7 @@
     installBackendName?: string;
     installTags?: string;
     installRedisUrl?: string;
-    installAllowApt?: boolean;
+    installAllowRoot?: boolean;
     installRuntime?: 'node' | 'native';
     installNativeVersion?: string;
     installTunnelMode?: TunnelMode;
@@ -76,9 +76,9 @@
     installBackendName = $bindable(''),
     installTags = $bindable(''),
     installRedisUrl = $bindable(''),
-    installAllowApt = $bindable(false),
+    installAllowRoot = $bindable(false),
     installRuntime = $bindable<'node' | 'native'>('node'),
-    installNativeVersion = $bindable('0.1.0'),
+    installNativeVersion = $bindable('0.1.10'),
     installTunnelMode = $bindable<TunnelMode>('managed'),
     installCommand = '',
     tokenActive = false,
@@ -255,7 +255,7 @@
                 <Input
                   bind:value={installNativeVersion}
                   autocomplete="off"
-                  placeholder="0.1.0"
+                  placeholder="0.1.10"
                   class="h-11 rounded-[10px] border-border bg-background font-mono text-xs shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
                 />
               </label>
@@ -339,17 +339,25 @@
             <div
               class="flex min-h-[58px] items-center gap-3 rounded-[10px] border border-border bg-muted/55 px-3 py-2.5 sm:col-span-2"
             >
-              <span class="min-w-0 flex-1 text-[13px] font-medium"
-                >{label('allowApt', 'Allow apt package installation')}</span
-              >
+              <span class="min-w-0 flex-1">
+                <span class="block text-[13px] font-medium"
+                  >{label('allowRoot', 'Allow root command execution')}</span
+                >
+                <span class="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
+                  {label(
+                    'allowRootHint',
+                    'Authenticated Agent commands may run as root without a password.',
+                  )}
+                </span>
+              </span>
               <button
                 type="button"
                 role="switch"
-                aria-checked={installAllowApt}
-                aria-label={label('allowApt', 'Allow apt package installation')}
-                class:apt-on={installAllowApt}
-                class="apt-switch"
-                onclick={() => (installAllowApt = !installAllowApt)}><span></span></button
+                aria-checked={installAllowRoot}
+                aria-label={label('allowRoot', 'Allow root command execution')}
+                class:root-on={installAllowRoot}
+                class="root-switch"
+                onclick={() => (installAllowRoot = !installAllowRoot)}><span></span></button
               >
             </div>
 
@@ -730,7 +738,7 @@
     line-height: 1.3;
     text-transform: uppercase;
   }
-  .apt-switch {
+  .root-switch {
     position: relative;
     width: 44px;
     height: 44px;
@@ -740,7 +748,7 @@
     background: transparent;
     cursor: pointer;
   }
-  .apt-switch::before {
+  .root-switch::before {
     position: absolute;
     inset: 8px 0;
     border-radius: 14px;
@@ -748,7 +756,7 @@
     content: '';
     transition: background 140ms cubic-bezier(0.23, 1, 0.32, 1);
   }
-  .apt-switch span {
+  .root-switch span {
     position: absolute;
     z-index: 1;
     top: 11px;
@@ -760,10 +768,10 @@
     box-shadow: 0 1px 3px oklch(20% 0.01 250 / 0.25);
     transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1);
   }
-  .apt-switch.apt-on::before {
+  .root-switch.root-on::before {
     background: var(--primary);
   }
-  .apt-switch.apt-on span {
+  .root-switch.root-on span {
     transform: translateX(16px);
   }
   .managed-flow {
@@ -1067,7 +1075,7 @@
     .step-line :global(button) {
       width: 100%;
     }
-    .apt-switch {
+    .root-switch {
       margin-left: 8px;
     }
   }

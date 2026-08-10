@@ -162,7 +162,7 @@ export class ProcessManager {
           { code: 'validation_error', statusCode: 400 },
         );
       }
-      // Login shell (-lc) sources profile/bashrc for the real agent user environment.
+      // Login shell (-lc) sources profile/bashrc for the deployment user's environment.
       // Opt out with load_user_environment=false → --noprofile --norc -c.
       const shellArgs =
         shell === '/bin/sh'
@@ -562,8 +562,8 @@ function buildExecEnvironment(
   overrides: Record<string, string> | undefined,
   options: { loadUserEnvironment: boolean },
 ): NodeJS.ProcessEnv {
-  let home = process.env.HOME || '/home/agent';
-  let username = process.env.USER || 'agent';
+  let home = process.env.HOME || '/tmp';
+  let username = process.env.USER || 'unknown';
   try {
     const user = userInfo();
     if (typeof user.homedir === 'string' && user.homedir) home = user.homedir;

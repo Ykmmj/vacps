@@ -10,6 +10,7 @@ import {
   type DirEntry,
   type FileStat,
 } from 'vacps:fs';
+import * as host from 'vacps:host';
 import * as process from 'vacps:process';
 
 import { requireAbsolutePath } from '../util/absolute-path';
@@ -834,6 +835,7 @@ export async function detectCapabilities() {
       command_exec: true,
       shell_exec: true,
       interactive_process: true,
+      privileged_exec: host.getenv('VACPS_ALLOW_ROOT') === '1',
       file_patch: true,
       git_tools: gitTools,
     },

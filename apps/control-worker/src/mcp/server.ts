@@ -796,7 +796,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.command.exec',
     toolConfig('vacps.command.exec', {
       description:
-        'Run a non-interactive program on a backend (argv form, no shell). Uses yield_time_ms for sync wait.',
+        "Run a non-interactive program on a backend as its deployment user (argv form, no shell). Uses yield_time_ms for sync wait. If vacps.capabilities reports features.privileged_exec=true, root commands may be run explicitly as /usr/bin/sudo with arguments beginning ['-n', '--'].",
       inputSchema: commandExecInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
@@ -811,7 +811,7 @@ export function createMcpServer(env: Env): McpServer {
     'vacps.shell.exec',
     toolConfig('vacps.shell.exec', {
       description:
-        'Run a shell command as the agent user with full login environment (bash -lc, sources ~/.bashrc). Prefer vacps.command.exec for non-shell work. Set load_user_environment=false only for a clean --noprofile --norc shell.',
+        'Run a shell command as the deployment user with full login environment (bash -lc, sources ~/.bashrc). Prefer vacps.command.exec for non-shell work. Set load_user_environment=false only for a clean --noprofile --norc shell. If vacps.capabilities reports features.privileged_exec=true, root commands may be prefixed explicitly with sudo -n --.',
       inputSchema: shellExecInputSchema,
       outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
     }),
@@ -1454,6 +1454,7 @@ function normalizeCapabilities(raw: Record<string, unknown>): Record<string, unk
       command_exec: featuresRaw.command_exec !== false,
       shell_exec: featuresRaw.shell_exec !== false,
       interactive_process: featuresRaw.interactive_process !== false,
+      privileged_exec: featuresRaw.privileged_exec === true,
       file_patch: featuresRaw.file_patch !== false,
       git_tools: featuresRaw.git_tools !== false,
     },
