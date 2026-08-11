@@ -9,7 +9,7 @@
  * pathname + search (search includes leading `?` when non-empty).
  * Fragments are never signed.
  *
- * Matches apps/vacps and apps/control-worker requestTargetOf
+ * Matches apps/control-worker requestTargetOf.
  * (`new URL(url, 'http://vacps.invalid')` → pathname + search).
  */
 export function requestTargetOf(url: string): string {

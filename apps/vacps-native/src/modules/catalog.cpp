@@ -39,6 +39,7 @@ ModuleCatalog::ModuleCatalog(
           {"vacps:fs", init_module_fs},
           {"vacps:http", init_module_http},
           {"vacps:process", init_module_process},
+          {"vacps:terminal", init_module_terminal},
       }) {}
 
 const ModuleDescriptor* ModuleCatalog::find(

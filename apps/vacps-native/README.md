@@ -2,7 +2,6 @@
 
 Native VACPS Agent (C++23), **Linux x86_64 musl static ELF**.
 
-Design: `temp/native.md` (repo-local). Sibling of Node agent `apps/vacps`.
 **开发规范：** [`docs/CODING_STANDARDS.md`](docs/CODING_STANDARDS.md)
 **Runtime 分层：** [`docs/RUNTIME_LAYERING.md`](docs/RUNTIME_LAYERING.md)
 **JS 模块 surface：** [`docs/NATIVE_MODULES.md`](docs/NATIVE_MODULES.md)
@@ -112,7 +111,7 @@ file ./apps/vacps-native/build/release/vacps-agent-linux-x86_64
 
 ### Product stance
 
-**vacps-native 直接替代 Node `apps/vacps`**（不做双端口影子部署）。
+**vacps-native 是唯一的生产 VPS Agent 实现。**
 **不接 Pi**（协议里若收到 `kind=agent` 任务直接 409）。
 
 **调度状态机（绝对时刻）** — 产品语义（script / contracts）：
@@ -173,8 +172,9 @@ apps/vacps-native/
 │   ├── binding/      # native binding DSL（ClassHolder / ClassBuilder / ClassJsEdges）
 │   ├── runtime/      # vacps::Runtime + Async/Callbacks/Script；Runtime::Impl
 │   ├── globals/      # URL / TextEncoder / TextDecoder
-│   ├── modules/      # catalog + crypto/host/log/store/fs/http/process
+│   ├── modules/      # catalog + crypto/host/log/store/fs/http/process/terminal
 │   ├── process/      # 子进程域库（经 vacps:process 导出）
+│   ├── terminal/     # Linux PTY 域库（经 vacps:terminal 导出）
 │   ├── storage/      # SQLite 域库（Store；经 vacps:store 导出）
 │   ├── http/         # HTTP 域库（outbound client + inbound server transport；经 vacps:http 导出）
 │   ├── crypto/

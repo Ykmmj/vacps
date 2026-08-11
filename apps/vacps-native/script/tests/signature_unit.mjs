@@ -73,7 +73,7 @@ const canonical = [
   digest,
 ].join('\n');
 // Control-plane audience binding uses the same field layout with issuer=control
-// and x-vps-control-backend-id as field 5 (parity with apps/vacps).
+// and x-vps-control-backend-id as field 5.
 const sig = crypto.ed25519Sign(seed, canonical);
 if (new Uint8Array(sig).byteLength !== 64) throw new Error('sig len');
 if (!crypto.ed25519Verify(pub, canonical, sig)) throw new Error('verify failed');

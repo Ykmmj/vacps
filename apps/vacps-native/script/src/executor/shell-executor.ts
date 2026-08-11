@@ -25,7 +25,7 @@ function errorMessage(e: unknown): string {
 
 /**
  * Run command/shell tasks via vacps:process Process class
- * (apps/vacps ShellExecutor counterpart). Supports mid-run cancel via
+ * Supports mid-run cancellation via
  * Process.terminate while Process.wait is in flight.
  */
 export class ShellExecutor {

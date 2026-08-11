@@ -10,7 +10,6 @@ import {
   stdoutMaxBytesSchema,
   timeoutMsSchema,
   workingDirectorySchema,
-  yieldTimeMsSchema,
 } from './defs.js';
 
 export const commandExecInputSchema = z.strictObject({
@@ -20,7 +19,6 @@ export const commandExecInputSchema = z.strictObject({
   working_directory: workingDirectorySchema.optional(),
   environment: environmentSchema.optional(),
   timeout_ms: timeoutMsSchema.optional(),
-  yield_time_ms: yieldTimeMsSchema.optional(),
   stdout_max_bytes: stdoutMaxBytesSchema.optional(),
   stderr_max_bytes: stderrMaxBytesSchema.optional(),
   idempotency_key: idempotencyKeySchema.optional(),

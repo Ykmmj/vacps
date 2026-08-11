@@ -9,7 +9,6 @@ import {
   stdoutMaxBytesSchema,
   timeoutMsSchema,
   workingDirectorySchema,
-  yieldTimeMsSchema,
 } from './defs.js';
 
 export const shellExecInputSchema = z
@@ -20,7 +19,6 @@ export const shellExecInputSchema = z
     working_directory: workingDirectorySchema.optional(),
     environment: environmentSchema.optional(),
     timeout_ms: timeoutMsSchema.optional(),
-    yield_time_ms: yieldTimeMsSchema.optional(),
     stdout_max_bytes: stdoutMaxBytesSchema.optional(),
     stderr_max_bytes: stderrMaxBytesSchema.optional(),
     load_user_environment: z.boolean().optional(),

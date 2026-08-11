@@ -17,23 +17,21 @@ import type { ControlPlaneState } from '../registration/control-plane-state';
 import { probeShellEnvironment } from '../runtime/shell-environment';
 import * as files from '../runtime/files';
 import { hashRequest, IdempotencyStore } from '../runtime/idempotency';
-import {
-  NATIVE_STREAM_MAX_BYTES,
-  PROCESS_READ_MAX_BYTES,
-  type ProcessSessions,
-} from '../runtime/process-sessions';
+import { NATIVE_STREAM_MAX_BYTES, type CommandRunner } from '../runtime/command-runner';
+import type { TerminalSessions } from '../runtime/terminal-sessions';
 import { allowUnsignedWhenNoKey, isPublicHttpPath } from '../security/http-auth';
 import { verifyControlPlaneRequest } from '../security/control-plane-verify';
 import type { LiveHealthState } from '../telemetry/liveness-health';
 import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
-import { utf8ByteLengthOfString, utf8ByteSlice } from '../util/utf8';
+import { utf8ByteSlice } from '../util/utf8';
 import { createApp, type App, type Reply } from './router';
 
 export interface CreateServerInput {
   config: AgentConfig;
   queue: TaskQueue;
   telemetry: NativeTelemetryCollector;
-  processes: ProcessSessions;
+  commands: CommandRunner;
+  terminals: TerminalSessions;
   getControlPlaneState: () => ControlPlaneState;
   isReady: () => boolean;
   /** Cheap public /health body (no telemetry/shell probes). */
@@ -71,7 +69,7 @@ async function runtimeError(reply: Reply, error: unknown, fallback = 400) {
 }
 
 /**
- * Product HTTP routes — same registration style as apps/vacps/src/server/app.ts
+ * Product HTTP routes.
  * (`app.get` / `app.post` / hooks), over the script router (not Fastify).
  * Invoked from Application's Server onRequest (native event → JS callback).
  */
@@ -162,8 +160,6 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.get('/info', async () => ({
     backendId: input.config.BACKEND_ID,
     runMode: 'api+worker',
-    redis: false,
-    pi: false,
     shell_environment: await probeShellEnvironment(),
   }));
 
@@ -171,20 +167,26 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/tasks', async (request, reply) => {
     if (!input.isReady()) {
       return reply.code(503).send({
-        error: { code: 'service_unavailable', message: 'application not initialized' },
+        error: {
+          code: 'service_unavailable',
+          message: 'application not initialized',
+        },
       });
     }
 
     const parsed = taskDispatchSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'invalid_task', message: parsed.error.message } });
+      return reply.code(400).send({
+        error: { code: 'invalid_task', message: parsed.error.message },
+      });
     }
     if (parsed.data.backend_id !== input.config.BACKEND_ID) {
-      return reply
-        .code(409)
-        .send({ error: { code: 'backend_mismatch', message: 'Task targets another backend.' } });
+      return reply.code(409).send({
+        error: {
+          code: 'backend_mismatch',
+          message: 'Task targets another backend.',
+        },
+      });
     }
 
     const capability = nativeTaskCapabilityRejection(parsed.data);
@@ -310,7 +312,11 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     // Stream-style read: absolute **UTF-8 byte** offsets over concatenated retained text.
     // EOF = end of retained content; total/truncated report native drain facts when known.
     if (stream === 'stdout' || stream === 'stderr') {
-      const rows = await input.queue.listLogs(id, { stream, offset: 0, limit: 50_000 });
+      const rows = await input.queue.listLogs(id, {
+        stream,
+        offset: 0,
+        limit: 50_000,
+      });
       const full = rows.map((r) => r.data).join('');
       const streamVersion = `sha256:${crypto.sha256Hex(full)}`;
       const expected =
@@ -354,10 +360,22 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     const logs = await input.queue.listLogs(id, { offset: 0, limit: 500 });
 
     // Control-plane tasks.get preview expects `commands[]` (Node shape), not raw log rows.
-    const allStdout = (await input.queue.listLogs(id, { stream: 'stdout', offset: 0, limit: 2000 }))
+    const allStdout = (
+      await input.queue.listLogs(id, {
+        stream: 'stdout',
+        offset: 0,
+        limit: 2000,
+      })
+    )
       .map((r) => r.data)
       .join('');
-    const allStderr = (await input.queue.listLogs(id, { stream: 'stderr', offset: 0, limit: 2000 }))
+    const allStderr = (
+      await input.queue.listLogs(id, {
+        stream: 'stderr',
+        offset: 0,
+        limit: 2000,
+      })
+    )
       .map((r) => r.data)
       .join('');
     const stdoutPreview = utf8ByteSlice(allStdout, 0, previewMax);
@@ -445,9 +463,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.get('/fs/read', async (request, reply) => {
     const filePath = request.query.path?.trim() || request.query.file_path?.trim();
     if (!filePath) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'path is required.' },
+      });
     }
     try {
       const startRaw = request.query.start_line ?? request.query.offset;
@@ -468,12 +486,16 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.get('/fs/stat', async (request, reply) => {
     const path = request.query.path?.trim();
     if (!path) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'path is required.' },
+      });
     }
     try {
-      return { ok: true, backend_id: input.config.BACKEND_ID, ...(await files.filesStat(path)) };
+      return {
+        ok: true,
+        backend_id: input.config.BACKEND_ID,
+        ...(await files.filesStat(path)),
+      };
     } catch (error) {
       return runtimeError(reply, error, 404);
     }
@@ -482,9 +504,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.get('/fs/list', async (request, reply) => {
     const path = request.query.path?.trim();
     if (!path) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'path is required.' },
+      });
     }
     try {
       return {
@@ -505,9 +527,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/fs/write', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.path !== 'string' || typeof body.content !== 'string') {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'path and content are required.' } });
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'path and content are required.',
+        },
+      });
     }
     if (
       body.mode !== 'create' &&
@@ -549,9 +574,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/fs/glob', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.pattern !== 'string' || !body.pattern) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'pattern is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'pattern is required.' },
+      });
     }
     try {
       return {
@@ -574,9 +599,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/fs/grep', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.pattern !== 'string' || !body.pattern) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'pattern is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'pattern is required.' },
+      });
     }
     try {
       return {
@@ -642,9 +667,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/fs/apply_patch', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.patch !== 'string' || !body.patch) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'patch is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'patch is required.' },
+      });
     }
     try {
       return await withIdempotency(
@@ -679,9 +704,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/fs/mkdir', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.path !== 'string') {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'path is required.' },
+      });
     }
     try {
       return {
@@ -700,9 +725,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/fs/delete', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.path !== 'string') {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'path is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'path is required.' },
+      });
     }
     try {
       return await withIdempotency(
@@ -735,9 +760,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/fs/move', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.from !== 'string' || typeof body.to !== 'string') {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'from and to are required.' } });
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'from and to are required.',
+        },
+      });
     }
     try {
       return await withIdempotency(
@@ -763,13 +791,13 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  // ── Command / shell / interactive process sessions ───────────────
+  // ── One-shot command / shell execution ───────────────────────────
   app.post('/exec/command', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.program !== 'string' || !body.program) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'program is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'program is required.' },
+      });
     }
     const unsupported = rejectUnsupportedExecFields(body);
     if (unsupported) {
@@ -802,20 +830,14 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return runtimeError(reply, error);
     }
     try {
-      return await withProcessIdempotency(
+      return await withIdempotency(
         idempotency,
-        input.processes,
         input.config.BACKEND_ID,
         'command.exec',
         body,
-        canonicalProcessArguments(body, ['yield_time_ms', 'stdout_max_bytes', 'stderr_max_bytes']),
-        {
-          stdoutMaxBytes: numeric.stdoutMaxBytes,
-          stderrMaxBytes: numeric.stderrMaxBytes,
-        },
         async () => ({
           ok: true,
-          ...(await input.processes.exec(
+          ...(await input.commands.run(
             {
               kind: 'command',
               program: body.program as string,
@@ -826,13 +848,11 @@ export async function createServer(input: CreateServerInput): Promise<App> {
               timeoutMs: numeric.timeoutMs,
               stdoutHardMaxBytes: 16 * 1024 * 1024,
               stderrHardMaxBytes: 16 * 1024 * 1024,
-              stdin: 'ignore',
             },
             {
               stdoutMaxBytes: numeric.stdoutMaxBytes,
               stderrMaxBytes: numeric.stderrMaxBytes,
             },
-            numeric.yieldMs,
           )),
         }),
       );
@@ -844,9 +864,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
   app.post('/exec/shell', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.command !== 'string' || !body.command.trim()) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'command is required.' } });
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'command is required.' },
+      });
     }
     const unsupported = rejectUnsupportedExecFields(body);
     if (unsupported) {
@@ -901,20 +921,14 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return runtimeError(reply, error);
     }
     try {
-      return await withProcessIdempotency(
+      return await withIdempotency(
         idempotency,
-        input.processes,
         input.config.BACKEND_ID,
         'shell.exec',
         body,
-        canonicalProcessArguments(body, ['yield_time_ms', 'stdout_max_bytes', 'stderr_max_bytes']),
-        {
-          stdoutMaxBytes: numeric.stdoutMaxBytes,
-          stderrMaxBytes: numeric.stderrMaxBytes,
-        },
         async () => ({
           ok: true,
-          ...(await input.processes.exec(
+          ...(await input.commands.run(
             {
               kind: 'shell',
               command: body.command as string,
@@ -926,13 +940,11 @@ export async function createServer(input: CreateServerInput): Promise<App> {
               timeoutMs: numeric.timeoutMs,
               stdoutHardMaxBytes: 16 * 1024 * 1024,
               stderrHardMaxBytes: 16 * 1024 * 1024,
-              stdin: 'ignore',
             },
             {
               stdoutMaxBytes: numeric.stdoutMaxBytes,
               stderrMaxBytes: numeric.stderrMaxBytes,
             },
-            numeric.yieldMs,
           )),
         }),
       );
@@ -941,15 +953,23 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post('/process/start_command', async (request, reply) => {
+  // ── Interactive PTY terminals ────────────────────────────────────
+  app.post('/terminals/open_command', async (request, reply) => {
     const body = asRecord(request.body);
     if (typeof body.program !== 'string' || body.program.length === 0) {
       return reply
         .code(400)
         .send({ error: { code: 'validation_error', message: 'program is required.' } });
     }
-    const unsupported = rejectUnsupportedProcessStartFields(body);
-    if (unsupported) return reply.code(unsupported.status).send(unsupported.body);
+    if (body.environment !== undefined) {
+      return reply.code(409).send({
+        error: {
+          code: 'capability_unavailable',
+          message: 'Terminal environment injection is not supported.',
+          details: { capability: 'environment' },
+        },
+      });
+    }
     if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
       return reply.code(400).send({
         error: {
@@ -971,48 +991,35 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       args = body.arguments;
     }
     try {
-      const options = parseProcessStartOptions(body);
-      return await withProcessIdempotency(
-        idempotency,
-        input.processes,
-        input.config.BACKEND_ID,
-        'process.start_command',
-        body,
-        canonicalProcessArguments(body),
-        { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
-        async () => ({
-          ok: true,
-          ...(await input.processes.start(
-            {
-              kind: 'command',
-              program: body.program as string,
-              ...(args ? { arguments: args } : {}),
-              ...(typeof body.working_directory === 'string'
-                ? { workingDirectory: body.working_directory }
-                : {}),
-              timeoutMs: options.timeoutMs,
-              stdoutHardMaxBytes: options.stdoutHardMaxBytes,
-              stderrHardMaxBytes: options.stderrHardMaxBytes,
-              stdin: 'pipe',
-            },
-            { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
-          )),
-        }),
-      );
+      const options = parseTerminalOptions(body);
+      return {
+        ok: true,
+        ...(await input.terminals.open({
+          kind: 'command',
+          program: body.program,
+          ...(args ? { arguments: args } : {}),
+          ...(typeof body.working_directory === 'string'
+            ? { workingDirectory: body.working_directory }
+            : {}),
+          ...options,
+        })),
+      };
     } catch (error) {
       return runtimeError(reply, error);
     }
   });
 
-  app.post('/process/start_shell', async (request, reply) => {
+  app.post('/terminals/open_shell', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.command !== 'string' || body.command.trim().length === 0) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'command is required.' } });
+    if (body.environment !== undefined) {
+      return reply.code(409).send({
+        error: {
+          code: 'capability_unavailable',
+          message: 'Terminal environment injection is not supported.',
+          details: { capability: 'environment' },
+        },
+      });
     }
-    const unsupported = rejectUnsupportedProcessStartFields(body);
-    if (unsupported) return reply.code(unsupported.status).send(unsupported.body);
     if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
       return reply.code(400).send({
         error: {
@@ -1021,93 +1028,67 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         },
       });
     }
-    let shell: '/bin/bash' | '/bin/sh' = '/bin/bash';
-    if (body.shell !== undefined) {
-      if (body.shell !== '/bin/bash' && body.shell !== '/bin/sh') {
-        return reply.code(400).send({
-          error: {
-            code: 'validation_error',
-            message: 'shell must be exactly /bin/bash or /bin/sh when present.',
-          },
-        });
-      }
-      shell = body.shell;
-    }
-    if (
-      body.load_user_environment !== undefined &&
-      typeof body.load_user_environment !== 'boolean'
-    ) {
+    const shell = body.shell === undefined ? '/bin/bash' : body.shell;
+    if (shell !== '/bin/bash' && shell !== '/bin/sh') {
       return reply.code(400).send({
         error: {
           code: 'validation_error',
-          message: 'load_user_environment must be a boolean when present.',
+          message: 'shell must be exactly /bin/bash or /bin/sh when present.',
         },
       });
     }
-    if (shell === '/bin/sh' && body.load_user_environment === true) {
+    if (body.login !== undefined && typeof body.login !== 'boolean') {
       return reply.code(400).send({
-        error: {
-          code: 'validation_error',
-          message:
-            'load_user_environment=true is not supported with shell=/bin/sh; use /bin/bash or omit/false.',
-        },
+        error: { code: 'validation_error', message: 'login must be a boolean when present.' },
       });
     }
-    const loadUserEnvironment = shell === '/bin/sh' ? false : body.load_user_environment !== false;
     try {
-      const options = parseProcessStartOptions(body);
-      return await withProcessIdempotency(
-        idempotency,
-        input.processes,
-        input.config.BACKEND_ID,
-        'process.start_shell',
-        body,
-        canonicalProcessArguments(body),
-        { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
-        async () => ({
-          ok: true,
-          ...(await input.processes.start(
-            {
-              kind: 'shell',
-              command: body.command as string,
-              shell,
-              loadUserEnvironment,
-              ...(typeof body.working_directory === 'string'
-                ? { workingDirectory: body.working_directory }
-                : {}),
-              timeoutMs: options.timeoutMs,
-              stdoutHardMaxBytes: options.stdoutHardMaxBytes,
-              stderrHardMaxBytes: options.stderrHardMaxBytes,
-              stdin: 'pipe',
-            },
-            { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
-          )),
-        }),
-      );
+      return {
+        ok: true,
+        ...(await input.terminals.open({
+          kind: 'shell',
+          shell,
+          login: body.login !== false,
+          ...(typeof body.working_directory === 'string'
+            ? { workingDirectory: body.working_directory }
+            : {}),
+          ...parseTerminalOptions(body),
+        })),
+      };
     } catch (error) {
       return runtimeError(reply, error);
     }
   });
 
-  app.post('/process/read', async (request, reply) => {
-    const body = asRecord(request.body);
-    if (typeof body.process_id !== 'string' || body.process_id.length === 0) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+  app.get('/terminals', async () => {
+    const terminals = input.terminals.list();
+    return { ok: true, terminals, returned_count: terminals.length };
+  });
+
+  app.get('/terminals/:id', async (request, reply) => {
+    try {
+      return { ok: true, ...input.terminals.get(request.params.id ?? '') };
+    } catch (error) {
+      return runtimeError(reply, error);
     }
+  });
+
+  app.post('/terminals/read', async (request, reply) => {
+    const body = asRecord(request.body);
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
     if (body.cursor !== undefined && typeof body.cursor !== 'string') {
       return reply.code(400).send({
         error: { code: 'validation_error', message: 'cursor must be a string when present.' },
       });
     }
     try {
-      const maxBytes = readOptionalIntField(body, 'max_bytes', 65_536, 1, PROCESS_READ_MAX_BYTES);
+      const maxBytes = readOptionalIntField(body, 'max_bytes', 65_536, 4, 1_048_576);
       const waitMs = readOptionalIntField(body, 'wait_ms', 0, 0, 60_000);
       return {
         ok: true,
-        ...(await input.processes.read(
-          body.process_id,
+        ...(await input.terminals.read(
+          terminalId,
           typeof body.cursor === 'string' ? body.cursor : undefined,
           maxBytes,
           waitMs,
@@ -1118,83 +1099,83 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.post('/process/write', async (request, reply) => {
+  app.post('/terminals/write', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.process_id !== 'string' || body.process_id.length === 0) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
-    }
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
     if (typeof body.data !== 'string') {
       return reply
         .code(400)
         .send({ error: { code: 'validation_error', message: 'data must be a string.' } });
     }
-    if (utf8ByteLengthOfString(body.data) > PROCESS_READ_MAX_BYTES) {
+    if (body.encoding !== undefined) {
       return reply.code(400).send({
         error: {
           code: 'validation_error',
-          message: `data must be at most ${PROCESS_READ_MAX_BYTES} UTF-8 bytes.`,
-        },
-      });
-    }
-    if (body.close_stdin !== undefined && typeof body.close_stdin !== 'boolean') {
-      return reply.code(400).send({
-        error: {
-          code: 'validation_error',
-          message: 'close_stdin must be a boolean when present.',
+          message: 'encoding is not accepted; terminal data is UTF-8 text.',
         },
       });
     }
     try {
-      const written = await input.processes.write(
-        body.process_id,
-        body.data,
-        body.close_stdin === true,
-      );
-      return { ok: true, process_id: body.process_id, written_bytes: written };
+      const written = await input.terminals.write(terminalId, body.data);
+      return { ok: true, terminal_id: terminalId, written_bytes: written };
     } catch (error) {
       return runtimeError(reply, error);
     }
   });
 
-  app.post('/process/terminate', async (request, reply) => {
+  app.post('/terminals/resize', async (request, reply) => {
     const body = asRecord(request.body);
-    if (typeof body.process_id !== 'string' || body.process_id.length === 0) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'validation_error', message: 'process_id is required.' } });
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
+    try {
+      const columns = readOptionalIntField(body, 'columns', 80, 2, 500);
+      const rows = readOptionalIntField(body, 'rows', 24, 1, 200);
+      return { ok: true, ...(await input.terminals.resize(terminalId, columns, rows)) };
+    } catch (error) {
+      return runtimeError(reply, error);
     }
+  });
+
+  app.post('/terminals/signal', async (request, reply) => {
+    const body = asRecord(request.body);
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
     if (
-      body.signal !== undefined &&
-      body.signal !== 'sigterm' &&
-      body.signal !== 'sigint' &&
-      body.signal !== 'sigkill'
+      body.signal !== 'SIGINT' &&
+      body.signal !== 'SIGTERM' &&
+      body.signal !== 'SIGHUP' &&
+      body.signal !== 'SIGKILL' &&
+      body.signal !== 'SIGTSTP' &&
+      body.signal !== 'SIGCONT'
     ) {
       return reply.code(400).send({
-        error: {
-          code: 'validation_error',
-          message: 'signal must be sigterm, sigint, or sigkill.',
-        },
+        error: { code: 'validation_error', message: 'unsupported terminal signal.' },
       });
     }
     try {
-      const gracePeriodMs = readOptionalIntField(body, 'grace_period_ms', 3_000, 0, 60_000);
+      return { ok: true, ...(await input.terminals.signal(terminalId, body.signal)) };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/terminals/close', async (request, reply) => {
+    const body = asRecord(request.body);
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
+    try {
+      const gracePeriodMs = readOptionalIntField(body, 'grace_period_ms', 1000, 0, 60_000);
       return {
         ok: true,
-        ...(await input.processes.terminate(
-          body.process_id,
-          body.signal === 'sigint' || body.signal === 'sigkill' ? body.signal : 'sigterm',
-          gracePeriodMs,
-          { stdoutMaxBytes: 16_384, stderrMaxBytes: 16_384 },
-        )),
+        ...(await input.terminals.closeTerminal(terminalId, gracePeriodMs)),
       };
     } catch (error) {
       return runtimeError(reply, error);
     }
   });
 
-  // ── Schedulers (SQLite; no Redis/BullMQ) ──────────────────────────
+  // ── Schedulers ───────────────────────────────────────────────────
   app.get('/schedulers', async () => await input.queue.listSchedulers());
 
   app.put('/schedulers/:id', async (request, reply) => {
@@ -1215,9 +1196,12 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       typeof body.timezone !== 'string' ||
       typeof body.enabled !== 'boolean'
     ) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'invalid_scheduler', message: 'Invalid scheduler payload.' } });
+      return reply.code(400).send({
+        error: {
+          code: 'invalid_scheduler',
+          message: 'Invalid scheduler payload.',
+        },
+      });
     }
 
     const capability = nativeTaskCapabilityRejection(template.data);
@@ -1310,9 +1294,9 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
     const template = createTaskSchema.safeParse(body.task);
     if (!template.success) {
-      return reply
-        .code(400)
-        .send({ error: { code: 'invalid_task', message: template.error.message } });
+      return reply.code(400).send({
+        error: { code: 'invalid_task', message: template.error.message },
+      });
     }
 
     const capability = nativeTaskCapabilityRejection(template.data);
@@ -1320,7 +1304,10 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       return reply.code(capability.status).send(capability.body);
     }
 
-    const taskId = await input.queue.runScheduleNow({ id, task: template.data });
+    const taskId = await input.queue.runScheduleNow({
+      id,
+      task: template.data,
+    });
     return { task_id: taskId };
   });
 
@@ -1359,7 +1346,7 @@ function processStreamMeta(
   return { totalBytes, nativeTruncated };
 }
 
-/** Shared in-memory idempotency for mutating file tools and process creation. */
+/** Shared in-memory idempotency for mutating file tools and one-shot commands. */
 async function withIdempotency(
   store: IdempotencyStore,
   backendId: string,
@@ -1375,48 +1362,6 @@ async function withIdempotency(
   });
   const { result, replayed } = await store.execute(toolName, key, requestHash, run);
   return store.withIdempotencyMeta(key, requestHash, replayed, result);
-}
-
-/**
- * Process idempotency stores only the initial protocol snapshot. Replays are
- * refreshed from the still-owned JS Process session so status/output never go
- * stale. Observation-only yield/preview fields are excluded by the caller from
- * the work identity.
- */
-async function withProcessIdempotency(
-  store: IdempotencyStore,
-  processes: ProcessSessions,
-  backendId: string,
-  toolName: string,
-  body: Record<string, unknown>,
-  workArguments: Record<string, unknown>,
-  preview: { stdoutMaxBytes: number; stderrMaxBytes: number },
-  run: () => Promise<Record<string, unknown>>,
-): Promise<Record<string, unknown>> {
-  const key = typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined;
-  const requestHash = hashRequest({
-    tool_name: toolName,
-    backend_id: backendId,
-    arguments: workArguments,
-  });
-  const { result: initial, replayed } = await store.execute(toolName, key, requestHash, run);
-  const processId = initial.process_id;
-  if (typeof processId !== 'string') {
-    throw new Error(`${toolName} did not return a process_id.`);
-  }
-  if (key !== undefined && !replayed) {
-    processes.retainForIdempotencyReplay(processId);
-  }
-  const result = replayed ? { ok: true, ...processes.snapshotById(processId, preview) } : initial;
-  return store.withIdempotencyMeta(key, requestHash, replayed, result);
-}
-
-function canonicalProcessArguments(
-  body: Record<string, unknown>,
-  observationFields: readonly string[] = [],
-): Record<string, unknown> {
-  const excluded = new Set(['backend_id', 'idempotency_key', ...observationFields]);
-  return Object.fromEntries(Object.entries(body).filter(([key]) => !excluded.has(key)));
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -1457,69 +1402,46 @@ function rejectUnsupportedExecFields(
   return null;
 }
 
-function rejectUnsupportedProcessStartFields(
-  body: Record<string, unknown>,
-): { status: number; body: Record<string, unknown> } | null {
-  if (body.environment !== undefined) {
-    return {
-      status: 409,
-      body: {
-        error: {
-          code: 'capability_unavailable',
-          message: 'Process environment injection is not supported on this backend.',
-          details: { capability: 'environment' },
-        },
-      },
-    };
+function readTerminalId(body: Record<string, unknown>, reply: Reply): string | null {
+  if (typeof body.terminal_id === 'string' && body.terminal_id.length > 0) {
+    return body.terminal_id;
   }
-  if (body.tty !== undefined && typeof body.tty !== 'boolean') {
-    return {
-      status: 400,
-      body: {
-        error: {
-          code: 'validation_error',
-          message: 'tty must be a boolean when present.',
-        },
-      },
-    };
-  }
-  if (body.tty === true) {
-    return {
-      status: 409,
-      body: {
-        error: {
-          code: 'capability_unavailable',
-          message: 'PTY/TTY processes are not supported on this backend.',
-          details: { capability: 'tty' },
-        },
-      },
-    };
-  }
+  reply
+    .code(400)
+    .send({ error: { code: 'validation_error', message: 'terminal_id is required.' } });
   return null;
 }
 
-function parseProcessStartOptions(body: Record<string, unknown>): {
+function parseTerminalOptions(body: Record<string, unknown>): {
+  columns: number;
+  rows: number;
   timeoutMs: number;
-  stdoutHardMaxBytes: number;
-  stderrHardMaxBytes: number;
+  idleTimeoutMs: number;
+  maxBufferBytes: number;
 } {
   return {
-    timeoutMs: readOptionalIntField(body, 'timeout_ms', 3_600_000, 1, 3_600_000),
-    stdoutHardMaxBytes: readOptionalIntField(
+    columns: readOptionalIntField(body, 'columns', 80, 2, 500),
+    rows: readOptionalIntField(body, 'rows', 24, 1, 200),
+    timeoutMs: readOptionalIntField(body, 'timeout_ms', 0, 0, 3_600_000),
+    idleTimeoutMs: readOptionalIntField(
       body,
-      'stdout_hard_max_bytes',
-      NATIVE_STREAM_MAX_BYTES,
-      0,
-      NATIVE_STREAM_MAX_BYTES,
+      'idle_timeout_ms',
+      30 * 60 * 1000,
+      30_000,
+      24 * 60 * 60 * 1000,
     ),
-    stderrHardMaxBytes: readOptionalIntField(
+    maxBufferBytes: readOptionalIntField(
       body,
-      'stderr_hard_max_bytes',
-      NATIVE_STREAM_MAX_BYTES,
-      0,
-      NATIVE_STREAM_MAX_BYTES,
+      'max_buffer_bytes',
+      4 * 1024 * 1024,
+      65_536,
+      16 * 1024 * 1024,
     ),
   };
+}
+
+function validationError(message: string): Error & { code: string; statusCode: number } {
+  return Object.assign(new Error(message), { code: 'validation_error', statusCode: 400 });
 }
 
 /**
@@ -1528,26 +1450,14 @@ function parseProcessStartOptions(body: Record<string, unknown>): {
  */
 function parseExecNumericOptions(body: Record<string, unknown>): {
   timeoutMs: number;
-  yieldMs: number | undefined;
   stdoutMaxBytes: number;
   stderrMaxBytes: number;
 } {
   return {
     timeoutMs: readOptionalIntField(body, 'timeout_ms', 120_000, 1, 3_600_000),
-    yieldMs: readOptionalIntFieldWhenPresent(body, 'yield_time_ms', 1, 120_000),
     stdoutMaxBytes: readOptionalIntField(body, 'stdout_max_bytes', 16_384, 0, 1_048_576),
     stderrMaxBytes: readOptionalIntField(body, 'stderr_max_bytes', 16_384, 0, 1_048_576),
   };
-}
-
-function readOptionalIntFieldWhenPresent(
-  body: Record<string, unknown>,
-  field: string,
-  min: number,
-  max: number,
-): number | undefined {
-  if (body[field] === undefined) return undefined;
-  return readOptionalIntField(body, field, min, min, max);
 }
 
 function readOptionalIntField(

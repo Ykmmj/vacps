@@ -63,14 +63,18 @@ import {
   gitDiffInputSchema,
   gitStatusInputSchema,
   MCP_PROTOCOL_VERSION,
-  processReadInputSchema,
-  processStartCommandInputSchema,
-  processStartShellInputSchema,
-  processTerminateInputSchema,
-  processWriteInputSchema,
   shellExecInputSchema,
+  terminalCloseInputSchema,
+  terminalGetInputSchema,
+  terminalListInputSchema,
+  terminalOpenCommandInputSchema,
+  terminalOpenShellInputSchema,
+  terminalReadInputSchema,
+  terminalResizeInputSchema,
+  terminalSignalInputSchema,
+  terminalWriteInputSchema,
   TOOL_SCHEMA_REVISION,
-} from './tool-schemas.js';
+} from './schema/index.js';
 
 const okEnvelope = z.looseObject({
   ok: z.literal(true),
@@ -80,6 +84,24 @@ const okEnvelope = z.looseObject({
   generated_at: z.string(),
   warnings: z.array(z.string()),
 });
+
+const commandResultOutput = okEnvelope.extend({
+  backend_id: z.string(),
+  status: z.string(),
+  exit_code: z.number().nullable(),
+  signal: z.string().nullable(),
+  timed_out: z.boolean(),
+  started_at: z.string(),
+  finished_at: z.string(),
+  duration_ms: z.number(),
+  stdout: z.unknown(),
+  stderr: z.unknown(),
+}).shape;
+
+const terminalViewOutput = okEnvelope.extend({
+  terminal_id: z.string(),
+  status: z.string(),
+}).shape;
 
 function toolConfig(
   name: string,
@@ -791,14 +813,14 @@ export function createMcpServer(env: Env): McpServer {
     return backend;
   };
 
-  // ── Command / shell / process (Schema v3) ──────────────────────────
+  // ── One-shot command / shell and interactive terminals ────────────
   server.registerTool(
     'vacps.command.exec',
     toolConfig('vacps.command.exec', {
       description:
-        "Run a non-interactive program on a backend as its deployment user (argv form, no shell). Uses yield_time_ms for sync wait. If vacps.capabilities reports features.privileged_exec=true, root commands may be run explicitly as /usr/bin/sudo with arguments beginning ['-n', '--'].",
+        "Run a non-interactive program to completion as the backend deployment user (argv form, no shell). Use tasks.* for durable background work and terminal.* for a PTY. If vacps.capabilities reports features.privileged_exec=true, root commands may be run explicitly as /usr/bin/sudo with arguments beginning ['-n', '--'].",
       inputSchema: commandExecInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      outputSchema: commandResultOutput,
     }),
     wrap(async (args) => {
       const parsed = commandExecInputSchema.parse(args);
@@ -813,7 +835,7 @@ export function createMcpServer(env: Env): McpServer {
       description:
         'Run a shell command as the deployment user with full login environment (bash -lc, sources ~/.bashrc). Prefer vacps.command.exec for non-shell work. Set load_user_environment=false only for a clean --noprofile --norc shell. If vacps.capabilities reports features.privileged_exec=true, root commands may be prefixed explicitly with sudo -n --.',
       inputSchema: shellExecInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      outputSchema: commandResultOutput,
     }),
     wrap(async (args) => {
       const parsed = shellExecInputSchema.parse(args);
@@ -822,111 +844,139 @@ export function createMcpServer(env: Env): McpServer {
     }),
   );
 
-  const processStartOutput = okEnvelope.extend({
-    process_id: z.string(),
-    status: z.string(),
-  }).shape;
-
   server.registerTool(
-    'vacps.process.start_command',
-    toolConfig('vacps.process.start_command', {
+    'vacps.terminal.open_command',
+    toolConfig('vacps.terminal.open_command', {
       description:
-        'Start a long-running or interactive argv process (program + arguments). Returns a full Process Snapshot.',
-      inputSchema: processStartCommandInputSchema,
-      outputSchema: processStartOutput,
+        'Open an interactive UNIX PTY running an argv program. Output is one merged terminal stream.',
+      inputSchema: terminalOpenCommandInputSchema,
+      outputSchema: terminalViewOutput,
     }),
     wrap(async (args) => {
-      const parsed = processStartCommandInputSchema.parse(args);
+      const parsed = terminalOpenCommandInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.processStartCommand(backend, {
-        program: parsed.program,
-        ...(parsed.arguments ? { arguments: parsed.arguments } : {}),
-        ...(parsed.working_directory ? { working_directory: parsed.working_directory } : {}),
-        ...(parsed.environment ? { environment: parsed.environment } : {}),
-        ...(typeof parsed.tty === 'boolean' ? { tty: parsed.tty } : {}),
-        ...(parsed.timeout_ms !== undefined ? { timeout_ms: parsed.timeout_ms } : {}),
-        ...(parsed.stdout_hard_max_bytes !== undefined
-          ? { stdout_hard_max_bytes: parsed.stdout_hard_max_bytes }
-          : {}),
-        ...(parsed.stderr_hard_max_bytes !== undefined
-          ? { stderr_hard_max_bytes: parsed.stderr_hard_max_bytes }
-          : {}),
-        ...(parsed.idempotency_key ? { idempotency_key: parsed.idempotency_key } : {}),
-      })) as Record<string, unknown>;
+      return (await client.terminalOpenCommand(backend, parsed)) as Record<string, unknown>;
     }),
   );
 
   server.registerTool(
-    'vacps.process.start_shell',
-    toolConfig('vacps.process.start_shell', {
+    'vacps.terminal.open_shell',
+    toolConfig('vacps.terminal.open_shell', {
+      description: 'Open an interactive login shell in a UNIX PTY as the backend deployment user.',
+      inputSchema: terminalOpenShellInputSchema,
+      outputSchema: terminalViewOutput,
+    }),
+    wrap(async (args) => {
+      const parsed = terminalOpenShellInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.terminalOpenShell(backend, parsed)) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.terminal.list',
+    toolConfig('vacps.terminal.list', {
+      description: 'List live and recently completed PTY terminal sessions on a backend.',
+      inputSchema: terminalListInputSchema,
+      outputSchema: okEnvelope.extend({ terminals: z.array(z.unknown()) }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = terminalListInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.terminalList(backend)) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.terminal.get',
+    toolConfig('vacps.terminal.get', {
+      description: 'Get current state and byte cursors for one PTY terminal.',
+      inputSchema: terminalGetInputSchema,
+      outputSchema: terminalViewOutput,
+    }),
+    wrap(async (args) => {
+      const parsed = terminalGetInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.terminalGet(backend, parsed.terminal_id)) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.terminal.read',
+    toolConfig('vacps.terminal.read', {
       description:
-        'Start a long-running or interactive shell-string process. Returns a full Process Snapshot.',
-      inputSchema: processStartShellInputSchema,
-      outputSchema: processStartOutput,
+        'Read merged PTY output as UTF-8 text from an absolute byte cursor. dropped=true reports rolling-buffer loss.',
+      inputSchema: terminalReadInputSchema,
+      outputSchema: okEnvelope.extend({
+        terminal_id: z.string(),
+        status: z.string(),
+        content: z.string(),
+        next_cursor: z.string(),
+      }).shape,
     }),
     wrap(async (args) => {
-      const parsed = processStartShellInputSchema.parse(args);
+      const parsed = terminalReadInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.processStartShell(backend, {
-        command: parsed.command,
-        ...(parsed.shell ? { shell: parsed.shell } : {}),
-        ...(typeof parsed.load_user_environment === 'boolean'
-          ? { load_user_environment: parsed.load_user_environment }
-          : {}),
-        ...(parsed.working_directory ? { working_directory: parsed.working_directory } : {}),
-        ...(parsed.environment ? { environment: parsed.environment } : {}),
-        ...(typeof parsed.tty === 'boolean' ? { tty: parsed.tty } : {}),
-        ...(parsed.timeout_ms !== undefined ? { timeout_ms: parsed.timeout_ms } : {}),
-        ...(parsed.stdout_hard_max_bytes !== undefined
-          ? { stdout_hard_max_bytes: parsed.stdout_hard_max_bytes }
-          : {}),
-        ...(parsed.stderr_hard_max_bytes !== undefined
-          ? { stderr_hard_max_bytes: parsed.stderr_hard_max_bytes }
-          : {}),
-        ...(parsed.idempotency_key ? { idempotency_key: parsed.idempotency_key } : {}),
-      })) as Record<string, unknown>;
+      return (await client.terminalRead(backend, parsed)) as Record<string, unknown>;
     }),
   );
 
   server.registerTool(
-    'vacps.process.read',
-    toolConfig('vacps.process.read', {
-      description: 'Read stdout/stderr chunks from a process started on a backend.',
-      inputSchema: processReadInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    'vacps.terminal.write',
+    toolConfig('vacps.terminal.write', {
+      description: 'Write UTF-8 text to a PTY terminal.',
+      inputSchema: terminalWriteInputSchema,
+      outputSchema: okEnvelope.extend({
+        terminal_id: z.string(),
+        written_bytes: z.number(),
+      }).shape,
     }),
     wrap(async (args) => {
-      const parsed = processReadInputSchema.parse(args);
+      const parsed = terminalWriteInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.processRead(backend, parsed)) as Record<string, unknown>;
+      return (await client.terminalWrite(backend, parsed)) as Record<string, unknown>;
     }),
   );
 
   server.registerTool(
-    'vacps.process.write',
-    toolConfig('vacps.process.write', {
-      description: 'Write to process stdin on a backend.',
-      inputSchema: processWriteInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string() }).shape,
+    'vacps.terminal.resize',
+    toolConfig('vacps.terminal.resize', {
+      description: 'Change PTY rows and columns; the kernel delivers SIGWINCH.',
+      inputSchema: terminalResizeInputSchema,
+      outputSchema: terminalViewOutput,
     }),
     wrap(async (args) => {
-      const parsed = processWriteInputSchema.parse(args);
+      const parsed = terminalResizeInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.processWrite(backend, parsed)) as Record<string, unknown>;
+      return (await client.terminalResize(backend, parsed)) as Record<string, unknown>;
     }),
   );
 
   server.registerTool(
-    'vacps.process.terminate',
-    toolConfig('vacps.process.terminate', {
-      description: 'Terminate a process on a backend.',
-      inputSchema: processTerminateInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+    'vacps.terminal.signal',
+    toolConfig('vacps.terminal.signal', {
+      description: 'Send an explicit signal to the PTY foreground process group.',
+      inputSchema: terminalSignalInputSchema,
+      outputSchema: terminalViewOutput,
     }),
     wrap(async (args) => {
-      const parsed = processTerminateInputSchema.parse(args);
+      const parsed = terminalSignalInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.processTerminate(backend, parsed)) as Record<string, unknown>;
+      return (await client.terminalSignal(backend, parsed)) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.terminal.close',
+    toolConfig('vacps.terminal.close', {
+      description: 'Close a PTY session with SIGHUP, grace period, then SIGKILL if needed.',
+      inputSchema: terminalCloseInputSchema,
+      outputSchema: terminalViewOutput,
+    }),
+    wrap(async (args) => {
+      const parsed = terminalCloseInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.terminalClose(backend, parsed)) as Record<string, unknown>;
     }),
   );
 
@@ -1158,7 +1208,7 @@ export function createMcpServer(env: Env): McpServer {
       description:
         'git status --short on a backend working tree. Envelope ok=true means tool ran; check operation_succeeded / exit_code for git success.',
       inputSchema: gitStatusInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      outputSchema: commandResultOutput,
     }),
     wrap(async (args) => {
       const parsed = gitStatusInputSchema.parse(args);
@@ -1180,7 +1230,7 @@ export function createMcpServer(env: Env): McpServer {
       description:
         'git diff on a backend working tree. Envelope ok=true means tool ran; check operation_succeeded / exit_code for git success.',
       inputSchema: gitDiffInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      outputSchema: commandResultOutput,
     }),
     wrap(async (args) => {
       const parsed = gitDiffInputSchema.parse(args);
@@ -1203,7 +1253,7 @@ export function createMcpServer(env: Env): McpServer {
       description:
         'Apply a unified diff with git apply on a backend. Supports idempotency_key for safe retries. Envelope ok=true means the tool ran; check operation_succeeded / exit_code for whether git apply succeeded.',
       inputSchema: gitApplyInputSchema,
-      outputSchema: okEnvelope.extend({ process_id: z.string(), status: z.string() }).shape,
+      outputSchema: commandResultOutput,
     }),
     wrap(async (args) => {
       const parsed = gitApplyInputSchema.parse(args);
@@ -1248,7 +1298,7 @@ export function createMcpServer(env: Env): McpServer {
 
 /** Stable hash of advertised tool schemas for Host cache invalidation. */
 export async function computeToolSchemaHash(): Promise<string> {
-  const { publicToolJsonSchemas } = await import('./tool-schemas.js');
+  const { publicToolJsonSchemas } = await import('./schema/index.js');
   const payload = JSON.stringify(publicToolJsonSchemas());
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
   return `sha256:${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')}`;

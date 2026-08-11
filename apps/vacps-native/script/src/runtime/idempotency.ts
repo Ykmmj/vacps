@@ -28,7 +28,7 @@ type StoreEntry =
     };
 
 /**
- * Bounded in-memory idempotency for mutating tools (apps/vacps IdempotencyStore).
+ * Bounded in-memory idempotency for mutating tools.
  *
  * Semantics:
  * - One Map only; public API is execute / withIdempotencyMeta.

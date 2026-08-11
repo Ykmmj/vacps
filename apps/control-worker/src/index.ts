@@ -22,7 +22,7 @@ import { CloudflareOAuthService } from './cloudflare/oauth-service.js';
 import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
 import { handleAuthorize } from './mcp/authorize-page.js';
-import { publicToolJsonSchemas } from './mcp/tool-schemas.js';
+import { publicToolJsonSchemas } from './mcp/schema/index.js';
 import { BackendClient } from './registry/backend-client.js';
 import { CloudflareOAuthRepository } from './registry/cloudflare-oauth-repository.js';
 import { ManagedTunnelRepository } from './registry/managed-tunnel-repository.js';

@@ -1,5 +1,5 @@
 /**
- * Agent → control-plane request signatures (parity with apps/vacps).
+ * Agent → control-plane request signatures.
  * Uses vacps:crypto (OpenSSL) instead of Node webcrypto.
  * Canonical version: vacps-request-v2.
  */

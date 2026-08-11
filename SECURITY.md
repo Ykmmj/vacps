@@ -7,9 +7,8 @@ Do not open a public issue for a credential leak, authentication bypass, command
 ## Deployment requirements
 
 - Put the control-plane domain, Web UI, management API, and `/mcp` behind Cloudflare Access or an OAuth-aware MCP handler.
-- Use a unique, random `BACKEND_SHARED_TOKEN` of at least 32 characters. Store it only as a Worker secret and a VPS environment file readable by the agent service account.
-- Expose the Agent only through Cloudflare Tunnel; keep `LISTEN_HOST=127.0.0.1`.
-- Use a dedicated Linux user for the Agent. NOPASSWD sudo turns control-plane compromise into root access.
-- Use TLS Redis (`rediss://`) whenever possible and do not expose Redis to the public Internet. If a provider only offers `redis://`, keep it on a private or otherwise tightly restricted network.
-- Back up D1 and the VPS SQLite database. Redis is runtime state, not the system of record.
+- Protect the control-plane signing key and every Agent's locally generated Ed25519 private key. Never copy an Agent private key to the Worker or browser.
+- Expose the Agent only through Cloudflare Tunnel; keep `VACPS_LISTEN_HOST=127.0.0.1`.
+- The Agent runs as the account that invokes deployment. `--allow-root` or direct root deployment turns control-plane compromise into root access.
+- Back up D1 and the VPS SQLite database.
 - Treat all task logs as potentially sensitive. Never emit tokens, model keys, or environment dumps into command output.

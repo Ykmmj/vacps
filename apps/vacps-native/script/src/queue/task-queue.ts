@@ -10,7 +10,7 @@ import { DEFAULT_SCHEDULE_POLICY, parseSchedulePolicy } from './schedule-logic';
 import { SchedulerStore, utcMinuteKey } from './scheduler-store';
 
 /**
- * Local inbox + single-flight worker (apps/vacps TaskQueue without BullMQ/Redis).
+ * Local inbox + single-flight worker.
  * Work wake is a TaskQueue-owned JS notification (pending flag + at most one waiter).
  */
 export class TaskQueue {

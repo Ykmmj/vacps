@@ -16,7 +16,6 @@
     "configure:managed-tunnels": "bash scripts/configure-managed-tunnels.sh",
     "repair:managed-tunnel-account": "bash scripts/configure-managed-tunnel-account.sh",
     "dev:control": "pnpm --filter @vacps/control-worker dev",
-    "dev:agent": "pnpm --filter @vacps/agent dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",

@@ -39,8 +39,7 @@ async function readTextFile(path: string): Promise<string> {
 }
 
 /**
- * Linux /proc-based telemetry (apps/vacps NodeTelemetryCollector counterpart).
- * No Node.js os module — reads /proc and optional `df`.
+ * Linux /proc-based telemetry using /proc and optional `df` probes.
  */
 export class NativeTelemetryCollector {
   private prevCpu: CpuSample | undefined;
@@ -85,8 +84,6 @@ export class NativeTelemetryCollector {
         version: host.version().slice(0, 48) || '0.1.0',
         uptimeSeconds: this.uptimeSeconds(),
         worker: { running: live.workerRunning, concurrency: 1 },
-        redis: { connected: false },
-        pi: { available: false },
       },
       metrics,
       system,

@@ -10,7 +10,7 @@ export * from './defs.js';
 export * from './envelope.js';
 export * from './files.js';
 export * from './git.js';
-export * from './process.js';
+export * from './terminal.js';
 export * from './registry.js';
 export * from './schedules.js';
 export * from './shell.js';

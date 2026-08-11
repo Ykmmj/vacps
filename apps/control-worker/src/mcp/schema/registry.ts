@@ -26,13 +26,6 @@ import {
 } from './files.js';
 import { gitApplyInputSchema, gitDiffInputSchema, gitStatusInputSchema } from './git.js';
 import {
-  processReadInputSchema,
-  processStartCommandInputSchema,
-  processStartShellInputSchema,
-  processTerminateInputSchema,
-  processWriteInputSchema,
-} from './process.js';
-import {
   schedulesCreateInputSchema,
   schedulesGetInputSchema,
   schedulesIdInputSchema,
@@ -40,6 +33,17 @@ import {
   schedulesUpdateInputSchema,
 } from './schedules.js';
 import { shellExecInputSchema } from './shell.js';
+import {
+  terminalCloseInputSchema,
+  terminalGetInputSchema,
+  terminalListInputSchema,
+  terminalOpenCommandInputSchema,
+  terminalOpenShellInputSchema,
+  terminalReadInputSchema,
+  terminalResizeInputSchema,
+  terminalSignalInputSchema,
+  terminalWriteInputSchema,
+} from './terminal.js';
 import {
   tasksCleanupPreviewInputSchema,
   tasksCleanupRunInputSchema,
@@ -71,11 +75,15 @@ export function publicToolJsonSchemas(): Record<string, unknown> {
       'vacps.capabilities.get': z.toJSONSchema(capabilitiesGetInputSchema),
       'vacps.command.exec': z.toJSONSchema(commandExecInputSchema),
       'vacps.shell.exec': z.toJSONSchema(shellExecInputSchema),
-      'vacps.process.start_command': z.toJSONSchema(processStartCommandInputSchema),
-      'vacps.process.start_shell': z.toJSONSchema(processStartShellInputSchema),
-      'vacps.process.read': z.toJSONSchema(processReadInputSchema),
-      'vacps.process.write': z.toJSONSchema(processWriteInputSchema),
-      'vacps.process.terminate': z.toJSONSchema(processTerminateInputSchema),
+      'vacps.terminal.open_command': z.toJSONSchema(terminalOpenCommandInputSchema),
+      'vacps.terminal.open_shell': z.toJSONSchema(terminalOpenShellInputSchema),
+      'vacps.terminal.list': z.toJSONSchema(terminalListInputSchema),
+      'vacps.terminal.get': z.toJSONSchema(terminalGetInputSchema),
+      'vacps.terminal.read': z.toJSONSchema(terminalReadInputSchema),
+      'vacps.terminal.write': z.toJSONSchema(terminalWriteInputSchema),
+      'vacps.terminal.resize': z.toJSONSchema(terminalResizeInputSchema),
+      'vacps.terminal.signal': z.toJSONSchema(terminalSignalInputSchema),
+      'vacps.terminal.close': z.toJSONSchema(terminalCloseInputSchema),
       'vacps.files.stat': z.toJSONSchema(filesStatInputSchema),
       'vacps.files.read': z.toJSONSchema(filesReadInputSchema),
       'vacps.files.list': z.toJSONSchema(filesListInputSchema),

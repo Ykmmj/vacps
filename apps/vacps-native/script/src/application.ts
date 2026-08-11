@@ -29,7 +29,8 @@ import { assertControlPlaneAuthConfig } from './security/http-auth';
 import { createServer } from './server/app';
 import { createInboundRequestAdapter } from './server/inbound-request';
 import type { App } from './server/router';
-import { ProcessSessions } from './runtime/process-sessions';
+import { CommandRunner } from './runtime/command-runner';
+import { TerminalSessions } from './runtime/terminal-sessions';
 import { TaskStore } from './storage/task-store';
 import {
   buildLivenessHealth,
@@ -56,7 +57,8 @@ export class Application {
   private store: TaskStore | undefined;
   private queue: TaskQueue | undefined;
   private telemetry: NativeTelemetryCollector | undefined;
-  private processes: ProcessSessions | undefined;
+  private commands: CommandRunner | undefined;
+  private terminals: TerminalSessions | undefined;
   private httpApp: App | undefined;
   private server: http.Server | undefined;
   /** Per-application inbound adapter (owns request-id sequence). */
@@ -96,7 +98,8 @@ export class Application {
     const schedulers = await SchedulerStore.create(this.db);
     this.queue = new TaskQueue(this.store, executor, schedulers);
     this.telemetry = new NativeTelemetryCollector(this.config, this.store);
-    this.processes = new ProcessSessions(this.config.BACKEND_ID);
+    this.commands = new CommandRunner(this.config.BACKEND_ID);
+    this.terminals = new TerminalSessions(this.config.BACKEND_ID);
 
     const recovered = await this.queue.recoverInterruptedOnBoot();
     if (recovered > 0) {
@@ -112,7 +115,8 @@ export class Application {
       config: this.config,
       queue: this.queue,
       telemetry: this.telemetry,
-      processes: this.processes,
+      commands: this.commands,
+      terminals: this.terminals,
       getControlPlaneState: () => this.cpState,
       isReady: () => this.ready,
       getLivenessHealth: () => this.getLivenessHealth(),
@@ -312,7 +316,7 @@ export class Application {
 
   /**
    * Idempotent product close. Partial-state checks live only here (rollback boundary).
-   * Order: mark not ready → stop ingress → process sessions → stop queue → join loops → Store.
+   * Order: mark not ready → stop ingress → commands/terminals → queue → loops → Store.
    */
   private async runProductClose(): Promise<void> {
     log.info('application shutdown');
@@ -337,17 +341,30 @@ export class Application {
       this.server = undefined;
     }
 
-    if (this.processes !== undefined) {
+    if (this.commands !== undefined) {
       try {
-        await this.processes.close();
+        await this.commands.close();
       } catch (error) {
         const err = toError(error);
         if (closeError === undefined) {
           closeError = err;
         }
-        log.warn(`process sessions close during product close: ${err.message}`);
+        log.warn(`command runner close during product close: ${err.message}`);
       }
-      this.processes = undefined;
+      this.commands = undefined;
+    }
+
+    if (this.terminals !== undefined) {
+      try {
+        await this.terminals.close();
+      } catch (error) {
+        const err = toError(error);
+        if (closeError === undefined) {
+          closeError = err;
+        }
+        log.warn(`terminal sessions close during product close: ${err.message}`);
+      }
+      this.terminals = undefined;
     }
 
     if (this.queue !== undefined) {

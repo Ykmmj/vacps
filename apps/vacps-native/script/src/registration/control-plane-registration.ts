@@ -18,7 +18,7 @@ function bodyText(body: ArrayBuffer): string {
   return new TextDecoder('utf-8').decode(new Uint8Array(body));
 }
 
-/** POST /api/registrations — parity with apps/vacps registration module. */
+/** POST /api/registrations to enroll this Agent with the control plane. */
 export async function registerWithControlPlane(config: AgentConfig): Promise<string | undefined> {
   // Skip until PUBLIC_BASE_URL is a real absolute URL (managed --public-url or quick-tunnel).
   if (!registrationConfigured(config) || !config.PUBLIC_BASE_URL) {

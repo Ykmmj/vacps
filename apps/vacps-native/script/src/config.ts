@@ -1,7 +1,7 @@
 import * as host from 'vacps:host';
 
 /**
- * Agent config from process env (parity with apps/vacps/src/config.ts).
+ * Agent configuration from the process environment.
  * Unset CONTROL_PLANE_URL disables registration/telemetry.
  */
 export interface AgentConfig {
