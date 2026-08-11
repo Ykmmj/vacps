@@ -31,5 +31,6 @@ JSModuleDef* init_module_store(JSContext* ctx, const char* name);
 JSModuleDef* init_module_fs(JSContext* ctx, const char* name);
 JSModuleDef* init_module_http(JSContext* ctx, const char* name);
 JSModuleDef* init_module_process(JSContext* ctx, const char* name);
+JSModuleDef* init_module_terminal(JSContext* ctx, const char* name);
 
 }  // namespace vacps::js

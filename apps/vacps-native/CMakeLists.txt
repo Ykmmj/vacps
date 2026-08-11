@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(vacps-native VERSION 0.1.10 LANGUAGES C CXX
+project(vacps-native VERSION 0.1.11 LANGUAGES C CXX
   DESCRIPTION "Asio + QuickJS native agent runtime")
 
 set(CMAKE_CXX_STANDARD 23)
@@ -172,6 +172,22 @@ if(VACPS_BOOST_PROCESS_TARGET STREQUAL "vacps_boost_process")
   )
 endif()
 
+# ── Linux PTY terminal domain (shared process budget) ───────────────
+vacps_layer(vacps_terminal
+  src/terminal/terminal.cpp
+)
+target_link_libraries(vacps_terminal PUBLIC
+  vacps_base
+  vacps_process
+  ${VACPS_BOOST_PROCESS_TARGET}
+)
+if(VACPS_BOOST_PROCESS_TARGET STREQUAL "vacps_boost_process")
+  target_compile_definitions(vacps_terminal PRIVATE
+    BOOST_PROCESS_USE_STD_FS=1
+    BOOST_PROCESS_STATIC_LINK=1
+  )
+endif()
+
 # ── Global APIs: URL / TextEncoder / TextDecoder ───────────────────
 # Headers use Runtime / binding types; link is resolved by vacps_runtime
 # (avoids static-lib cycle: runtime → globals → runtime).
@@ -214,6 +230,7 @@ vacps_layer(vacps_modules
   src/modules/fs.cpp
   src/modules/http.cpp
   src/modules/process.cpp
+  src/modules/terminal.cpp
 )
 target_link_libraries(vacps_modules PUBLIC
   vacps_base
@@ -223,6 +240,7 @@ target_link_libraries(vacps_modules PUBLIC
   vacps_fs
   vacps_http
   vacps_process
+  vacps_terminal
   vacps_binding
 )
 
@@ -291,5 +309,5 @@ include(GNUInstallDirs)
 install(TARGETS vacps-agent RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 message(STATUS "vacps-native ${PROJECT_VERSION} — Asio + QuickJS runtime")
-message(STATUS "  layers: vacps_base vacps_bootstrap vacps_url vacps_text vacps_crypto vacps_http vacps_storage vacps_fs vacps_process vacps_globals vacps_modules vacps_runtime vacps_host")
+message(STATUS "  layers: vacps_base vacps_bootstrap vacps_url vacps_text vacps_crypto vacps_http vacps_storage vacps_fs vacps_process vacps_terminal vacps_globals vacps_modules vacps_runtime vacps_host")
 message(STATUS "  binary: vacps-agent → vacps-agent-linux-x86_64")

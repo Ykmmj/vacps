@@ -13,8 +13,6 @@ describe('backend telemetry contracts', () => {
       version: '0.1.0',
       uptimeSeconds: 42,
       worker: { running: true, concurrency: 1 },
-      redis: { connected: true },
-      pi: { available: false },
     },
     metrics: {
       cpu: { usagePercent: 17.4, load1: 0.42, cores: 2 },

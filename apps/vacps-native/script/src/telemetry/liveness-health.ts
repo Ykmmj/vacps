@@ -42,7 +42,5 @@ export function buildLivenessHealth(input: LivenessHealthInput): BackendHealth {
     version: input.version,
     uptimeSeconds: input.uptimeSeconds,
     worker: { running: input.workerRunning, concurrency: 1 },
-    redis: { connected: false },
-    pi: { available: false },
   };
 }

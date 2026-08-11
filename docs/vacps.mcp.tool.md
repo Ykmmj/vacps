@@ -73,7 +73,7 @@ Wire: **nested JSON**, **snake_case** keys, **snake_case** enums.
 
 ---
 
-## 最终 Tool 集（45）
+## 最终 Tool 集（49）
 
 ```text
 vacps.backends.list
@@ -83,11 +83,15 @@ vacps.capabilities.get
 vacps.command.exec
 vacps.shell.exec
 
-vacps.process.start_command
-vacps.process.start_shell
-vacps.process.read
-vacps.process.write
-vacps.process.terminate
+vacps.terminal.open_command
+vacps.terminal.open_shell
+vacps.terminal.list
+vacps.terminal.get
+vacps.terminal.read
+vacps.terminal.write
+vacps.terminal.resize
+vacps.terminal.signal
+vacps.terminal.close
 
 vacps.files.stat
 vacps.files.read
@@ -134,6 +138,11 @@ vacps.schedules.run_now
 ```text
 vacps.tasks.create
 vacps.process.start
+vacps.process.start_command
+vacps.process.start_shell
+vacps.process.read
+vacps.process.write
+vacps.process.terminate
 ```
 
 ---
@@ -142,13 +151,13 @@ vacps.process.start
 
 每个 Tool 显式四 Hint（不依赖默认值）。
 
-| 类别     | readOnly | destructive | idempotent | openWorld | Tools                                                                                                                                       |
-| -------- | -------- | ----------- | ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| 只读     | true     | false       | true       | false     | backends.*, capabilities.get, process.read, files.stat/read/list/glob/grep, git.status/diff, tasks.get/list/output.read, schedules.get/list |
-| 命令执行 | false    | true        | false      | true      | command.exec, shell.exec, process.start__, tasks.create__, tasks.retry, schedules.run_now                                                   |
-| 本地修改 | false    | true        | false      | false     | process.write, files.write/edit/move/delete/apply_patch, git.apply, schedules.create/update                                                 |
-| mkdir    | false    | false       | true       | false     | files.mkdir                                                                                                                                 |
-| 幂等破坏 | false    | true        | true       | false     | process.terminate, tasks.cancel, schedules.delete                                                                                           |
+| 类别     | readOnly | destructive | idempotent | openWorld | Tools                                                                                                                                                 |
+| -------- | -------- | ----------- | ---------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 只读     | true     | false       | true       | false     | backends.*, capabilities.get, terminal.list/get/read, files.stat/read/list/glob/grep, git.status/diff, tasks.get/list/output.read, schedules.get/list |
+| 命令执行 | false    | true        | false      | true      | command.exec, shell.exec, terminal.open_command/open_shell, tasks.create__, tasks.retry, schedules.run_now                                            |
+| 本地修改 | false    | true        | false      | false     | terminal.write/resize/signal, files.write/edit/move/delete/apply_patch, git.apply, schedules.create/update                                            |
+| mkdir    | false    | false       | true       | false     | files.mkdir                                                                                                                                           |
+| 幂等破坏 | false    | true        | true       | false     | terminal.close, tasks.cancel/delete/pin/unpin/legal_hold__, tasks.cleanup.run, schedules.delete                                                       |
 
 ---
 
@@ -209,36 +218,74 @@ command | shell | agent
 }
 ```
 
-### Process（无 mode / oneOf）
+### Terminal（真实 PTY）
 
-#### `vacps.process.start_command`
+`terminal.*` 是在线、短生命周期的交互式 UNIX PTY。它不持久化、不重试，也不进入任务队列。无人值守、需重试、需调度或需保留执行记录的工作继续使用 `tasks.*`；只需等待一次最终结果的非交互命令使用 `command.exec` / `shell.exec`。
+
+#### `vacps.terminal.open_command`
 
 ```json
 {
   "backend_id": "backend-01",
-  "program": "node",
-  "arguments": ["server.js"],
+  "program": "/usr/bin/python3",
+  "arguments": ["-q"],
   "working_directory": "/srv/app",
-  "tty": false,
+  "columns": 120,
+  "rows": 40,
   "timeout_ms": 3600000,
-  "stdout_hard_max_bytes": 104857600,
-  "stderr_hard_max_bytes": 104857600,
-  "idempotency_key": "process-command-001"
+  "idle_timeout_ms": 1800000,
+  "max_buffer_bytes": 4194304
 }
 ```
 
-#### `vacps.process.start_shell`
+#### `vacps.terminal.open_shell`
 
 ```json
 {
   "backend_id": "backend-01",
-  "command": "npm run dev",
   "shell": "/bin/bash",
-  "load_user_environment": true,
-  "tty": true,
-  "timeout_ms": 3600000
+  "login": true,
+  "working_directory": "/srv/app",
+  "columns": 120,
+  "rows": 40
 }
 ```
+
+#### 文本读写与控制
+
+```json
+{
+  "tool": "vacps.terminal.write",
+  "arguments": {
+    "backend_id": "backend-01",
+    "terminal_id": "term_0123456789abcdef0123456789abcdef",
+    "data": "printf '你好\\n'\n"
+  }
+}
+```
+
+`terminal.read` 从绝对 UTF-8 **字节游标**读取合并后的 PTY 输出，直接返回 `content` 文本：
+
+```json
+{
+  "terminal_id": "term_0123456789abcdef0123456789abcdef",
+  "status": "running",
+  "content": "你好\r\n",
+  "next_cursor": "8",
+  "available_from": "0",
+  "dropped": false,
+  "eof": false
+}
+```
+
+- `max_bytes`: `4..1048576`；实现不会在返回文本末尾拆开 UTF-8 字符。
+- `wait_ms`: `0..60000`；没有新输出时可短暂等待。
+- `dropped=true`: 调用方游标落后于滚动缓冲区，必须从返回的 `next_cursor` 继续。
+- PTY 原生合并 stdout/stderr；它不是两条独立 pipe。
+- `terminal.resize` 修改 rows/columns，内核向前台进程组发送 `SIGWINCH`。
+- `terminal.signal` 支持 `SIGINT|SIGTERM|SIGHUP|SIGKILL|SIGTSTP|SIGCONT`。
+- `terminal.close` 执行 `SIGHUP → grace_period_ms → SIGKILL`，并等待进程回收和 PTY EOF。
+- `terminal.list/get` 读取当前会话状态；完成的会话短暂保留，显式 close 后立即移除。
 
 ### Schedule
 
@@ -308,7 +355,7 @@ command | shell | agent
 ```text
 backends.list / get_status
 capabilities.get
-process.read
+terminal.list / get / read
 files.stat / read / list / glob / grep
 git.status / diff
 tasks.get / list / output.read / cleanup.preview
@@ -454,7 +501,7 @@ revision: 1..2147483647
 | 旧调用                                     | 结果                                               |
 | ------------------------------------------ | -------------------------------------------------- |
 | `vacps.tasks.create` + `type`/`shell.mode` | unknown tool                                       |
-| `vacps.process.start` + `mode`             | unknown tool                                       |
+| `vacps.process.*`                          | unknown tool                                       |
 | schedule `{ cron, task_template }`         | invalid_arguments / validation                     |
 | 只读 tool 传 `idempotency_key`             | validation（additionalProperties / unknown field） |
 
@@ -475,15 +522,14 @@ apps/control-worker/src/mcp/
     backends.ts
     command.ts
     shell.ts
-    process.ts
+    terminal.ts
     files.ts
     git.ts
     tasks.ts
     schedules.ts
     registry.ts             # publicToolJsonSchemas（全量 tools）
     index.ts
-  tool-schemas.ts           # 兼容 re-export
-  task-schedule-adapters.ts # 兼容 re-export
+  task-schedule-adapters.ts
 ```
 
 D1 schedule 行：`task_json`（V3 task 载荷）；`cron`/`timezone` 为 trigger 的列存储。
@@ -492,7 +538,7 @@ D1 schedule 行：`task_json`（V3 task 载荷）；`cron`/`timezone` 为 trigge
 
 ```text
 packages/contracts  (kind + snake_case task/schedule)
-apps/vacps          (agent HTTP 同形状执行)
+apps/vacps-native/script  (Agent HTTP 同形状执行)
 ```
 
 Agent 任务 dispatch 示例：
@@ -520,5 +566,6 @@ Agent 任务 dispatch 示例：
 Connector / App 重新拉取 Tool 定义
 ```
 
-`TOOL_SCHEMA_REVISION` 当前：`2026-07-29-schema-v3`  
-MCP protocol meta：`0.5.0`
+`TOOL_SCHEMA_REVISION` 当前：`2026-08-11-schema-v3-r9-terminal-text`
+
+MCP protocol meta：`0.5.3`

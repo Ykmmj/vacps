@@ -34,12 +34,12 @@ export function utf8ByteLengthOfString(s: string): number {
 }
 
 /**
- * Longest valid UTF-8 prefix length ≤ limit (do not split a multi-byte sequence).
- * Operates on already-encoded bytes; not a full codec.
+ * Longest prefix length ≤ limit that does not end inside a UTF-8 sequence.
+ * Invalid bytes are left to TextDecoder's replacement policy; this is not a codec.
  */
 export function utf8PrefixEnd(bytes: Uint8Array, limit: number): number {
-  let end = Math.min(limit, bytes.length);
-  if (end === bytes.length || end === 0) return end;
+  const end = Math.min(limit, bytes.length);
+  if (end === 0) return end;
 
   let lead = end - 1;
   while (lead > 0 && (bytes[lead]! & 0xc0) === 0x80) {
@@ -52,7 +52,7 @@ export function utf8PrefixEnd(bytes: Uint8Array, limit: number): number {
   else if ((first & 0xe0) === 0xc0) width = 2;
   else if ((first & 0xf0) === 0xe0) width = 3;
   else if ((first & 0xf8) === 0xf0) width = 4;
-  else return lead;
+  else return end;
 
   return lead + width <= end ? end : lead;
 }

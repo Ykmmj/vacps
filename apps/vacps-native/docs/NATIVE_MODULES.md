@@ -2,16 +2,17 @@
 
 当前 **ModuleCatalog** 注册并编译的 `vacps:*` 模块：
 
-| Specifier       | 形态                                                |
-| --------------- | --------------------------------------------------- |
-| `vacps:crypto`  | 同步自由函数                                        |
-| `vacps:host`    | 同步自由函数（进程信息）                            |
-| `vacps:log`     | 同步日志 + async `flush`                            |
-| `vacps:timer`   | Asio 原生 async `sleep`                             |
-| `vacps:store`   | 仅导出 class `Store`（静态 `open` + 实例方法）      |
-| `vacps:fs`      | class `File` + 命名空间路径操作（async）            |
-| `vacps:http`    | outbound `request`（async）+ inbound class `Server` |
-| `vacps:process` | class `Process` + `run`（async；子进程）            |
+| Specifier        | 形态                                                |
+| ---------------- | --------------------------------------------------- |
+| `vacps:crypto`   | 同步自由函数                                        |
+| `vacps:host`     | 同步自由函数（进程信息）                            |
+| `vacps:log`      | 同步日志 + async `flush`                            |
+| `vacps:timer`    | Asio 原生 async `sleep`                             |
+| `vacps:store`    | 仅导出 class `Store`（静态 `open` + 实例方法）      |
+| `vacps:fs`       | class `File` + 命名空间路径操作（async）            |
+| `vacps:http`     | outbound `request`（async）+ inbound class `Server` |
+| `vacps:process`  | class `Process` + `run`（async；子进程）            |
+| `vacps:terminal` | class `Terminal`（async；Linux PTY）                |
 
 另有产品全局 API（非 `vacps:` 模块）：`URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder`。
 
@@ -388,3 +389,23 @@ TS：`script/types/vacps-process.d.ts`。
 默认：`Process` 类 stdin pipe/open；`run` stdin ignore/closed。所有域工作在 `detail::Runtime::Impl::main_executor`；stop_token 经 dispose 桥到 owner executor（不在 callback 线程改域状态）。
 
 以 `ModuleCatalog` 构造函数与 `CMakeLists.txt` 为准。
+
+---
+
+## `vacps:terminal`（交互式 PTY）
+
+导出 class `Terminal`。域层与产品层职责、生命周期和 MCP 映射见
+[`TERMINAL_RUNTIME.md`](./TERMINAL_RUNTIME.md)。TS：`script/types/vacps-terminal.d.ts`。
+
+| API                                      | 说明                                                         |
+| ---------------------------------------- | ------------------------------------------------------------ |
+| `new Terminal(command, args?, options?)` | 创建未启动的 Linux UNIX 98 PTY 会话                          |
+| `start()`                                | 创建 session/process group，slave 接到 stdin/stdout/stderr   |
+| `write(data)`                            | 串行写 PTY master                                            |
+| `read(options?)`                         | 按绝对字节 offset 增量读取有界滚动缓冲区                     |
+| `resize(columns, rows)`                  | `TIOCSWINSZ`；内核生成 `SIGWINCH`                            |
+| `signal(signal)`                         | 向终端进程组发送受支持信号                                   |
+| `snapshot()` / `waitForExit()`           | 当前状态 / 等待真实 reap 与 PTY EOF                          |
+| `close(gracePeriodMs?)`                  | `SIGHUP → grace → SIGKILL`，等待完成后释放 FD、slot 与缓冲区 |
+
+原生类保留字节语义；面向 MCP/AI 的 script 产品边界统一转成 UTF-8 `content`，并保证返回游标停在完整字符边界。

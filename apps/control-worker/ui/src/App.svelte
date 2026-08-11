@@ -24,7 +24,6 @@
   class AuthenticationRequiredError extends Error {}
 
   const origin = window.location.origin;
-  const repositoryUrl = 'https://github.com/Ykmmj/vacps.git';
   const installDraftStorageKey = 'vacps-install-draft';
   const cloudflareApiTokenGuideUrl =
     'https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/';
@@ -42,15 +41,12 @@
   let theme = $state<Theme>('light');
   let installBackendName = $state('');
   let installTags = $state('production,full');
-  let installRedisUrl = $state('');
   let registrationToken = $state<
     { token: string; expiresAt: string; controlPlanePublicKey: string } | undefined
   >();
   let generatingToken = $state(false);
   let now = $state(Date.now());
   let installAllowRoot = $state(false);
-  /** node = apps/vacps; native = vacps-native static binary. */
-  let installRuntime = $state<'node' | 'native'>('node');
   let installNativeVersion = $state('0.1.10');
   let installTunnelMode = $state<TunnelMode>('managed');
   let managedProvision = $state<any>();
@@ -146,11 +142,6 @@
       quickTunnelNotice: m.quickTunnelNotice(),
       nodeName: m.nodeName(),
       tags: m.tags(),
-      redisUrl: m.redisUrl(),
-      redisUrlHint: m.redisUrlHint(),
-      agentRuntime: 'Agent runtime',
-      runtimeNode: 'Node (apps/vacps)',
-      runtimeNative: 'Native (vacps-native)',
       nativeVersion: 'Native version',
       registrationToken: m.registrationToken(),
       registrationTokenHint: m.registrationTokenHint(),
@@ -703,21 +694,11 @@
       return `# ${text.installTokenPending}`;
     const lines = [
       `curl -fsSL ${origin}/agent.sh | sudo bash -s -- install \\`,
-      `  --runtime ${installRuntime} \\`,
       `  --control-plane-url ${shellQuote(origin)} \\`,
       `  --registration-token ${shellQuote(registrationToken.token)} \\`,
-      `  --control-plane-public-key ${shellQuote(registrationToken.controlPlanePublicKey)}`,
+      `  --control-plane-public-key ${shellQuote(registrationToken.controlPlanePublicKey)} \\`,
+      `  --native-version ${shellQuote(installNativeVersion.trim() || '0.1.10')}`,
     ];
-    if (installRuntime === 'node') {
-      lines[lines.length - 1] += ' \\';
-      lines.push(
-        `  --repo ${shellQuote(repositoryUrl)} \\`,
-        `  --redis-url ${shellQuote(installRedisUrl || '<REDIS_URL>')}`,
-      );
-    } else {
-      lines[lines.length - 1] += ' \\';
-      lines.push(`  --native-version ${shellQuote(installNativeVersion.trim() || '0.1.10')}`);
-    }
     if (installTunnelMode === 'managed') {
       lines[lines.length - 1] += ' \\';
       lines.push(
@@ -750,9 +731,7 @@
       JSON.stringify({
         backendName: installBackendName,
         tags: installTags,
-        redisUrl: installRedisUrl,
         allowRoot: installAllowRoot,
-        runtime: installRuntime,
         nativeVersion: installNativeVersion,
         tunnelMode: installTunnelMode,
       }),
@@ -765,9 +744,7 @@
       const draft = JSON.parse(stored);
       installBackendName = draft.backendName ?? '';
       installTags = draft.tags ?? installTags;
-      installRedisUrl = draft.redisUrl ?? '';
       installAllowRoot = draft.allowRoot === true;
-      installRuntime = draft.runtime === 'native' ? 'native' : 'node';
       installNativeVersion =
         typeof draft.nativeVersion === 'string' && draft.nativeVersion
           ? draft.nativeVersion
@@ -882,9 +859,7 @@
           {text}
           bind:installBackendName
           bind:installTags
-          bind:installRedisUrl
           bind:installAllowRoot
-          bind:installRuntime
           bind:installNativeVersion
           bind:installTunnelMode
           {installCommand}

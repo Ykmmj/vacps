@@ -1,117 +1,87 @@
 # VACPS
 
-Cloudflare Workers control plane for queued Shell and Pi-powered agent work on multiple VPS hosts. It is a TypeScript pnpm monorepo with exactly three workspaces:
+VACPS is a Cloudflare control plane and a native multi-host task Agent.
 
-- `apps/control-worker` — same-domain Web UI, management API, D1 registry, schedule reconciliation, and Remote MCP.
-- `apps/vacps` — the single process deployed to each VPS: Fastify, BullMQ, LangGraph lifecycle, SQLite, Pi adapter, and Shell executor.
-- `packages/contracts` — shared Zod schemas and API contracts.
+- `apps/control-worker` — same-domain Web UI, management API, D1 registry, schedule coordination, and Remote MCP.
+- `apps/vacps-native` — the production VPS Agent: a static C++23/QuickJS runtime plus its TypeScript business script.
+- `packages/contracts` — shared Zod wire schemas and scheduling semantics.
 
-> **Security warning:** v1 deliberately supports arbitrary commands. Deploy it behind Cloudflare Access, keep the control-panel password private, and do not expose a VACPS port directly to the Internet. Each Agent has its own Ed25519 identity; no shared backend bearer secret exists.
+> **Security warning:** VACPS deliberately supports arbitrary commands. Deploy the control plane behind its authentication boundaries, expose Agents only through Cloudflare Tunnel, and protect every Agent identity key. Enabling `--allow-root` makes authenticated command execution root-equivalent.
 
 ## Architecture
 
 ```text
-Web UI / MCP → Cloudflare Worker + D1 → HTTPS → target VACPS
-                                              ├→ BullMQ + Redis
-                                              ├→ LangGraph lifecycle
-                                              ├→ Pi adapter / ShellExecutor
-                                              └→ SQLite + log files
+Web UI / MCP → Cloudflare Worker + D1 → signed HTTPS → native VACPS Agent
+                                                        ├→ QuickJS business script
+                                                        ├→ Asio HTTP/FS/process modules
+                                                        └→ SQLite queue, schedules, and logs
 ```
 
-Cloudflare does not connect to Redis or execute Shell commands. A task UUID is created by the control plane and used as the D1 task ID, BullMQ job ID, LangGraph `thread_id`, and SQLite task ID.
+The Worker owns registration, approval, fleet state, Remote MCP, and the D1 index. Each VPS runs the native Agent, keeps its execution state in SQLite, and exposes only its loopback HTTP listener through a Cloudflare Tunnel. Agent and control-plane requests use per-node Ed25519 signatures with timestamped nonces.
 
 ## Prerequisites
 
-- Node.js 24 LTS and pnpm 10.14.0 (the VPS installer installs these through a VACPS-scoped NVM directory)
-- A Redis instance reachable from each VPS. Use TLS (`rediss://`) whenever traffic crosses a public or untrusted network; a non-TLS `redis://` endpoint must be private and firewall-restricted.
-- A Cloudflare account with Workers, D1, Access, and (recommended) Tunnel
-- A Pi adapter that implements the included NDJSON protocol
+- Node.js 22 or newer and pnpm 10 for control-plane development and deployment.
+- Docker with the repository's native build image for compiling the Agent.
+- A Cloudflare account with Workers, D1, KV, and, preferably, Tunnel.
+- Linux x86_64 for the published static Agent artifact.
+
+The deployed VPS does not need Node.js, pnpm, or a source checkout. The installer downloads the selected native release.
 
 ## Quick deployment
 
-The project provides an interactive control-plane bootstrap and a non-Docker VPS installer. Redis is the only external runtime dependency.
+From a development checkout with `pnpm install` complete:
 
 ```bash
 read -rsp 'Control panel password: ' CONTROL_PANEL_PASSWORD; echo
 export CONTROL_PANEL_PASSWORD
-# Logs in to Cloudflare, creates/binds D1 and KV, bootstraps the Worker if missing,
-# creates Worker secrets and a control-plane Ed25519 signing identity, migrates, and deploys.
 pnpm setup:cloudflare
 unset CONTROL_PANEL_PASSWORD
 ```
 
-`CONTROL_PANEL_PASSWORD` must be at least 12 non-whitespace characters. The setup stores it only as a Worker Secret and generates the session-signing secret without printing it. Prefer the environment-variable form over `--admin-password`, which can be retained in shell history.
+`CONTROL_PANEL_PASSWORD` must contain at least 12 non-whitespace characters. The setup creates or binds D1 and KV, configures Worker secrets and the control-plane Ed25519 identity, applies migrations, and deploys the Worker.
 
-If Wrangler's browser callback is unavailable (a WSL networking issue, for
-example), create a scoped Cloudflare API Token and run the same command without
-interactive login. Set `CLOUDFLARE_ACCOUNT_ID` to the account ID shown in the
-Cloudflare dashboard, and grant the token Account-level `Workers Scripts: Edit`,
-`D1: Edit`, and `Workers KV Storage: Edit` permissions.
+Open the deployed Web UI, choose Managed Tunnel or Quick Tunnel, generate a one-time registration token, and copy the generated native installer command. The Agent runs as the user who invoked deployment (`SUDO_USER` when invoked through `sudo`); the installer does not create a login account.
 
-```bash
-export CLOUDFLARE_ACCOUNT_ID='<cloudflare-account-id>'
-read -rsp 'Cloudflare API Token: ' CLOUDFLARE_API_TOKEN; echo
-export CLOUDFLARE_API_TOKEN
-pnpm setup:cloudflare
-unset CLOUDFLARE_API_TOKEN
-```
+Lifecycle commands are served from the same `agent.sh` endpoint:
 
-The equivalent parameter form is `pnpm setup:cloudflare -- --cloudflare-account-id <id> --cloudflare-api-token <token>`. Prefer the environment-variable form because command-line tokens can be recorded in shell history and visible to local processes.
-
-Open the deployed Web UI and choose one of its connection modes before copying the VPS command:
-
-- **Managed Tunnel** creates a random node ID, stable hostname, Cloudflare Tunnel, and DNS record. A one-time local bootstrap uses an API Token to create a scoped OAuth client, then discards the Token; it never reaches the Worker, browser, VPS, or installer command. The bootstrap saves only the selected Cloudflare account context, and the Web UI loads Zones automatically after browser authorization.
-- **Quick Tunnel** creates a temporary `trycloudflare.com` URL on the VPS and re-registers the Agent whenever that URL changes. Use it only for demos or testing.
-
-Before copying an installer command, use the Web UI to generate a one-time registration Token. It is shown once, lasts ten minutes, and is consumed when the Agent binds its locally generated Ed25519 public key. The installer installs Node.js 24 and pnpm 10.14.0 through a VACPS-scoped NVM directory, generates that key pair locally, builds the agent, and runs the systemd service as the user who invoked the deployment (`SUDO_USER` when invoked through `sudo`). It does not create or modify a login account. The installer also configures SQLite/log directories and installs `cloudflared`. After startup the Agent registers itself as **pending**; approve its card in the Web UI after the health check succeeds.
-
-Each report writes one current snapshot containing CPU, memory, root-disk usage, queue state, operating system, and upload/download byte rates. D1 keeps only the latest snapshot, which makes the UI inexpensive to poll and leaves a clean input for future roll-up charts; it is not raw time-series retention.
-
-Lifecycle commands are all served from the same installer script (`agent.sh`):
-
-- `install` — first-time install (or resume an interrupted install); generate the full command from the Web UI.
-- `upgrade` — pull the latest (or `--ref`) code, rebuild, and restart; keeps identity and data; no new registration token.
-- `reinstall` — uninstall then install again with a fresh registration token (data preserved unless `--purge-data`).
-- `uninstall` — remove the service; preserves `/var/lib/vacps` by default.
+- `install` — install or resume the native Agent.
+- `upgrade` — download a selected native release and restart while preserving identity and data.
+- `reinstall` — uninstall and install with a fresh registration token.
+- `uninstall` — remove service files while preserving `/var/lib/vacps` by default.
 
 Example upgrade:
 
 ```bash
-curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- upgrade
+curl -fsSL https://<your-control-plane>/agent.sh | sudo bash -s -- upgrade \
+  --native-version 0.1.10
 ```
 
-To remove an Agent from a VPS, first remove its node card from the Web UI when it uses a Managed Tunnel, then run `agent.sh uninstall` from the control-plane endpoint as root. Add `--purge-data` only when deleting its SQLite task history and logs is intended. The deployment user's account and HOME are never removed or modified.
-
-To allow authenticated Agent commands to administer the host, add `--allow-root`. This writes an explicit passwordless sudoers rule for the deployment user and is intentionally disabled by default. Without it, the Agent has only the deployment user's normal operating-system permissions. When enabled, privileged command requests use non-interactive `sudo -n -- ...`; a deployment run directly as root needs no sudoers rule because the service itself runs as root.
+See [docs/deployment.md](docs/deployment.md) for Tunnel, identity, upgrade, reinstall, and uninstall details.
 
 ## Local development
+
+Install and validate the pnpm workspaces:
 
 ```bash
 pnpm install
 pnpm check
-
-# Create a local D1 database and apply the control-plane migration.
-pnpm --filter @vacps/control-worker exec wrangler d1 create vacps-control
-pnpm --filter @vacps/control-worker exec wrangler d1 migrations apply vacps-control --local
-
-# Copy and fill the example files before starting either runtime.
-cp apps/control-worker/.dev.vars.example apps/control-worker/.dev.vars
-cp apps/vacps/.env.example apps/vacps/.env
 ```
 
-Run the control plane with `pnpm dev:control`. Start a local VACPS only after supplying Redis and a safe test directory in its environment: `pnpm dev:agent`.
+Start the control plane with `pnpm dev:control` after creating `apps/control-worker/.dev.vars` and local D1 bindings.
 
-See [`docs/deployment.md`](docs/deployment.md) for the security/operations checklist and [`docs/pi-adapter-protocol.md`](docs/pi-adapter-protocol.md) for the Pi integration boundary.
+Build and exercise the native Agent only through its Docker entrypoint, with at most four compiler jobs:
 
-## Current implementation status
+```bash
+CMAKE_BUILD_PARALLEL_LEVEL=4 apps/vacps-native/docker/build.sh release
+```
 
-The repository implements the v1 skeleton and the minimum VPS execution path: authenticated task admission, per-VPS queueing, SQLite task/command records, bounded Shell logs, cancellation, a five-node LangGraph flow, D1 registry/task/schedule APIs, Remote MCP tools, and a Svelte + Tailwind approval console. Tasks are created through MCP or schedules; the Web UI is reserved for Agent installation and registration approval.
+The release build compiles the C++ runtime, builds the JavaScript bundle, and runs product JavaScript smoke tests. Native design, module surfaces, ownership rules, and coding requirements are documented under [apps/vacps-native/docs](apps/vacps-native/docs).
 
-Two integration tasks are intentionally environment-specific:
+## Current implementation
 
-- Configure a concrete Pi SDK/CLI adapter using the documented protocol. This prevents Pi from bypassing command policy or audit logs.
-- Decide how scheduled tasks are indexed back into D1 when they are emitted autonomously by BullMQ. `schedules.run_now` is fully indexed today; scheduled jobs are persisted and executed on the target VPS, but their control-plane index callback needs a deployment-specific authenticated webhook.
+The native Agent provides signed registration and telemetry, command and shell execution, cancellation, SQLite-backed tasks and schedules, bounded logs, file and Git tools, and a QuickJS product layer over native HTTP, filesystem, process, crypto, text, URL, and storage modules. The control plane provides approval, fleet status, D1 task/schedule indexes, Remote MCP tools, and the installation UI.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE)

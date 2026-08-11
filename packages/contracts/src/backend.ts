@@ -69,8 +69,6 @@ export const backendHealthSchema = z.object({
   version: z.string().trim().min(1).max(48),
   uptimeSeconds: z.number().int().nonnegative(),
   worker: z.object({ running: z.boolean(), concurrency: z.number().int().positive() }),
-  redis: z.object({ connected: z.boolean() }),
-  pi: z.object({ available: z.boolean(), version: z.string().trim().min(1).max(48).optional() }),
 });
 
 export const backendMetricsSchema = z.object({

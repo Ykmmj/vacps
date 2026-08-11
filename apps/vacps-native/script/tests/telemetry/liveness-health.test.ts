@@ -98,8 +98,6 @@ describe('buildLivenessHealth', () => {
       version: '0.1.0-test',
       uptimeSeconds: 42,
       worker: { running: true, concurrency: 1 },
-      redis: { connected: false },
-      pi: { available: false },
     });
   });
 

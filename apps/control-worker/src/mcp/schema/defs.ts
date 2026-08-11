@@ -55,18 +55,13 @@ export const workingDirectorySchema = pathSchema;
 
 export const programSchema = z.string().min(1).max(4096);
 export const commandSchema = z.string().min(1).max(262_144);
-export const processIdSchema = z.string().min(1).max(128);
 export const taskIdSchema = z.string().uuid();
 export const scheduleIdSchema = z.string().uuid();
 
 export const timeoutMsSchema = z.number().int().min(1).max(3_600_000);
-export const yieldTimeMsSchema = z.number().int().min(1).max(120_000);
 export const stdoutMaxBytesSchema = z.number().int().min(0).max(1_048_576);
 export const stderrMaxBytesSchema = z.number().int().min(0).max(1_048_576);
-export const hardMaxBytesSchema = z.number().int().min(0).max(1_073_741_824);
 export const fileMaxBytesSchema = z.number().int().min(1).max(262_144);
-export const processReadMaxBytesSchema = z.number().int().min(1).max(1_048_576);
-export const waitMsSchema = z.number().int().min(0).max(60_000);
 export const listLimitSchema = z.number().int().min(1).max(2000);
 export const pageLimitSchema = z.number().int().min(1).max(200);
 export const maxMatchesSchema = z.number().int().min(1).max(500);

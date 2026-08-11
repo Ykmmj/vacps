@@ -178,52 +178,85 @@ export class BackendClient {
     });
   }
 
-  async processStartCommand(
+  async terminalOpenCommand(
     backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
-    return this.request(backend, '/process/start_command', {
+    return this.request(backend, '/terminals/open_command', {
       method: 'POST',
       body: JSON.stringify(body),
       timeoutMs: 30_000,
     });
   }
 
-  async processStartShell(
+  async terminalOpenShell(
     backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
-    return this.request(backend, '/process/start_shell', {
+    return this.request(backend, '/terminals/open_shell', {
       method: 'POST',
       body: JSON.stringify(body),
       timeoutMs: 30_000,
     });
   }
 
-  async processRead(
+  async terminalList(backend: BackendRequestTarget): Promise<unknown> {
+    return this.request(backend, '/terminals', { method: 'GET' });
+  }
+
+  async terminalGet(backend: BackendRequestTarget, terminalId: string): Promise<unknown> {
+    return this.request(backend, `/terminals/${encodeURIComponent(terminalId)}`, {
+      method: 'GET',
+    });
+  }
+
+  async terminalRead(
     backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
     const waitMs = typeof body.wait_ms === 'number' ? body.wait_ms : 0;
-    return this.request(backend, '/process/read', {
+    return this.request(backend, '/terminals/read', {
       method: 'POST',
       body: JSON.stringify(body),
       timeoutMs: Math.min(waitMs + 5_000, 70_000),
     });
   }
 
-  async processWrite(
+  async terminalWrite(
     backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
-    return this.request(backend, '/process/write', { method: 'POST', body: JSON.stringify(body) });
+    return this.request(backend, '/terminals/write', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
   }
 
-  async processTerminate(
+  async terminalResize(
     backend: BackendRequestTarget,
     body: Record<string, unknown>,
   ): Promise<unknown> {
-    return this.request(backend, '/process/terminate', {
+    return this.request(backend, '/terminals/resize', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async terminalSignal(
+    backend: BackendRequestTarget,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request(backend, '/terminals/signal', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async terminalClose(
+    backend: BackendRequestTarget,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request(backend, '/terminals/close', {
       method: 'POST',
       body: JSON.stringify(body),
     });
@@ -348,14 +381,10 @@ export class BackendClient {
 
 /**
  * HTTP client budget for /exec/command and /exec/shell.
- * yield_time_ms keeps live-handle meaning (bounded yield wait).
- * Without it, cover the full command timeout so one-shot exec can finish.
+ * Cover the full command timeout so one-shot exec can finish.
  * Does not mutate the request JSON body.
  */
 function execTransportTimeoutMs(body: Record<string, unknown>): number {
-  if (typeof body.yield_time_ms === 'number') {
-    return Math.min(body.yield_time_ms + 5_000, 125_000);
-  }
   const responseBudget = typeof body.timeout_ms === 'number' ? body.timeout_ms : 120_000;
   return Math.min(responseBudget + 5_000, 3_605_000);
 }

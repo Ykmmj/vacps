@@ -10,8 +10,6 @@ const partialStatus: BackendStatus = {
     version: '0.1.0',
     uptimeSeconds: 1,
     worker: { running: true, concurrency: 1 },
-    redis: { connected: true },
-    pi: { available: true },
   },
   metrics: {
     cpu: { usagePercent: 12.5, load1: 0.1, cores: 2 },

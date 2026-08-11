@@ -23,11 +23,15 @@ const EXPECTED_TOOLS = [
   'vacps.capabilities.get',
   'vacps.command.exec',
   'vacps.shell.exec',
-  'vacps.process.start_command',
-  'vacps.process.start_shell',
-  'vacps.process.read',
-  'vacps.process.write',
-  'vacps.process.terminate',
+  'vacps.terminal.open_command',
+  'vacps.terminal.open_shell',
+  'vacps.terminal.list',
+  'vacps.terminal.get',
+  'vacps.terminal.read',
+  'vacps.terminal.write',
+  'vacps.terminal.resize',
+  'vacps.terminal.signal',
+  'vacps.terminal.close',
   'vacps.files.stat',
   'vacps.files.read',
   'vacps.files.list',
@@ -65,13 +69,23 @@ const EXPECTED_TOOLS = [
   'vacps.schedules.run_now',
 ] as const;
 
-const REMOVED_TOOLS = ['vacps.tasks.create', 'vacps.process.start'] as const;
+const REMOVED_TOOLS = [
+  'vacps.tasks.create',
+  'vacps.process.start',
+  'vacps.process.start_command',
+  'vacps.process.start_shell',
+  'vacps.process.read',
+  'vacps.process.write',
+  'vacps.process.terminate',
+] as const;
 
 const READ_ONLY_TOOLS = [
   'vacps.backends.list',
   'vacps.backends.get_status',
   'vacps.capabilities.get',
-  'vacps.process.read',
+  'vacps.terminal.list',
+  'vacps.terminal.get',
+  'vacps.terminal.read',
   'vacps.files.stat',
   'vacps.files.read',
   'vacps.files.list',
@@ -178,33 +192,55 @@ describe('MCP server tools', () => {
     expect(write?.annotations?.destructiveHint).toBe(true);
     expect(write?.annotations?.idempotentHint).toBe(false);
 
-    // process.start_command / start_shell — flat schemas, no mode/oneOf
-    const startCommand = tools.find((tool) => tool.name === 'vacps.process.start_command');
-    expect(startCommand).toBeTruthy();
-    const startCommandSchema = startCommand?.inputSchema as {
+    const command = tools.find((tool) => tool.name === 'vacps.command.exec');
+    const commandSchema = command?.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(commandSchema.properties?.['yield_time_ms']).toBeUndefined();
+
+    // Terminal command/shell open APIs are flat and expose only real PTY options.
+    const openCommand = tools.find((tool) => tool.name === 'vacps.terminal.open_command');
+    expect(openCommand).toBeTruthy();
+    const openCommandSchema = openCommand?.inputSchema as {
       properties?: Record<string, { minimum?: number; maximum?: number }>;
       required?: string[];
       oneOf?: unknown[];
       additionalProperties?: boolean;
     };
-    expect(startCommandSchema.oneOf).toBeUndefined();
-    expect(startCommandSchema.properties?.mode).toBeUndefined();
-    expect(startCommandSchema.required).toEqual(expect.arrayContaining(['backend_id', 'program']));
-    expect(startCommandSchema.additionalProperties).toBe(false);
-    expect(startCommandSchema.properties?.stdout_hard_max_bytes?.minimum).toBe(0);
-    expect(startCommandSchema.properties?.stdout_hard_max_bytes?.maximum).toBe(1_073_741_824);
-    expect(startCommand?.annotations?.openWorldHint).toBe(true);
+    expect(openCommandSchema.oneOf).toBeUndefined();
+    expect(openCommandSchema.required).toEqual(expect.arrayContaining(['backend_id', 'program']));
+    expect(openCommandSchema.additionalProperties).toBe(false);
+    expect(openCommandSchema.properties?.columns?.minimum).toBe(2);
+    expect(openCommandSchema.properties?.max_buffer_bytes?.maximum).toBe(16_777_216);
+    expect(openCommand?.annotations?.openWorldHint).toBe(true);
 
-    const startShell = tools.find((tool) => tool.name === 'vacps.process.start_shell');
-    expect(startShell).toBeTruthy();
-    const startShellSchema = startShell?.inputSchema as {
+    const openShell = tools.find((tool) => tool.name === 'vacps.terminal.open_shell');
+    expect(openShell).toBeTruthy();
+    const openShellSchema = openShell?.inputSchema as {
       properties?: Record<string, unknown>;
       required?: string[];
       oneOf?: unknown[];
     };
-    expect(startShellSchema.oneOf).toBeUndefined();
-    expect(startShellSchema.properties?.mode).toBeUndefined();
-    expect(startShellSchema.required).toEqual(expect.arrayContaining(['backend_id', 'command']));
+    expect(openShellSchema.oneOf).toBeUndefined();
+    expect(openShellSchema.required).toEqual(expect.arrayContaining(['backend_id']));
+
+    const terminalRead = tools.find((tool) => tool.name === 'vacps.terminal.read');
+    const terminalReadSchema = terminalRead?.inputSchema as {
+      properties?: Record<string, { minimum?: number }>;
+    };
+    const terminalReadOutput = terminalRead?.outputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(terminalReadSchema.properties?.max_bytes?.minimum).toBe(4);
+    expect(terminalReadOutput.properties?.content).toBeTruthy();
+    expect(terminalReadOutput.properties?.data).toBeUndefined();
+
+    const terminalWrite = tools.find((tool) => tool.name === 'vacps.terminal.write');
+    const terminalWriteSchema = terminalWrite?.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(terminalWriteSchema.properties?.data).toBeTruthy();
+    expect(terminalWriteSchema.properties?.encoding).toBeUndefined();
 
     // Read-only tools must not advertise idempotency_key
     for (const name of READ_ONLY_TOOLS) {
@@ -284,7 +320,7 @@ describe('MCP server tools', () => {
     expect(getSchema.properties?.idempotency_key).toBeUndefined();
 
     const { publicToolJsonSchemas, MCP_PROTOCOL_VERSION } =
-      await import('../src/mcp/tool-schemas.js');
+      await import('../src/mcp/schema/index.js');
     const published = publicToolJsonSchemas();
     expect(published.mcp_server_version).toBe(MCP_PROTOCOL_VERSION);
     expect(published.schema_version).toBe('3.0');
@@ -299,13 +335,14 @@ describe('MCP server tools', () => {
     expect(writePublished.required).toEqual(
       expect.arrayContaining(['backend_id', 'path', 'content', 'mode']),
     );
-    const startPublished = published.tools as Record<
+    const terminalPublished = published.tools as Record<
       string,
       { oneOf?: unknown[]; properties?: Record<string, unknown> }
     >;
-    expect(startPublished['vacps.process.start']).toBeUndefined();
-    expect(startPublished['vacps.process.start_command']?.properties?.program).toBeTruthy();
-    expect(startPublished['vacps.process.start_shell']?.properties?.command).toBeTruthy();
+    expect(terminalPublished['vacps.process.start']).toBeUndefined();
+    expect(terminalPublished['vacps.process.start_command']).toBeUndefined();
+    expect(terminalPublished['vacps.terminal.open_command']?.properties?.program).toBeTruthy();
+    expect(terminalPublished['vacps.terminal.open_shell']?.properties?.shell).toBeTruthy();
     expect(published.mcp_server_version).toBe(MCP_PROTOCOL_VERSION);
 
     await client.close();
