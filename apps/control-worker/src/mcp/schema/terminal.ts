@@ -1,11 +1,6 @@
 import { z } from 'zod';
 
-import {
-  argumentsSchema,
-  backendIdSchema,
-  programSchema,
-  workingDirectorySchema,
-} from './defs.js';
+import { argumentsSchema, backendIdSchema, programSchema, workingDirectorySchema } from './defs.js';
 
 const terminalIdSchema = z.string().regex(/^term_[a-f0-9]{32}$/, 'invalid terminal_id');
 const terminalCursorSchema = z
