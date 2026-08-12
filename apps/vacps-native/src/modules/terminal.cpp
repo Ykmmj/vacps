@@ -48,24 +48,6 @@ template <class T>
   return runtime::Error::cancelled_op(std::string{operation});
 }
 
-template <class Callback>
-struct StopBridge {
-  std::stop_callback<Callback> callback;
-  StopBridge(std::stop_token token, Callback fn)
-      : callback(std::move(token), std::move(fn)) {}
-};
-
-[[nodiscard]] auto make_stop_bridge(
-    std::stop_token stop,
-    const std::shared_ptr<term::Terminal>& terminal) {
-  std::weak_ptr<term::Terminal> weak = terminal;
-  return StopBridge{
-      std::move(stop),
-      [weak = std::move(weak)]() noexcept {
-        if (auto terminal = weak.lock()) terminal->dispose();
-      }};
-}
-
 [[nodiscard]] binding::Result<std::shared_ptr<term::Terminal>> construct_terminal(
     const binding::CallbackInfo& info) {
   if (auto argc = info.check_argc(1, "Terminal"); !argc) {
@@ -115,7 +97,6 @@ int initialize_terminal(JSContext* ctx, JSModuleDef* module) noexcept {
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("start"));
                   }
-                  auto bridge = make_stop_bridge(stop, self);
                   auto result = map_void(co_await self->start());
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("start"));
@@ -131,9 +112,8 @@ int initialize_terminal(JSContext* ctx, JSModuleDef* module) noexcept {
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("write"));
                   }
-                  auto bridge = make_stop_bridge(stop, self);
                   auto result = map_result(
-                      co_await self->write(std::move(payload.data)));
+                      co_await self->write(std::move(payload.data), stop));
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("write"));
                   }
@@ -149,8 +129,7 @@ int initialize_terminal(JSContext* ctx, JSModuleDef* module) noexcept {
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("read"));
                   }
-                  auto bridge = make_stop_bridge(stop, self);
-                  auto result = co_await self->read(options.options);
+                  auto result = co_await self->read(options.options, stop);
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("read"));
                   }
@@ -187,8 +166,7 @@ int initialize_terminal(JSContext* ctx, JSModuleDef* module) noexcept {
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("waitForExit"));
                   }
-                  auto bridge = make_stop_bridge(stop, self);
-                  auto result = co_await self->wait_for_exit(timeout.value);
+                  auto result = co_await self->wait_for_exit(timeout.value, stop);
                   if (stop.stop_requested()) {
                     co_return std::unexpected(cancelled("waitForExit"));
                   }
@@ -199,8 +177,8 @@ int initialize_terminal(JSContext* ctx, JSModuleDef* module) noexcept {
                 "close",
                 [](std::stop_token,
                    std::shared_ptr<term::Terminal> self,
-                   tm::CloseGrace grace) -> runtime::Task<void> {
-                  co_return map_void(co_await self->async_close(grace.value));
+                   tm::CloseGrace grace) -> runtime::Task<term::CloseResult> {
+                  co_return co_await self->async_close(grace.value);
                 },
                 1)
             .commit();

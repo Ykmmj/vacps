@@ -39,7 +39,13 @@ export const environmentSchema = z
       .min(1)
       .max(128)
       .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'invalid environment key'),
-    z.string().max(65_536),
+    z
+      .string()
+      .max(65_536)
+      .refine(
+        (value) => !value.includes('\0') && new TextEncoder().encode(value).byteLength <= 65_536,
+        { message: 'environment value must be at most 65536 UTF-8 bytes with no null byte' },
+      ),
   )
   .refine((value) => Object.keys(value).length <= 256, {
     message: 'environment may have at most 256 entries',

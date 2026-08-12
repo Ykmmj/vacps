@@ -18,12 +18,13 @@ import { probeShellEnvironment } from '../runtime/shell-environment';
 import * as files from '../runtime/files';
 import { hashRequest, IdempotencyStore } from '../runtime/idempotency';
 import { NATIVE_STREAM_MAX_BYTES, type CommandRunner } from '../runtime/command-runner';
+import { isTerminalKeyEvent } from '../runtime/terminal-key-encoder';
 import type { TerminalSessions } from '../runtime/terminal-sessions';
 import { allowUnsignedWhenNoKey, isPublicHttpPath } from '../security/http-auth';
 import { verifyControlPlaneRequest } from '../security/control-plane-verify';
 import type { LiveHealthState } from '../telemetry/liveness-health';
 import type { NativeTelemetryCollector } from '../telemetry/native-telemetry';
-import { utf8ByteSlice } from '../util/utf8';
+import { utf8ByteLengthOfString, utf8ByteSlice } from '../util/utf8';
 import { createApp, type App, type Reply } from './router';
 
 export interface CreateServerInput {
@@ -961,15 +962,6 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         .code(400)
         .send({ error: { code: 'validation_error', message: 'program is required.' } });
     }
-    if (body.environment !== undefined) {
-      return reply.code(409).send({
-        error: {
-          code: 'capability_unavailable',
-          message: 'Terminal environment injection is not supported.',
-          details: { capability: 'environment' },
-        },
-      });
-    }
     if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
       return reply.code(400).send({
         error: {
@@ -992,6 +984,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
     try {
       const options = parseTerminalOptions(body);
+      const environment = parseTerminalEnvironment(body.environment);
       return {
         ok: true,
         ...(await input.terminals.open({
@@ -1001,6 +994,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           ...(typeof body.working_directory === 'string'
             ? { workingDirectory: body.working_directory }
             : {}),
+          ...(environment === undefined ? {} : { environment }),
           ...options,
         })),
       };
@@ -1011,15 +1005,6 @@ export async function createServer(input: CreateServerInput): Promise<App> {
 
   app.post('/terminals/open_shell', async (request, reply) => {
     const body = asRecord(request.body);
-    if (body.environment !== undefined) {
-      return reply.code(409).send({
-        error: {
-          code: 'capability_unavailable',
-          message: 'Terminal environment injection is not supported.',
-          details: { capability: 'environment' },
-        },
-      });
-    }
     if (body.working_directory !== undefined && typeof body.working_directory !== 'string') {
       return reply.code(400).send({
         error: {
@@ -1043,6 +1028,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
       });
     }
     try {
+      const environment = parseTerminalEnvironment(body.environment);
       return {
         ok: true,
         ...(await input.terminals.open({
@@ -1052,6 +1038,7 @@ export async function createServer(input: CreateServerInput): Promise<App> {
           ...(typeof body.working_directory === 'string'
             ? { workingDirectory: body.working_directory }
             : {}),
+          ...(environment === undefined ? {} : { environment }),
           ...parseTerminalOptions(body),
         })),
       };
@@ -1060,8 +1047,32 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
-  app.get('/terminals', async () => {
-    const terminals = input.terminals.list();
+  app.get('/terminals', async (request, reply) => {
+    const status = request.query.status;
+    if (
+      status !== undefined &&
+      status !== 'running' &&
+      status !== 'exited' &&
+      status !== 'signaled' &&
+      status !== 'timed_out'
+    ) {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'unsupported terminal process status.' },
+      });
+    }
+    let createdAfterMs: number | undefined;
+    if (request.query.created_after !== undefined) {
+      createdAfterMs = Date.parse(request.query.created_after);
+      if (!Number.isFinite(createdAfterMs)) {
+        return reply.code(400).send({
+          error: { code: 'validation_error', message: 'created_after must be an ISO timestamp.' },
+        });
+      }
+    }
+    const terminals = input.terminals.list({
+      ...(status === undefined ? {} : { status }),
+      ...(createdAfterMs === undefined ? {} : { createdAfterMs }),
+    });
     return { ok: true, terminals, returned_count: terminals.length };
   });
 
@@ -1099,6 +1110,67 @@ export async function createServer(input: CreateServerInput): Promise<App> {
     }
   });
 
+  app.post('/terminals/expect', async (request, reply) => {
+    const body = asRecord(request.body);
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
+    if (typeof body.pattern !== 'string' || body.pattern.length === 0) {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'pattern must be a non-empty string.' },
+      });
+    }
+    if (body.cursor !== undefined && typeof body.cursor !== 'string') {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'cursor must be a string when present.' },
+      });
+    }
+    const mode = body.mode === undefined ? 'literal' : body.mode;
+    if (mode !== 'literal' && mode !== 'regex') {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'mode must be literal or regex.' },
+      });
+    }
+    const patternBytes = utf8ByteLengthOfString(body.pattern);
+    const patternLimit = mode === 'regex' ? 4096 : 1_048_576;
+    if (patternBytes > patternLimit) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: `pattern must be at most ${patternLimit} UTF-8 bytes in ${mode} mode.`,
+        },
+      });
+    }
+    const regexFlags = body.regex_flags === undefined ? '' : body.regex_flags;
+    if (
+      typeof regexFlags !== 'string' ||
+      !/^[imsu]*$/.test(regexFlags) ||
+      new Set(regexFlags).size !== regexFlags.length ||
+      (mode === 'literal' && regexFlags.length > 0)
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'regex_flags must contain unique i/m/s/u flags and requires mode=regex.',
+        },
+      });
+    }
+    try {
+      const timeoutMs = readOptionalIntField(body, 'timeout_ms', 30_000, 0, 60_000);
+      return {
+        ok: true,
+        ...(await input.terminals.expect(terminalId, {
+          ...(typeof body.cursor === 'string' ? { cursor: body.cursor } : {}),
+          pattern: body.pattern,
+          mode,
+          regexFlags,
+          timeoutMs,
+        })),
+      };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
   app.post('/terminals/write', async (request, reply) => {
     const body = asRecord(request.body);
     const terminalId = readTerminalId(body, reply);
@@ -1116,9 +1188,57 @@ export async function createServer(input: CreateServerInput): Promise<App> {
         },
       });
     }
+    if (body.sensitive !== undefined && typeof body.sensitive !== 'boolean') {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'sensitive must be a boolean when present.' },
+      });
+    }
     try {
+      // Terminal payloads are never written to Agent logs. `sensitive` makes
+      // that intent explicit at the public boundary for callers and audits.
       const written = await input.terminals.write(terminalId, body.data);
       return { ok: true, terminal_id: terminalId, written_bytes: written };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/terminals/send_keys', async (request, reply) => {
+    const body = asRecord(request.body);
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
+    if (
+      !Array.isArray(body.keys) ||
+      body.keys.length === 0 ||
+      body.keys.length > 256 ||
+      !body.keys.every(isTerminalKeyEvent)
+    ) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'keys must be a non-empty array of valid terminal KeyEvent objects.',
+        },
+      });
+    }
+    if (body.sensitive !== undefined && typeof body.sensitive !== 'boolean') {
+      return reply.code(400).send({
+        error: { code: 'validation_error', message: 'sensitive must be a boolean when present.' },
+      });
+    }
+    try {
+      const written = await input.terminals.sendKeys(terminalId, body.keys);
+      return { ok: true, terminal_id: terminalId, written_bytes: written };
+    } catch (error) {
+      return runtimeError(reply, error);
+    }
+  });
+
+  app.post('/terminals/screen', async (request, reply) => {
+    const body = asRecord(request.body);
+    const terminalId = readTerminalId(body, reply);
+    if (terminalId === null) return reply;
+    try {
+      return { ok: true, ...(await input.terminals.screen(terminalId)) };
     } catch (error) {
       return runtimeError(reply, error);
     }
@@ -1438,6 +1558,33 @@ function parseTerminalOptions(body: Record<string, unknown>): {
       16 * 1024 * 1024,
     ),
   };
+}
+
+function parseTerminalEnvironment(value: unknown): Readonly<Record<string, string>> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw validationError('environment must be an object of string variables.');
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 256) {
+    throw validationError('environment may contain at most 256 variables.');
+  }
+  const environment: Record<string, string> = {};
+  for (const [name, variable] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) {
+      throw validationError(`environment variable name '${name}' is invalid.`);
+    }
+    if (typeof variable !== 'string') {
+      throw validationError(`environment['${name}'] must be a string.`);
+    }
+    if (variable.includes('\0') || utf8ByteLengthOfString(variable) > 65_536) {
+      throw validationError(
+        `environment['${name}'] must be at most 65536 UTF-8 bytes and contain no null byte.`,
+      );
+    }
+    environment[name] = variable;
+  }
+  return environment;
 }
 
 function validationError(message: string): Error & { code: string; statusCode: number } {

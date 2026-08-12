@@ -1,6 +1,8 @@
 #include "terminal/terminal.hpp"
 
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
@@ -21,6 +23,7 @@
 #include <cstring>
 #include <deque>
 #include <format>
+#include <unordered_map>
 #include <utility>
 
 #include <fcntl.h>
@@ -35,6 +38,27 @@ namespace asio = boost::asio;
 namespace bp = boost::process;
 
 namespace {
+
+struct OperationCancel {
+  asio::cancellation_signal signal;
+  bool active{true};
+};
+
+[[nodiscard]] auto cancel_on_stop(
+    std::stop_token stop,
+    const asio::any_io_executor& executor,
+    const std::shared_ptr<OperationCancel>& operation) {
+  std::weak_ptr<OperationCancel> weak = operation;
+  return std::stop_callback{
+      stop,
+      [weak = std::move(weak), executor]() noexcept {
+        asio::post(executor, [weak]() noexcept {
+          if (auto operation = weak.lock(); operation && operation->active) {
+            operation->signal.emit(asio::cancellation_type::all);
+          }
+        });
+      }};
+}
 
 class UniqueFd {
  public:
@@ -168,12 +192,17 @@ struct Terminal::State {
   bool finished{false};
   bool timed_out{false};
   bool closing{false};
+  bool closed{false};
+  bool close_escalated{false};
   bool write_busy{false};
   std::int32_t exit_code{0};
   int exit_signal{0};
+  std::optional<int> close_final_signal;
+  std::optional<CloseResult> close_result;
 
   std::uint16_t columns{80};
   std::uint16_t rows{24};
+  std::uint8_t erase_character{0x7f};
   std::size_t max_buffer_bytes{4 * 1024 * 1024};
   std::size_t buffered_bytes{0};
   std::uint64_t produced_bytes{0};
@@ -191,8 +220,15 @@ struct Terminal::State {
     }
   }
 
-  void kill_group(int signal) noexcept {
-    if (process_group > 0) {
+  /** Best-effort terminal teardown signal: foreground job, then session leader group. */
+  void signal_terminal(int signal) noexcept {
+    pid_t foreground = 0;
+    if (master &&
+        ::ioctl(master->native_handle(), TIOCGPGRP, &foreground) == 0 &&
+        foreground > 0) {
+      (void)::kill(-foreground, signal);
+    }
+    if (process_group > 0 && process_group != foreground) {
       (void)::kill(-process_group, signal);
     }
   }
@@ -226,16 +262,17 @@ struct Terminal::State {
     return chunks.empty() ? produced_bytes : chunks.front().offset;
   }
 
+  [[nodiscard]] CloseResult current_close_result() const {
+    return CloseResult{
+        .exit = exit_result(),
+        .escalated = close_escalated,
+        .final_signal = close_final_signal,
+    };
+  }
+
   void try_finish() {
     if (finished || !process_exited || !pty_eof) return;
     finished = true;
-    if (timed_out) {
-      status = TerminalStatus::TimedOut;
-    } else if (exit_signal != 0) {
-      status = TerminalStatus::Signaled;
-    } else {
-      status = TerminalStatus::Exited;
-    }
     if (timeout_timer) timeout_timer->cancel();
     if (close_timer) close_timer->cancel();
     notify(read_waiters);
@@ -247,6 +284,16 @@ struct Terminal::State {
     process_exited = true;
     exit_code = static_cast<std::int32_t>(code);
     exit_signal = signal;
+    if (timed_out) {
+      status = TerminalStatus::TimedOut;
+    } else if (exit_signal != 0) {
+      status = TerminalStatus::Signaled;
+    } else {
+      status = TerminalStatus::Exited;
+    }
+    // Process completion and PTY EOF are separate facts. Readers/expect must
+    // observe the former even when descendants still hold the slave open.
+    notify(read_waiters);
     try_finish();
   }
 
@@ -298,12 +345,14 @@ struct Terminal::State {
         .data = {},
         .next_offset = options.offset,
         .available_from = available_from(),
+        .dropped_bytes = 0,
         .dropped = false,
         .eof = false,
     };
     std::uint64_t cursor = options.offset;
     if (cursor < result.available_from) {
       result.dropped = true;
+      result.dropped_bytes += result.available_from - cursor;
       cursor = result.available_from;
     }
 
@@ -315,6 +364,7 @@ struct Terminal::State {
       if (cursor < chunk.offset) {
         if (!result.data.empty()) break;
         result.dropped = true;
+        result.dropped_bytes += chunk.offset - cursor;
         cursor = chunk.offset;
       }
       const std::size_t begin = static_cast<std::size_t>(cursor - chunk.offset);
@@ -330,6 +380,7 @@ struct Terminal::State {
     }
     if (!reached_limit && result.data.empty() && cursor < produced_bytes) {
       result.dropped = true;
+      result.dropped_bytes += produced_bytes - cursor;
       cursor = produced_bytes;
     }
     result.next_offset = cursor;
@@ -349,10 +400,9 @@ struct Terminal::State {
   }
 
   void begin_dispose() noexcept {
-    if (status == TerminalStatus::Closed) return;
+    if (closed) return;
     closing = true;
-    status = TerminalStatus::Closing;
-    kill_group(SIGKILL);
+    signal_terminal(SIGKILL);
     if (timeout_timer) timeout_timer->cancel();
     if (close_timer) close_timer->cancel();
     cancel_master();
@@ -367,7 +417,7 @@ struct Terminal::State {
     buffered_bytes = 0;
     child.reset();
     slot.reset();
-    status = TerminalStatus::Closed;
+    closed = true;
     notify(read_waiters);
     notify(write_waiters);
     notify(finish_waiters);
@@ -408,7 +458,7 @@ asio::awaitable<VoidResult> Terminal::start() {
   state_->slot = process::ProcessSlot{state_->budget};
 
   auto fail = [state = state_](std::string message) -> VoidResult {
-    state->kill_group(SIGKILL);
+    state->signal_terminal(SIGKILL);
     state->cancel_master();
     state->child.reset();
     state->process_group = 0;
@@ -445,6 +495,11 @@ asio::awaitable<VoidResult> Terminal::start() {
     if (::ioctl(slave.get(), TIOCSWINSZ, &size) != 0) {
       co_return fail(std::format("Terminal.start: TIOCSWINSZ: {}", strerror(errno)));
     }
+    struct termios attributes {};
+    if (::tcgetattr(slave.get(), &attributes) != 0) {
+      co_return fail(std::format("Terminal.start: tcgetattr: {}", strerror(errno)));
+    }
+    state_->erase_character = attributes.c_cc[VERASE];
 
     state_->master = std::make_shared<asio::posix::stream_descriptor>(
         state_->executor, master.release());
@@ -455,6 +510,17 @@ asio::awaitable<VoidResult> Terminal::start() {
       args.push_back(argv_[index]);
     }
     const std::string& executable = argv_[0];
+    std::unordered_map<bp::environment::key, bp::environment::value>
+        child_environment;
+    for (const auto& entry : bp::environment::current()) {
+      child_environment.emplace(entry.key(), entry.value());
+    }
+    for (const EnvironmentVariable& variable : options_.environment) {
+      child_environment.insert_or_assign(
+          bp::environment::key{variable.name},
+          bp::environment::value{variable.value});
+    }
+    bp::process_environment environment{child_environment};
     bp::process child = [&]() {
       if (!options_.cwd.empty()) {
         return bp::process(
@@ -462,10 +528,15 @@ asio::awaitable<VoidResult> Terminal::start() {
             executable,
             args,
             bp::process_start_dir(options_.cwd),
+            std::move(environment),
             PtyChildSetup{slave.get()});
       }
       return bp::process(
-          state_->executor, executable, args, PtyChildSetup{slave.get()});
+          state_->executor,
+          executable,
+          args,
+          std::move(environment),
+          PtyChildSetup{slave.get()});
     }();
     slave.reset();
 
@@ -481,7 +552,10 @@ asio::awaitable<VoidResult> Terminal::start() {
       state->timeout_timer->async_wait([state](const boost::system::error_code& ec) {
         if (ec || state->finished || state->process_exited) return;
         state->timed_out = true;
-        state->kill_group(SIGKILL);
+        state->signal_terminal(SIGKILL);
+        // A background process in another job-control group may still hold the
+        // slave. Closing the master makes timeout completion bounded.
+        state->cancel_master();
       });
     }
 
@@ -528,14 +602,25 @@ asio::awaitable<VoidResult> Terminal::start() {
 }
 
 asio::awaitable<Result<std::size_t>> Terminal::write(
-    std::vector<std::uint8_t> data) {
+    std::vector<std::uint8_t> data,
+    std::stop_token stop) {
   assert(state_ && state_->start_called && !state_->closing);
 
+  auto cancel = std::make_shared<OperationCancel>();
+  auto on_stop = cancel_on_stop(stop, state_->executor, cancel);
   while (state_->write_busy) {
     auto waiter = std::make_shared<asio::steady_timer>(state_->executor);
     waiter->expires_at(asio::steady_timer::time_point::max());
     state_->write_waiters.push_back(waiter);
-    co_await waiter->async_wait(asio::as_tuple);
+    co_await waiter->async_wait(
+        asio::bind_cancellation_slot(cancel->signal.slot(), asio::as_tuple));
+    auto& waiters = state_->write_waiters;
+    waiters.erase(std::remove(waiters.begin(), waiters.end(), waiter), waiters.end());
+    if (stop.stop_requested()) {
+      cancel->active = false;
+      co_return std::unexpected(
+          Error{"Terminal.write: cancelled", "cancel", ECANCELED});
+    }
   }
   if (state_->finished || state_->pty_eof) {
     co_return std::unexpected(Error{"Terminal.write: terminal is not writable"});
@@ -552,7 +637,10 @@ asio::awaitable<Result<std::size_t>> Terminal::write(
 
   auto master = state_->master;
   auto [ec, written] = co_await asio::async_write(
-      *master, asio::buffer(data), asio::as_tuple);
+      *master,
+      asio::buffer(data),
+      asio::bind_cancellation_slot(cancel->signal.slot(), asio::as_tuple));
+  cancel->active = false;
   if (ec) {
     co_return std::unexpected(Error{
         std::format("Terminal.write: {}", ec.message()),
@@ -562,7 +650,9 @@ asio::awaitable<Result<std::size_t>> Terminal::write(
   co_return written;
 }
 
-asio::awaitable<ReadResult> Terminal::read(ReadOptions options) {
+asio::awaitable<ReadResult> Terminal::read(
+    ReadOptions options,
+    std::stop_token stop) {
   assert(state_ && state_->start_called && !state_->closing);
   ReadResult result = state_->collect(options);
   if (!result.data.empty() || result.dropped || result.eof || options.wait.count() == 0) {
@@ -573,7 +663,11 @@ asio::awaitable<ReadResult> Terminal::read(ReadOptions options) {
   waiter->expires_after(options.wait);
   state_->read_waiters.push_back(waiter);
   if (state_->produced_bytes > options.offset || state_->finished) waiter->cancel();
-  co_await waiter->async_wait(asio::as_tuple);
+  auto cancel = std::make_shared<OperationCancel>();
+  auto on_stop = cancel_on_stop(stop, state_->executor, cancel);
+  co_await waiter->async_wait(
+      asio::bind_cancellation_slot(cancel->signal.slot(), asio::as_tuple));
+  cancel->active = false;
   auto& waiters = state_->read_waiters;
   waiters.erase(std::remove(waiters.begin(), waiters.end(), waiter), waiters.end());
   co_return state_->collect(options);
@@ -598,8 +692,19 @@ VoidResult Terminal::resize(std::uint16_t columns, std::uint16_t rows) {
 
 VoidResult Terminal::signal(int signo) {
   assert(state_ && state_->start_called && !state_->closing);
-  if (state_->process_exited) return success();
-  if (::kill(-state_->process_group, signo) != 0 && errno != ESRCH) {
+  if (state_->pty_eof) return success();
+  pid_t foreground = 0;
+  if (::ioctl(state_->master->native_handle(), TIOCGPGRP, &foreground) != 0) {
+    return std::unexpected(Error{
+        std::format("Terminal.signal: TIOCGPGRP: {}", strerror(errno)),
+        "ioctl",
+        errno});
+  }
+  if (foreground <= 0) {
+    return std::unexpected(Error{
+        "Terminal.signal: PTY has no foreground process group", "ioctl", EIO});
+  }
+  if (::kill(-foreground, signo) != 0 && errno != ESRCH) {
     return std::unexpected(Error{
         std::format("Terminal.signal: {}", strerror(errno)), "kill", errno});
   }
@@ -608,10 +713,15 @@ VoidResult Terminal::signal(int signo) {
 
 TerminalSnapshot Terminal::snapshot() const {
   assert(state_ && state_->start_called && !state_->closing);
+  struct termios attributes {};
+  if (::tcgetattr(state_->master->native_handle(), &attributes) == 0) {
+    state_->erase_character = attributes.c_cc[VERASE];
+  }
   return TerminalSnapshot{
       .exit = state_->exit_result(),
       .columns = state_->columns,
       .rows = state_->rows,
+      .erase_character = state_->erase_character,
       .next_offset = state_->produced_bytes,
       .available_from = state_->available_from(),
       .buffered_bytes = state_->buffered_bytes,
@@ -619,7 +729,8 @@ TerminalSnapshot Terminal::snapshot() const {
 }
 
 asio::awaitable<ExitWaitResult> Terminal::wait_for_exit(
-    std::optional<std::chrono::milliseconds> timeout) {
+    std::optional<std::chrono::milliseconds> timeout,
+    std::stop_token stop) {
   assert(state_ && state_->start_called && !state_->closing);
   if (!state_->finished) {
     auto waiter = std::make_shared<asio::steady_timer>(state_->executor);
@@ -630,7 +741,11 @@ asio::awaitable<ExitWaitResult> Terminal::wait_for_exit(
     }
     state_->finish_waiters.push_back(waiter);
     if (state_->finished) waiter->cancel();
-    co_await waiter->async_wait(asio::as_tuple);
+    auto cancel = std::make_shared<OperationCancel>();
+    auto on_stop = cancel_on_stop(stop, state_->executor, cancel);
+    co_await waiter->async_wait(
+        asio::bind_cancellation_slot(cancel->signal.slot(), asio::as_tuple));
+    cancel->active = false;
     auto& waiters = state_->finish_waiters;
     waiters.erase(std::remove(waiters.begin(), waiters.end(), waiter), waiters.end());
   }
@@ -640,24 +755,31 @@ asio::awaitable<ExitWaitResult> Terminal::wait_for_exit(
   };
 }
 
-asio::awaitable<VoidResult> Terminal::async_close(std::chrono::milliseconds grace) {
+asio::awaitable<CloseResult> Terminal::async_close(std::chrono::milliseconds grace) {
   auto state = state_;
-  if (!state || state->status == TerminalStatus::Closed) co_return success();
+  if (state->closed) co_return *state->close_result;
 
   co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
   if (!state->start_called) {
+    state->close_result = state->current_close_result();
     state->finalize_close();
-    co_return success();
+    co_return *state->close_result;
   }
   if (!state->closing) {
     state->closing = true;
-    state->status = TerminalStatus::Closing;
     if (!state->finished) {
-      state->kill_group(SIGHUP);
+      state->signal_terminal(SIGHUP);
       state->close_timer = std::make_shared<asio::steady_timer>(state->executor);
       state->close_timer->expires_after(grace);
       state->close_timer->async_wait([state](const boost::system::error_code& ec) {
-        if (!ec && !state->finished) state->kill_group(SIGKILL);
+        if (!ec && !state->finished) {
+          state->close_escalated = true;
+          state->close_final_signal = SIGKILL;
+          state->signal_terminal(SIGKILL);
+          // Do not let unrelated surviving job-control groups keep close
+          // waiting forever by retaining the PTY slave.
+          state->cancel_master();
+        }
       });
     }
   }
@@ -669,8 +791,11 @@ asio::awaitable<VoidResult> Terminal::async_close(std::chrono::milliseconds grac
     if (state->finished) waiter->cancel();
     co_await waiter->async_wait(asio::as_tuple);
   }
-  state->finalize_close();
-  co_return success();
+  if (!state->close_result) {
+    state->close_result = state->current_close_result();
+    state->finalize_close();
+  }
+  co_return *state->close_result;
 }
 
 void Terminal::dispose() noexcept {
@@ -679,7 +804,7 @@ void Terminal::dispose() noexcept {
   try {
     asio::post(state->executor, [state]() noexcept { state->begin_dispose(); });
   } catch (...) {
-    state->kill_group(SIGKILL);
+    state->signal_terminal(SIGKILL);
   }
 }
 

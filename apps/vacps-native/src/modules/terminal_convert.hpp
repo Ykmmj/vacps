@@ -12,6 +12,7 @@
 #include <format>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -150,6 +151,97 @@ template <class T>
   return result;
 }
 
+[[nodiscard]] inline bool valid_environment_name(std::string_view name) noexcept {
+  if (name.empty() || name.size() > 128) return false;
+  const auto first = static_cast<unsigned char>(name.front());
+  if (!((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') ||
+        first == '_')) {
+    return false;
+  }
+  for (const unsigned char character : name.substr(1)) {
+    if (!((character >= 'A' && character <= 'Z') ||
+          (character >= 'a' && character <= 'z') ||
+          (character >= '0' && character <= '9') || character == '_')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] inline Result<std::vector<terminal::EnvironmentVariable>>
+environment_from_js(Env env, JSValueConst value) {
+  if (nullish(value)) return std::vector<terminal::EnvironmentVariable>{};
+  if (auto object = require_object(env, value, "TerminalOptions.environment"); !object) {
+    return std::unexpected(std::move(object.error()));
+  }
+
+  JSContext* ctx = env.context();
+  JSPropertyEnum* properties = nullptr;
+  std::uint32_t length = 0;
+  if (JS_GetOwnPropertyNames(
+          ctx,
+          &properties,
+          &length,
+          value,
+          JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+    clear_exception(ctx);
+    return std::unexpected(
+        Error::type("failed to enumerate TerminalOptions.environment"));
+  }
+  struct PropertyGuard {
+    JSContext* context;
+    JSPropertyEnum* properties;
+    std::uint32_t length;
+    ~PropertyGuard() { JS_FreePropertyEnum(context, properties, length); }
+  } guard{ctx, properties, length};
+
+  if (length > 256) {
+    return std::unexpected(
+        Error::range("TerminalOptions.environment may have at most 256 entries"));
+  }
+  std::vector<terminal::EnvironmentVariable> result;
+  result.reserve(length);
+  for (std::uint32_t index = 0; index < length; ++index) {
+    qjs::OwnedValue key{ctx, JS_AtomToValue(ctx, properties[index].atom)};
+    if (key.is_exception()) {
+      clear_exception(ctx);
+      (void)key.release();
+      return std::unexpected(
+          Error::type("failed to read TerminalOptions.environment key"));
+    }
+    auto name = Converter<std::string>::from_js(env, key.get());
+    if (!name || !valid_environment_name(*name)) {
+      return std::unexpected(Error::type(
+          "TerminalOptions.environment contains an invalid variable name"));
+    }
+
+    qjs::OwnedValue property{
+        ctx, JS_GetProperty(ctx, value, properties[index].atom)};
+    if (property.is_exception()) {
+      clear_exception(ctx);
+      (void)property.release();
+      return std::unexpected(Error::type(
+          std::string{"failed to read TerminalOptions.environment['"} + *name + "']"));
+    }
+    if (!JS_IsString(property.get())) {
+      return std::unexpected(Error::type(
+          std::string{"TerminalOptions.environment['"} + *name + "'] must be a string"));
+    }
+    auto decoded = Converter<std::string>::from_js(env, property.get());
+    if (!decoded) return std::unexpected(std::move(decoded.error()));
+    if (decoded->size() > 65'536 || decoded->find('\0') != std::string::npos) {
+      return std::unexpected(Error::range(
+          std::string{"TerminalOptions.environment['"} + *name +
+          "'] must be at most 65536 bytes and contain no null byte"));
+    }
+    result.push_back(terminal::EnvironmentVariable{
+        .name = std::move(*name),
+        .value = std::move(*decoded),
+    });
+  }
+  return result;
+}
+
 [[nodiscard]] inline std::string_view status_name(
     terminal::TerminalStatus status) noexcept {
   switch (status) {
@@ -163,11 +255,8 @@ template <class T>
       return "signaled";
     case terminal::TerminalStatus::TimedOut:
       return "timed_out";
-    case terminal::TerminalStatus::Closing:
-    case terminal::TerminalStatus::Closed:
-      return "closed";
   }
-  return "closed";
+  std::unreachable();
 }
 
 [[nodiscard]] inline std::string signal_name(int signal) {
@@ -245,6 +334,15 @@ struct Converter<tm::OptionsDecode> {
       if (!decoded) return std::unexpected(Error::type("TerminalOptions.cwd must be a string"));
       result.options.cwd = std::move(*decoded);
     }
+
+    auto environment = terminal_detail::get(env, value, "environment");
+    if (!environment) return std::unexpected(std::move(environment.error()));
+    auto decoded_environment =
+        terminal_detail::environment_from_js(env, environment->get());
+    if (!decoded_environment) {
+      return std::unexpected(std::move(decoded_environment.error()));
+    }
+    result.options.environment = std::move(*decoded_environment);
 
     auto columns = terminal_detail::get(env, value, "columns");
     if (!columns) return std::unexpected(std::move(columns.error()));
@@ -419,8 +517,34 @@ struct Converter<terminal::ReadResult> {
             object.get(),
             "availableFrom",
             Converter<std::uint64_t>::to_js(env, result.available_from)) ||
+        !terminal_detail::set(
+            env,
+            object.get(),
+            "droppedBytes",
+            Converter<std::uint64_t>::to_js(env, result.dropped_bytes)) ||
         !terminal_detail::set(env, object.get(), "dropped", env.boolean(result.dropped)) ||
         !terminal_detail::set(env, object.get(), "eof", env.boolean(result.eof))) {
+      return qjs::OwnedValue::take(env.context(), JS_EXCEPTION);
+    }
+    return object;
+  }
+};
+
+template <>
+struct Converter<terminal::CloseResult> {
+  static qjs::OwnedValue to_js(Env env, const terminal::CloseResult& result) {
+    qjs::OwnedValue object = env.new_object();
+    if (object.is_exception() ||
+        !terminal_detail::set_exit(env, object.get(), result.exit) ||
+        !terminal_detail::set(
+            env, object.get(), "escalated", env.boolean(result.escalated)) ||
+        !terminal_detail::set(
+            env,
+            object.get(),
+            "finalSignal",
+            result.final_signal
+                ? env.string(terminal_detail::signal_name(*result.final_signal))
+                : env.null_value())) {
       return qjs::OwnedValue::take(env.context(), JS_EXCEPTION);
     }
     return object;
@@ -448,6 +572,11 @@ struct Converter<terminal::TerminalSnapshot> {
         !terminal_detail::set_exit(env, object.get(), result.exit) ||
         !terminal_detail::set(env, object.get(), "columns", env.uint32(result.columns)) ||
         !terminal_detail::set(env, object.get(), "rows", env.uint32(result.rows)) ||
+        !terminal_detail::set(
+            env,
+            object.get(),
+            "eraseCharacter",
+            env.uint32(result.erase_character)) ||
         !terminal_detail::set(
             env,
             object.get(),

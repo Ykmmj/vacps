@@ -23,7 +23,7 @@ MCP terminal.*
 
 - C++ 域层只拥有 PTY、子进程组、Asio I/O、退出状态与有界字节缓冲。
 - QuickJS binding 只做类型转换和 Promise/协程桥接。
-- script 产品层拥有 `terminal_id`、会话容量、空闲回收、HTTP DTO 和 UTF-8 文本边界。
+- script 产品层拥有 `terminal_id`、会话容量、空闲回收、HTTP DTO、UTF-8 文本边界、VT screen 与键盘编码。
 - control-worker 只做 schema、签名代理和 MCP tool 暴露。
 
 ## PTY 建立
@@ -34,7 +34,8 @@ Linux 后端使用 UNIX 98 PTY：
 2. `grantpt`、`unlockpt`、`ptsname_r` 后打开 slave。
 3. child 中 `setsid`、`TIOCSCTTY`、`TIOCSPGRP`，将 slave `dup2` 到 fd 0/1/2。
 4. parent 将 master 交给 `asio::posix::stream_descriptor`，异步读取和串行写入。
-5. child 是独立 process group；signal/close 面向整个 group，而不是只处理 leader。
+5. child 是 session leader；显式 signal 每次通过 `TIOCGPGRP` 查询并作用于当前前台 process group。
+6. close/timeout 同时处理当前前台 group 与初始 leader group；升级阶段关闭 master，避免其他 job-control group 持有 slave 导致永久等待。
 
 stdout/stderr 在 PTY 层天然合并。任何声称能在同一 PTY 中可靠恢复两条独立流的 API 都是不真实的。
 
@@ -49,16 +50,29 @@ stdout/stderr 在 PTY 层天然合并。任何声称能在同一 PTY 中可靠�
 
 当前 MCP 数据面使用 cursor + bounded long-poll。未来若 UI 需要低延迟连续渲染，可以在相同 TerminalSessions 生命周期之上增加 WebSocket transport；不改变 PTY 域对象，也不引入另一套 process session。
 
+## 交互语义
+
+- `expect` 从调用方 cursor 开始，先扫描滚动缓冲区已有文本，再 long-poll 新文本；literal/regex 都可跨 read chunk 匹配。
+- timeout 或主进程退出时，先扫描完当时已经观察到的 buffer boundary 再返回。主进程状态不再依赖 PTY EOF。
+- `send_keys` 的公开边界是 `KeyEvent { key, ctrl?, alt?, shift? }`。固定 escape sequence 只是 encoder 内部数据，不是 API 能力边界。
+- DECCKM (`CSI ? 1 h/l`) 决定方向键、Home、End 使用 CSI 还是 SS3；修饰导航键使用 xterm modifier parameter。
+- Backspace 来自当前 PTY termios `VERASE`，不写死为 `0x7f`。
+- 产品默认 `TERM=xterm-256color`，允许调用方通过 environment 覆盖；screen parser 会回答常见 DA/DSR/CPR/window-size 查询。
+- `screen` 是无样式的可见文本模型，覆盖常见 CSI、滚动区、origin/insert/wrap、alternate screen、tab stop 与 DEC line drawing；颜色和字体不进入 API。
+
 ## 生命周期
 
 ```text
-Created → Starting → Running → Exited | Signaled | TimedOut
-                              ↘ Closing → Closed
+process: Created → Starting → Running → Exited | Signaled | TimedOut
+session: Open → Closing → Closed
+pty:     Open → EOF
 ```
 
-- `waitForExit` 完成条件是 child 已 reap 且 PTY 已 EOF，避免丢掉退出前最后一段输出。
+- process 状态在 child reap 时立即完成；它不等待 PTY EOF。
+- `waitForExit`/产品 retention 完成条件仍是 child 已 reap 且 PTY 已 EOF，避免丢掉退出前最后一段输出。
 - `resize` 使用 `TIOCSWINSZ`，由内核向前台进程组产生 `SIGWINCH`。
-- `close` 先发 `SIGHUP`，宽限期后发 `SIGKILL`，再等待 reap/EOF。
+- `close` 先向前台/leader group 发 `SIGHUP`，宽限期后发 `SIGKILL` 并关闭 master，再等待 leader reap。
+- `read/write/waitForExit` 的 stop token 只取消该次 Asio operation；不会调用 `dispose()`，也不会因为一个 HTTP/MCP 等待被取消而销毁共享 terminal。
 - 显式关闭后 session 立即从产品 registry 移除；未关闭的已完成 session 只短期保留。
 - Agent 重启不会恢复 terminal；需要恢复、调度或重试的执行必须使用 `tasks.*`。
 
@@ -74,7 +88,7 @@ Created → Starting → Running → Exited | Signaled | TimedOut
 
 - C++ 内部接口是 narrow contract：owner executor、状态和参数范围由调用方保证，不重复做业务防御。
 - QuickJS/HTTP/MCP 是 wide boundary：在产生副作用前验证路径、尺寸、枚举和数值范围。
-- 不提供 environment 注入、持久化、自动重连、自动重试或伪造的 stdout/stderr 分离。
+- environment 是“继承后覆盖”；不提供持久化、自动重连、自动重试或伪造的 stdout/stderr 分离。
 
 参考：[Linux PTY overview](https://man7.org/linux/man-pages/man7/pty.7.html)、
 [`posix_openpt(3)`](https://man7.org/linux/man-pages/man3/posix_openpt.3.html)、

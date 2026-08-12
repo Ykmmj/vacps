@@ -35,12 +35,15 @@ import {
 import { shellExecInputSchema } from './shell.js';
 import {
   terminalCloseInputSchema,
+  terminalExpectInputSchema,
   terminalGetInputSchema,
   terminalListInputSchema,
   terminalOpenCommandInputSchema,
   terminalOpenShellInputSchema,
   terminalReadInputSchema,
   terminalResizeInputSchema,
+  terminalScreenInputSchema,
+  terminalSendKeysInputSchema,
   terminalSignalInputSchema,
   terminalWriteInputSchema,
 } from './terminal.js';
@@ -80,7 +83,10 @@ export function publicToolJsonSchemas(): Record<string, unknown> {
       'vacps.terminal.list': z.toJSONSchema(terminalListInputSchema),
       'vacps.terminal.get': z.toJSONSchema(terminalGetInputSchema),
       'vacps.terminal.read': z.toJSONSchema(terminalReadInputSchema),
+      'vacps.terminal.expect': z.toJSONSchema(terminalExpectInputSchema),
+      'vacps.terminal.screen': z.toJSONSchema(terminalScreenInputSchema),
       'vacps.terminal.write': z.toJSONSchema(terminalWriteInputSchema),
+      'vacps.terminal.send_keys': z.toJSONSchema(terminalSendKeysInputSchema),
       'vacps.terminal.resize': z.toJSONSchema(terminalResizeInputSchema),
       'vacps.terminal.signal': z.toJSONSchema(terminalSignalInputSchema),
       'vacps.terminal.close': z.toJSONSchema(terminalCloseInputSchema),

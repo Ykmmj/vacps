@@ -27,5 +27,5 @@ export {
   workingDirectorySchema,
 } from './defs.js';
 
-export const MCP_PROTOCOL_VERSION = '0.5.3';
-export const TOOL_SCHEMA_REVISION = '2026-08-11-schema-v3-r9-terminal-text';
+export const MCP_PROTOCOL_VERSION = '0.6.0';
+export const TOOL_SCHEMA_REVISION = '2026-08-12-schema-v3-r10-terminal-interaction';
