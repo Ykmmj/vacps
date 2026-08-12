@@ -123,8 +123,15 @@ const terminalViewOutput = okEnvelope.extend(terminalViewFields).shape;
 
 const terminalCloseOutput = {
   ...terminalViewOutput,
-  escalated: z.boolean(),
-  final_signal: z.enum(['SIGKILL']).nullable(),
+  escalated: z
+    .boolean()
+    .describe(
+      "True only when this close request's grace deadline sent SIGKILL; false when an independent hard timeout sent it.",
+    ),
+  final_signal: z
+    .enum(['SIGKILL'])
+    .nullable()
+    .describe("Signal sent by this close request's escalation, not the process exit signal."),
 };
 
 function toolConfig(
@@ -1085,7 +1092,8 @@ export function createMcpServer(env: Env): McpServer {
   server.registerTool(
     'vacps.terminal.close',
     toolConfig('vacps.terminal.close', {
-      description: 'Close a PTY session with SIGHUP, grace period, then SIGKILL if needed.',
+      description:
+        'Close a PTY session with SIGHUP, grace period, then SIGKILL if needed. Exit fields describe process termination; escalation fields describe only signals sent by this close request.',
       inputSchema: terminalCloseInputSchema,
       outputSchema: terminalCloseOutput,
     }),

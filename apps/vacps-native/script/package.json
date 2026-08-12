@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --project tsconfig.json",
+    "typecheck:terminal-regression": "tsc --project tsconfig.terminal-regression.json",
     "bundle": "node tools/build.mjs",
+    "bundle:terminal-regression": "node tools/build-terminal-regression.mjs",
     "build": "npm run typecheck && npm run bundle",
     "test": "vitest run",
+    "test:terminal:host": "npm run typecheck:terminal-regression && npm run bundle:terminal-regression && bash tools/run-terminal-regression.sh",
     "test:watch": "vitest",
     "clean": "rm -rf dist"
   },

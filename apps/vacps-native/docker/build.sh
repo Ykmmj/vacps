@@ -220,6 +220,33 @@ run_docker run --rm \
     if [[ '$NATIVE_ONLY' == '1' ]]; then
       echo '==> lifecycle smoke intentionally skipped in --native-only mode (not a full validation)'
     elif [[ -f script/dist/vacps.mjs ]]; then
+      echo '==> terminal timeout/close regression'
+      rm -f /tmp/vacps-terminal-timeout-close.log
+      terminal_test_timeout_seconds=6
+      if [[ '$PRESET' == asan || '$PRESET' == tsan ]]; then
+        terminal_test_timeout_seconds=20
+      fi
+      set +e
+      VACPS_ALLOW_INSECURE_NO_AUTH=1 \
+        timeout -s INT "\$terminal_test_timeout_seconds" "\$BIN" \
+        --script script/tests/terminal_timeout_close_regression.mjs \
+        --data-dir /tmp/vacps-terminal-timeout-close \
+        >/tmp/vacps-terminal-timeout-close.log 2>&1
+      terminal_test_rc=\$?
+      set -e
+      if [[ \$terminal_test_rc -ne 0 && \$terminal_test_rc -ne 124 ]]; then
+        echo "terminal timeout/close regression crashed rc=\$terminal_test_rc:" >&2
+        cat /tmp/vacps-terminal-timeout-close.log >&2
+        exit 1
+      fi
+      if ! grep -q '\[pass\] terminal timeout wins while close awaits grace' \
+          /tmp/vacps-terminal-timeout-close.log; then
+        echo 'terminal timeout/close regression did not pass:' >&2
+        cat /tmp/vacps-terminal-timeout-close.log >&2
+        exit 1
+      fi
+      echo 'terminal timeout/close regression ok'
+
       echo '==> script load smoke'
       rm -f /tmp/vacps-script-run.log
       smoke_timeout_seconds=3

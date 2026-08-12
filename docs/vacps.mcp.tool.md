@@ -294,7 +294,7 @@ command | shell | agent
 - `terminal.resize` 修改 rows/columns，内核向前台进程组发送 `SIGWINCH`。
 - `terminal.signal` 支持 `SIGINT|SIGTERM|SIGHUP|SIGKILL|SIGTSTP|SIGCONT`。
 - `terminal.close` 执行 `SIGHUP → grace_period_ms → SIGKILL`，并等待进程回收和 PTY EOF。
-- `terminal.close` 响应包含 `escalated` 和 `final_signal`，用于区分正常退出与升级强杀。
+- `terminal.close` 的 `process_state` / `signal` / `timed_out` 描述进程最终如何结束；`escalated` / `final_signal` 只描述本次 close 是否在自己的宽限期结束后发送了 `SIGKILL`。因此 hard timeout 与 close 重叠时可以合法返回 `process_state=timed_out`、`signal=SIGKILL`、`timed_out=true`，同时 `escalated=false`、`final_signal=null`。
 - `terminal.list/get` 分别返回 `session_state` 与 `process_state`；list 支持 `status`、`created_after` 筛选。完成的会话短暂保留，显式 close 后立即移除。
 
 ### Schedule
