@@ -65,12 +65,15 @@ import {
   MCP_PROTOCOL_VERSION,
   shellExecInputSchema,
   terminalCloseInputSchema,
+  terminalExpectInputSchema,
   terminalGetInputSchema,
   terminalListInputSchema,
   terminalOpenCommandInputSchema,
   terminalOpenShellInputSchema,
   terminalReadInputSchema,
   terminalResizeInputSchema,
+  terminalScreenInputSchema,
+  terminalSendKeysInputSchema,
   terminalSignalInputSchema,
   terminalWriteInputSchema,
   TOOL_SCHEMA_REVISION,
@@ -98,10 +101,31 @@ const commandResultOutput = okEnvelope.extend({
   stderr: z.unknown(),
 }).shape;
 
-const terminalViewOutput = okEnvelope.extend({
+const terminalViewFields = {
   terminal_id: z.string(),
-  status: z.string(),
-}).shape;
+  backend_id: z.string(),
+  session_state: z.enum(['open', 'closing', 'closed']),
+  process_state: z.enum(['running', 'exited', 'signaled', 'timed_out']),
+  exit_code: z.number().nullable(),
+  signal: z.string().nullable(),
+  timed_out: z.boolean(),
+  columns: z.number(),
+  rows: z.number(),
+  next_cursor: z.string(),
+  available_from: z.string(),
+  buffered_bytes: z.number(),
+  created_at: z.string(),
+  finished_at: z.string().nullable(),
+  idle_timeout_ms: z.number(),
+};
+
+const terminalViewOutput = okEnvelope.extend(terminalViewFields).shape;
+
+const terminalCloseOutput = {
+  ...terminalViewOutput,
+  escalated: z.boolean(),
+  final_signal: z.enum(['SIGKILL']).nullable(),
+};
 
 function toolConfig(
   name: string,
@@ -878,12 +902,18 @@ export function createMcpServer(env: Env): McpServer {
     toolConfig('vacps.terminal.list', {
       description: 'List live and recently completed PTY terminal sessions on a backend.',
       inputSchema: terminalListInputSchema,
-      outputSchema: okEnvelope.extend({ terminals: z.array(z.unknown()) }).shape,
+      outputSchema: okEnvelope.extend({
+        terminals: z.array(z.object(terminalViewFields)),
+        returned_count: z.number(),
+      }).shape,
     }),
     wrap(async (args) => {
       const parsed = terminalListInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
-      return (await client.terminalList(backend)) as Record<string, unknown>;
+      return (await client.terminalList(backend, {
+        ...(parsed.status === undefined ? {} : { status: parsed.status }),
+        ...(parsed.created_after === undefined ? {} : { created_after: parsed.created_after }),
+      })) as Record<string, unknown>;
     }),
   );
 
@@ -909,15 +939,83 @@ export function createMcpServer(env: Env): McpServer {
       inputSchema: terminalReadInputSchema,
       outputSchema: okEnvelope.extend({
         terminal_id: z.string(),
-        status: z.string(),
+        session_state: z.enum(['open', 'closing', 'closed']),
+        process_state: z.enum(['running', 'exited', 'signaled', 'timed_out']),
+        exit_code: z.number().nullable(),
+        signal: z.string().nullable(),
+        timed_out: z.boolean(),
         content: z.string(),
         next_cursor: z.string(),
+        available_from: z.string(),
+        dropped: z.boolean(),
+        dropped_bytes: z.number(),
+        eof: z.boolean(),
       }).shape,
     }),
     wrap(async (args) => {
       const parsed = terminalReadInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
       return (await client.terminalRead(backend, parsed)) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.terminal.expect',
+    toolConfig('vacps.terminal.expect', {
+      description:
+        'Wait until retained or newly produced terminal text matches a literal or regular expression. Returns immediately when the terminal process exits.',
+      inputSchema: terminalExpectInputSchema,
+      outputSchema: okEnvelope.extend({
+        terminal_id: z.string(),
+        session_state: z.enum(['open', 'closing', 'closed']),
+        process_state: z.enum(['running', 'exited', 'signaled', 'timed_out']),
+        exit_code: z.number().nullable(),
+        signal: z.string().nullable(),
+        timed_out: z.boolean(),
+        matched: z.boolean(),
+        match: z.string().nullable(),
+        start_cursor: z.string().nullable(),
+        end_cursor: z.string().nullable(),
+        next_cursor: z.string(),
+        available_from: z.string(),
+        dropped: z.boolean(),
+        dropped_bytes: z.number(),
+        eof: z.boolean(),
+        timeout: z.boolean(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = terminalExpectInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.terminalExpect(backend, parsed)) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.terminal.screen',
+    toolConfig('vacps.terminal.screen', {
+      description:
+        'Return the current plain-text VT screen, cursor position, size, and generation for TUI inspection.',
+      inputSchema: terminalScreenInputSchema,
+      outputSchema: okEnvelope.extend({
+        terminal_id: z.string(),
+        session_state: z.enum(['open', 'closing', 'closed']),
+        process_state: z.enum(['running', 'exited', 'signaled', 'timed_out']),
+        exit_code: z.number().nullable(),
+        signal: z.string().nullable(),
+        timed_out: z.boolean(),
+        rows: z.number(),
+        columns: z.number(),
+        cursor: z.object({ row: z.number(), column: z.number() }),
+        lines: z.array(z.string()),
+        generation: z.number(),
+        dropped: z.boolean(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = terminalScreenInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.terminalScreen(backend, parsed)) as Record<string, unknown>;
     }),
   );
 
@@ -935,6 +1033,24 @@ export function createMcpServer(env: Env): McpServer {
       const parsed = terminalWriteInputSchema.parse(args);
       const backend = await requireBackend(parsed.backend_id);
       return (await client.terminalWrite(backend, parsed)) as Record<string, unknown>;
+    }),
+  );
+
+  server.registerTool(
+    'vacps.terminal.send_keys',
+    toolConfig('vacps.terminal.send_keys', {
+      description:
+        'Send semantic key events. Supports named navigation/function keys, printable characters, and ctrl/alt/shift modifiers; cursor keys follow current terminal mode.',
+      inputSchema: terminalSendKeysInputSchema,
+      outputSchema: okEnvelope.extend({
+        terminal_id: z.string(),
+        written_bytes: z.number(),
+      }).shape,
+    }),
+    wrap(async (args) => {
+      const parsed = terminalSendKeysInputSchema.parse(args);
+      const backend = await requireBackend(parsed.backend_id);
+      return (await client.terminalSendKeys(backend, parsed)) as Record<string, unknown>;
     }),
   );
 
@@ -971,7 +1087,7 @@ export function createMcpServer(env: Env): McpServer {
     toolConfig('vacps.terminal.close', {
       description: 'Close a PTY session with SIGHUP, grace period, then SIGKILL if needed.',
       inputSchema: terminalCloseInputSchema,
-      outputSchema: terminalViewOutput,
+      outputSchema: terminalCloseOutput,
     }),
     wrap(async (args) => {
       const parsed = terminalCloseInputSchema.parse(args);

@@ -22,14 +22,22 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <stop_token>
 #include <vector>
 
 namespace vacps::terminal {
 
 namespace asio = boost::asio;
 
+struct EnvironmentVariable {
+  std::string name;
+  std::string value;
+};
+
 struct StartOptions {
   std::string cwd;
+  /** Inherited process environment overrides; names/values are caller-validated. */
+  std::vector<EnvironmentVariable> environment;
   std::uint16_t columns{80};
   std::uint16_t rows{24};
   /** 0 = no runtime deadline. */
@@ -45,8 +53,6 @@ enum class TerminalStatus : std::uint8_t {
   Exited,
   Signaled,
   TimedOut,
-  Closing,
-  Closed,
 };
 
 struct ExitResult {
@@ -72,14 +78,23 @@ struct ReadResult {
   std::vector<std::uint8_t> data;
   std::uint64_t next_offset{0};
   std::uint64_t available_from{0};
+  std::uint64_t dropped_bytes{0};
   bool dropped{false};
   bool eof{false};
+};
+
+struct CloseResult {
+  ExitResult exit;
+  bool escalated{false};
+  std::optional<int> final_signal;
 };
 
 struct TerminalSnapshot {
   ExitResult exit;
   std::uint16_t columns{0};
   std::uint16_t rows{0};
+  /** Current PTY slave VERASE byte used to encode semantic Backspace input. */
+  std::uint8_t erase_character{0x7f};
   std::uint64_t next_offset{0};
   std::uint64_t available_from{0};
   std::size_t buffered_bytes{0};
@@ -116,28 +131,32 @@ class Terminal final : public std::enable_shared_from_this<Terminal> {
    * validated by the caller. Writes are serialized.
    */
   [[nodiscard]] asio::awaitable<Result<std::size_t>> write(
-      std::vector<std::uint8_t> data);
+      std::vector<std::uint8_t> data,
+      std::stop_token stop = {});
 
   /**
    * Contract: Narrow
    * Preconditions: owner executor; started and not explicitly closed;
    * max_bytes/wait are caller-validated.
    */
-  [[nodiscard]] asio::awaitable<ReadResult> read(ReadOptions options);
+  [[nodiscard]] asio::awaitable<ReadResult> read(
+      ReadOptions options,
+      std::stop_token stop = {});
 
   /** Set kernel PTY window size; the kernel delivers SIGWINCH. */
   [[nodiscard]] VoidResult resize(std::uint16_t columns, std::uint16_t rows);
 
-  /** Send an exact supported signal to the terminal process group. */
+  /** Send an exact supported signal to the PTY foreground process group. */
   [[nodiscard]] VoidResult signal(int signo);
 
   [[nodiscard]] TerminalSnapshot snapshot() const;
 
   [[nodiscard]] asio::awaitable<ExitWaitResult> wait_for_exit(
-      std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+      std::optional<std::chrono::milliseconds> timeout = std::nullopt,
+      std::stop_token stop = {});
 
   /** SIGHUP, grace, SIGKILL, then await real reap and PTY EOF. Idempotent. */
-  [[nodiscard]] asio::awaitable<VoidResult> async_close(
+  [[nodiscard]] asio::awaitable<CloseResult> async_close(
       std::chrono::milliseconds grace = std::chrono::milliseconds{1000});
 
   void dispose() noexcept;

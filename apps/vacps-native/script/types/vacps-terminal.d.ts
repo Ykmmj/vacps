@@ -1,10 +1,12 @@
 /** Linux PTY-backed interactive terminal. Raw output is bytes; stdout/stderr merge. */
 declare module 'vacps:terminal' {
-  export type TerminalStatus = 'running' | 'exited' | 'signaled' | 'timed_out' | 'closed';
+  export type TerminalStatus = 'running' | 'exited' | 'signaled' | 'timed_out';
   export type TerminalSignal = 'SIGINT' | 'SIGTERM' | 'SIGHUP' | 'SIGKILL' | 'SIGTSTP' | 'SIGCONT';
 
   export interface TerminalOptions {
     readonly cwd?: string;
+    /** Overrides inherited environment variables for the child. */
+    readonly environment?: Readonly<Record<string, string>>;
     readonly columns?: number;
     readonly rows?: number;
     /** Kill the terminal process group after this duration; 0/omit disables it. */
@@ -27,6 +29,8 @@ declare module 'vacps:terminal' {
     readonly nextOffset: number;
     /** Oldest retained absolute byte offset. */
     readonly availableFrom: number;
+    /** PTY slave VERASE byte used for semantic Backspace input. */
+    readonly eraseCharacter: number;
     readonly bufferedBytes: number;
   }
 
@@ -40,6 +44,8 @@ declare module 'vacps:terminal' {
     readonly data: ArrayBuffer;
     readonly nextOffset: number;
     readonly availableFrom: number;
+    /** Exact number of bytes lost before returned data due to rolling retention. */
+    readonly droppedBytes: number;
     /** True when bytes between the requested offset and returned data were evicted. */
     readonly dropped: boolean;
     readonly eof: boolean;
@@ -47,6 +53,11 @@ declare module 'vacps:terminal' {
 
   export interface TerminalExitWait extends TerminalExit {
     readonly completed: boolean;
+  }
+
+  export interface TerminalCloseResult extends TerminalExit {
+    readonly escalated: boolean;
+    readonly finalSignal: 'SIGKILL' | null;
   }
 
   export class Terminal {
@@ -58,6 +69,6 @@ declare module 'vacps:terminal' {
     signal(signal: TerminalSignal): Promise<void>;
     snapshot(): TerminalSnapshot;
     waitForExit(timeoutMs?: number): Promise<TerminalExitWait>;
-    close(gracePeriodMs?: number): Promise<void>;
+    close(gracePeriodMs?: number): Promise<TerminalCloseResult>;
   }
 }

@@ -200,8 +200,17 @@ export class BackendClient {
     });
   }
 
-  async terminalList(backend: BackendRequestTarget): Promise<unknown> {
-    return this.request(backend, '/terminals', { method: 'GET' });
+  async terminalList(
+    backend: BackendRequestTarget,
+    input: { status?: string; created_after?: string },
+  ): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (input.status !== undefined) params.set('status', input.status);
+    if (input.created_after !== undefined) params.set('created_after', input.created_after);
+    const query = params.toString();
+    return this.request(backend, `/terminals${query.length > 0 ? `?${query}` : ''}`, {
+      method: 'GET',
+    });
   }
 
   async terminalGet(backend: BackendRequestTarget, terminalId: string): Promise<unknown> {
@@ -227,6 +236,38 @@ export class BackendClient {
     body: Record<string, unknown>,
   ): Promise<unknown> {
     return this.request(backend, '/terminals/write', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async terminalExpect(
+    backend: BackendRequestTarget,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
+    const waitMs = typeof body.timeout_ms === 'number' ? body.timeout_ms : 30_000;
+    return this.request(backend, '/terminals/expect', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeoutMs: Math.min(waitMs + 5_000, 65_000),
+    });
+  }
+
+  async terminalSendKeys(
+    backend: BackendRequestTarget,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request(backend, '/terminals/send_keys', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async terminalScreen(
+    backend: BackendRequestTarget,
+    body: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request(backend, '/terminals/screen', {
       method: 'POST',
       body: JSON.stringify(body),
     });

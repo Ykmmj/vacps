@@ -73,7 +73,7 @@ Wire: **nested JSON**, **snake_case** keys, **snake_case** enums.
 
 ---
 
-## 最终 Tool 集（49）
+## 最终 Tool 集（52）
 
 ```text
 vacps.backends.list
@@ -88,7 +88,10 @@ vacps.terminal.open_shell
 vacps.terminal.list
 vacps.terminal.get
 vacps.terminal.read
+vacps.terminal.expect
+vacps.terminal.screen
 vacps.terminal.write
+vacps.terminal.send_keys
 vacps.terminal.resize
 vacps.terminal.signal
 vacps.terminal.close
@@ -179,8 +182,8 @@ command | shell | agent
   "program": "npm",
   "arguments": ["test"],
   "working_directory": "/srv/app",
+  "environment": { "TERM": "xterm-256color", "LANG": "C.UTF-8" },
   "timeout_seconds": 600,
-  "environment": {},
   "labels": {},
   "output": {
     "capture_stdout": true,
@@ -269,11 +272,13 @@ command | shell | agent
 ```json
 {
   "terminal_id": "term_0123456789abcdef0123456789abcdef",
-  "status": "running",
+  "session_state": "open",
+  "process_state": "running",
   "content": "你好\r\n",
   "next_cursor": "8",
   "available_from": "0",
   "dropped": false,
+  "dropped_bytes": 0,
   "eof": false
 }
 ```
@@ -281,11 +286,16 @@ command | shell | agent
 - `max_bytes`: `4..1048576`；实现不会在返回文本末尾拆开 UTF-8 字符。
 - `wait_ms`: `0..60000`；没有新输出时可短暂等待。
 - `dropped=true`: 调用方游标落后于滚动缓冲区，必须从返回的 `next_cursor` 继续。
+- `terminal.expect` 先扫描指定 cursor 后已经保留的输出，再等待新文本；支持 literal、regex 和 timeout。主进程退出后会扫描完当时已经存在的输出并立即返回，不会被仍持有 PTY 的后代进程无限拖住。
+- `terminal.send_keys` 接收 `{key, ctrl?, alt?, shift?}` 事件，而不是固定控制字符表。支持基础/导航键、Home/End/Page、F1–F12、Ctrl+A–Z、Alt/Shift/Ctrl 组合和普通 Unicode 字符；方向键与 Home/End 根据 DECCKM 选择 CSI 或 SS3，Backspace 使用当前 PTY `VERASE`。
+- `write/send_keys` 可带 `sensitive=true`；Agent 不记录 terminal 输入 payload，避免密码或 token 进入本地 trace/audit。
+- `terminal.screen` 返回纯文本可见屏幕、光标、rows/columns 和 generation。它处理常用 VT/xterm 光标、滚动区、alternate screen、DEC line drawing 和设备状态查询；不伪造颜色、字体或完整终端模拟器能力。
 - PTY 原生合并 stdout/stderr；它不是两条独立 pipe。
 - `terminal.resize` 修改 rows/columns，内核向前台进程组发送 `SIGWINCH`。
 - `terminal.signal` 支持 `SIGINT|SIGTERM|SIGHUP|SIGKILL|SIGTSTP|SIGCONT`。
 - `terminal.close` 执行 `SIGHUP → grace_period_ms → SIGKILL`，并等待进程回收和 PTY EOF。
-- `terminal.list/get` 读取当前会话状态；完成的会话短暂保留，显式 close 后立即移除。
+- `terminal.close` 响应包含 `escalated` 和 `final_signal`，用于区分正常退出与升级强杀。
+- `terminal.list/get` 分别返回 `session_state` 与 `process_state`；list 支持 `status`、`created_after` 筛选。完成的会话短暂保留，显式 close 后立即移除。
 
 ### Schedule
 
@@ -566,6 +576,6 @@ Agent 任务 dispatch 示例：
 Connector / App 重新拉取 Tool 定义
 ```
 
-`TOOL_SCHEMA_REVISION` 当前：`2026-08-11-schema-v3-r9-terminal-text`
+`TOOL_SCHEMA_REVISION` 当前：`2026-08-12-schema-v3-r10-terminal-interaction`
 
-MCP protocol meta：`0.5.3`
+MCP protocol meta：`0.6.0`

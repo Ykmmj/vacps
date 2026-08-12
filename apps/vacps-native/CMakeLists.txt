@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(vacps-native VERSION 0.1.11 LANGUAGES C CXX
+project(vacps-native VERSION 0.1.12 LANGUAGES C CXX
   DESCRIPTION "Asio + QuickJS native agent runtime")
 
 set(CMAKE_CXX_STANDARD 23)
