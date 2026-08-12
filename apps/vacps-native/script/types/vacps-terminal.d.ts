@@ -56,7 +56,12 @@ declare module 'vacps:terminal' {
   }
 
   export interface TerminalCloseResult extends TerminalExit {
+    /**
+     * True only when this close operation's grace deadline sent SIGKILL.
+     * It remains false if the independent TerminalOptions timeout sent SIGKILL.
+     */
     readonly escalated: boolean;
+    /** Signal sent by this close operation's escalation, not the process exit signal. */
     readonly finalSignal: 'SIGKILL' | null;
   }
 

@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*.ts", "types/**/*.d.ts", "tests/terminal_interaction_regression.ts"]
+}

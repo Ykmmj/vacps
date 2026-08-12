@@ -72,6 +72,7 @@ pty:     Open → EOF
 - `waitForExit`/产品 retention 完成条件仍是 child 已 reap 且 PTY 已 EOF，避免丢掉退出前最后一段输出。
 - `resize` 使用 `TIOCSWINSZ`，由内核向前台进程组产生 `SIGWINCH`。
 - `close` 先向前台/leader group 发 `SIGHUP`，宽限期后发 `SIGKILL` 并关闭 master，再等待 leader reap。
+- 退出字段与 close 动作字段是两个事实域：`process_state` / `signal` / `timed_out` 描述进程最终如何结束；`escalated` / `final_signal` 只描述本次 `close` 是否等到自己的宽限期并执行升级。若 hard timeout 在 close 等待宽限期时先发送 `SIGKILL`，结果应为 `timed_out + SIGKILL`，同时 `escalated=false`、`final_signal=null`。
 - `read/write/waitForExit` 的 stop token 只取消该次 Asio operation；不会调用 `dispose()`，也不会因为一个 HTTP/MCP 等待被取消而销毁共享 terminal。
 - 显式关闭后 session 立即从产品 registry 移除；未关闭的已完成 session 只短期保留。
 - Agent 重启不会恢复 terminal；需要恢复、调度或重试的执行必须使用 `tasks.*`。
@@ -83,6 +84,28 @@ pty:     Open → EOF
 - 单会话滚动缓冲默认 4 MiB，可配置 64 KiB..16 MiB。
 - 单次 read/write 最大 1 MiB；read long-poll 最大 60 秒。
 - 默认 idle timeout 30 分钟；产品层定时关闭无人使用的活会话。
+
+## 宿主机真实程序回归
+
+修改 PTY、key encoder、expect、screen 或 terminal session 后，在仓库根目录运行：
+
+```bash
+pnpm --dir apps/vacps-native/script run test:terminal:host
+```
+
+该命令使用 `build/release/vacps-agent-linux-x86_64` 驱动宿主机的
+`/usr/bin/vim`、`/usr/bin/less`、`/usr/bin/python3` 和 `/bin/bash`，覆盖：
+
+- Vim alternate screen、Insert/Normal、方向键、保存退出和文件结果；
+- less PageUp/PageDown、搜索和退出；
+- Python REPL prompt/expect、普通输入和 Ctrl-D；
+- Bash Ctrl-Z、`jobs`、`fg`、Ctrl-C 与前台进程组切换；
+- resize 后前台进程实际收到 `SIGWINCH`，并用 `stty size` 观察内核尺寸；
+- rolling buffer 超限后的 `available_from`、`dropped`、`dropped_bytes`、UTF-8 边界和 cursor 单调推进。
+
+这组测试依赖宿主机真实程序版本，定位为 Linux 本机/专用 runner 的行为回归；普通
+Node Vitest 不替代它。测试源为
+`script/tests/terminal_interaction_regression.ts`。
 
 ## 契约
 
