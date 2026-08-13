@@ -2,7 +2,9 @@
   import { onMount } from 'svelte';
   import { Toaster, toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button/index.js';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
+  import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
   import LanguagesIcon from '@lucide/svelte/icons/languages';
   import LockKeyholeIcon from '@lucide/svelte/icons/lock-keyhole';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
@@ -85,6 +87,7 @@
       light: m.light(),
       dark: m.dark(),
       language: m.language(),
+      menu: m.menu(),
       password: m.password(),
       signIn: m.signIn(),
       signingIn: m.signingIn(),
@@ -809,29 +812,58 @@
           >
         </nav>
         <div class="ml-auto flex items-center gap-1">
-          <Button
-            variant="ghost"
-            class="language-button h-11 rounded-xl px-2.5"
-            aria-label={text.language}
-            onclick={toggleLocale}
-            ><LanguagesIcon /><span class="language-code">{locale === 'zh-CN' ? 'EN' : '中'}</span
-            ></Button
-          >
-          <Button
-            variant="ghost"
-            size="icon"
-            class="size-11 rounded-xl"
-            aria-label={theme === 'dark' ? text.light : text.dark}
-            onclick={toggleTheme}
-            >{#if theme === 'dark'}<SunIcon />{:else}<MoonIcon />{/if}</Button
-          >
-          <Button
-            variant="ghost"
-            size="icon"
-            class="size-11 rounded-xl"
-            aria-label={text.logout}
-            onclick={logout}><LogOutIcon /></Button
-          >
+          <div class="topbar-actions-inline flex items-center gap-1">
+            <Button
+              variant="ghost"
+              class="language-button h-11 rounded-xl px-2.5"
+              aria-label={text.language}
+              onclick={toggleLocale}
+              ><LanguagesIcon /><span class="language-code">{locale === 'zh-CN' ? 'EN' : '中'}</span
+              ></Button
+            >
+            <Button
+              variant="ghost"
+              size="icon"
+              class="size-11 rounded-xl"
+              aria-label={theme === 'dark' ? text.light : text.dark}
+              onclick={toggleTheme}
+              >{#if theme === 'dark'}<SunIcon />{:else}<MoonIcon />{/if}</Button
+            >
+            <Button
+              variant="ghost"
+              size="icon"
+              class="size-11 rounded-xl"
+              aria-label={text.logout}
+              onclick={logout}><LogOutIcon /></Button
+            >
+          </div>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon"
+                  class="topbar-actions-menu size-11 rounded-xl"
+                  aria-label={text.menu}
+                >
+                  <EllipsisIcon />
+                </Button>
+              {/snippet}
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Content align="end" class="rounded-xl">
+              <DropdownMenu.Item onclick={toggleLocale}
+                ><LanguagesIcon />{text.language}</DropdownMenu.Item
+              >
+              <DropdownMenu.Item onclick={toggleTheme}
+                >{#if theme === 'dark'}<SunIcon />{:else}<MoonIcon />{/if}{theme === 'dark'
+                  ? text.light
+                  : text.dark}</DropdownMenu.Item
+              >
+              <DropdownMenu.Separator />
+              <DropdownMenu.Item onclick={logout}><LogOutIcon />{text.logout}</DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
         </div>
       </div>
     </header>
@@ -893,7 +925,7 @@
       {/if}
     </main>
     <footer
-      class="app-footer relative z-10 mx-auto flex w-[min(1392px,calc(100%-1.5rem))] items-center gap-3 border-t border-border/70 py-5 text-[11px] text-muted-foreground sm:w-[min(1392px,calc(100%-3rem))]"
+      class="app-footer relative z-10 mx-auto flex w-[min(1392px,calc(100%-1.5rem))] items-center gap-3 border-t border-border/70 py-5 text-xs text-muted-foreground sm:w-[min(1392px,calc(100%-3rem))]"
     >
       <span>{text.footer}</span><button
         onclick={() => copyToClipboard(`${origin}/mcp`, text.mcpCopied)}>MCP</button
@@ -909,14 +941,14 @@
           <Button
             variant="ghost"
             size="icon"
-            class="size-10 rounded-xl"
+            class="size-11 rounded-xl"
             aria-label={text.language}
             onclick={toggleLocale}><LanguagesIcon /></Button
           >
           <Button
             variant="ghost"
             size="icon"
-            class="size-10 rounded-xl"
+            class="size-11 rounded-xl"
             aria-label={theme === 'dark' ? text.light : text.dark}
             onclick={toggleTheme}
             >{#if theme === 'dark'}<SunIcon />{:else}<MoonIcon />{/if}</Button
@@ -928,7 +960,7 @@
             aria-hidden="true"><LockKeyholeIcon class="size-5" /></span
           >
           <div>
-            <p class="text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+            <p class="text-xs font-semibold tracking-[0.1em] text-muted-foreground uppercase">
               {text.control}
             </p>
             <h1 class="mt-0.5 text-lg font-semibold tracking-[-0.02em]">Vacps</h1>

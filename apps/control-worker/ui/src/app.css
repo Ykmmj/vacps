@@ -1,6 +1,16 @@
 @import 'tailwindcss';
+/* Tailwind v4 dropped the bundled animate plugin; bits-ui popovers need these utilities. */
+@import 'tw-animate-css';
 
 @custom-variant dark (&:where(.dark, .dark *, [data-theme='dark'], [data-theme='dark'] *));
+
+/*
+ * Tailwind's stock `data-open` / `data-closed` variants target a bare attribute,
+ * but Bits UI reports visibility through `data-state`. Without this remap every
+ * popover's enter/exit animation silently resolves to nothing.
+ */
+@custom-variant data-open (&[data-state='open']);
+@custom-variant data-closed (&[data-state='closed']);
 
 /*
  * The control plane's visual foundation. These values intentionally mirror the
@@ -336,18 +346,46 @@
   }
 }
 
-@media (max-width: 430px) {
-  .language-code {
+/* Unlayered so it beats the button variant's `inline-flex` utility. */
+.topbar-actions-menu {
+  display: none;
+}
+
+@media (max-width: 480px) {
+  input,
+  select,
+  textarea {
+    font-size: 1rem;
+  }
+
+  .topbar-actions-inline {
     display: none;
   }
 
-  .language-button {
-    width: 2.75rem;
-    padding-inline: 0;
+  .topbar-actions-menu {
+    display: inline-flex;
   }
 
+  .app-footer a,
+  .app-footer button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    padding-inline: 0.5rem;
+  }
+}
+
+@media (max-width: 430px) {
   .app-footer {
     flex-wrap: wrap;
+    row-gap: 0.25rem;
+    padding-block: 0.75rem;
+  }
+
+  .app-footer > span {
+    flex-basis: 100%;
   }
 }
 
