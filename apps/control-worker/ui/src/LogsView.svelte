@@ -62,11 +62,6 @@
     return task.name || task.summary || task.id || '—';
   }
 
-  function shortId(id?: string) {
-    if (!id) return '—';
-    return id.length > 12 ? `${id.slice(0, 8)}…` : id;
-  }
-
   function relativeTime(value?: string) {
     if (!value) return '—';
     const milliseconds = Date.now() - new Date(value).getTime();
@@ -146,7 +141,7 @@
               <span class="task-title" title={taskTitle(task)}>{taskTitle(task)}</span>
             </div>
             <div class="task-sub">
-              <span>{shortId(task.backendId)}</span>
+              <span class="task-backend-id">{task.backendId ?? '—'}</span>
               <span>{task.kind ?? '—'}</span>
               <span>{relativeTime(task.terminalAt ?? task.finishedAt ?? task.createdAt)}</span>
               {#if task.environment}
@@ -298,8 +293,13 @@
     font-size: 0.72rem;
     color: color-mix(in oklch, var(--muted-foreground) 95%, transparent);
   }
+  .task-backend-id {
+    font-family: var(--font-mono);
+    overflow-wrap: anywhere;
+  }
   .task-env {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow-wrap: anywhere;
   }
   :global(.spin) {
     animation: spin 0.8s linear infinite;
@@ -318,9 +318,62 @@
   @media (max-width: 640px) {
     .logs-toolbar {
       flex-direction: column;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
     }
     .logs-toolbar-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 2.75rem;
       width: 100%;
+    }
+    .queue-pill {
+      grid-column: 1 / -1;
+      width: fit-content;
+      font-size: 0.75rem;
+    }
+    /* `:global` because the class lands on Button's root, which has no scope hash. */
+    :global(.cleanup-button) {
+      width: 100%;
+      min-height: 2.75rem;
+      white-space: normal;
+    }
+    .logs-panel {
+      min-height: 0;
+      padding: 0.75rem;
+    }
+    .logs-empty {
+      padding: 1.5rem 0.75rem;
+    }
+    .task-row {
+      gap: 0.4rem;
+      padding: 0.75rem;
+    }
+    .task-main {
+      align-items: flex-start;
+    }
+    .task-title {
+      display: -webkit-box;
+      overflow: hidden;
+      line-clamp: 2;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+    .task-status {
+      margin-top: 0.1rem;
+      font-size: 0.75rem;
+      line-height: 1.35;
+    }
+    .task-sub {
+      gap: 0.35rem 0.65rem;
+      font-size: 0.75rem;
+      line-height: 1.4;
+    }
+    .task-backend-id {
+      flex-basis: 100%;
     }
   }
   @media (prefers-reduced-motion: reduce) {

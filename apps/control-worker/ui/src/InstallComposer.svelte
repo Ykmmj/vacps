@@ -214,7 +214,7 @@
                 bind:value={installNativeVersion}
                 autocomplete="off"
                 placeholder="0.1.10"
-                class="h-11 rounded-[10px] border-border bg-background font-mono text-xs shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)]"
+                class="h-11 rounded-[10px] border-border bg-background font-mono text-base shadow-[0_1px_1px_oklch(20%_.01_250_/_0.04)] sm:text-xs"
               />
             </label>
             <div class="grid min-w-0 gap-1.5 sm:col-span-2" data-od-id="registration-token">
@@ -239,7 +239,7 @@
                         >{label('registrationTokenReadyStatus', 'Token ready')}</span
                       >
                       <Badge
-                        class="rounded-full bg-emerald-500/12 text-[10px] font-semibold tracking-[0.04em] text-emerald-700 dark:text-emerald-300"
+                        class="rounded-full bg-emerald-500/12 text-xs font-semibold tracking-[0.04em] text-emerald-700 dark:text-emerald-300"
                         >{label('registrationTokenOneTime', 'One-time · 10 min')}</Badge
                       >
                     </div>
@@ -267,7 +267,7 @@
                   <Button
                     variant="ghost"
                     size="icon"
-                    class="size-10 shrink-0 rounded-[9px] text-muted-foreground"
+                    class="token-refresh-button size-11 shrink-0 rounded-[9px] text-muted-foreground"
                     aria-label={label('regenerateRegistrationToken', 'Generate a replacement')}
                     disabled={generatingToken}
                     onclick={() => generateRegistrationToken?.()}
@@ -278,7 +278,7 @@
                 {:else}
                   <Button
                     variant={tokenExpired ? 'outline' : 'default'}
-                    class="h-10 shrink-0 rounded-[10px]"
+                    class="token-generate-button h-11 shrink-0 rounded-[10px]"
                     disabled={generatingToken}
                     onclick={() => generateRegistrationToken?.()}
                   >
@@ -300,7 +300,7 @@
                 <span class="block text-[13px] font-medium"
                   >{label('allowRoot', 'Allow root command execution')}</span
                 >
-                <span class="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
+                <span class="mt-0.5 block text-xs leading-snug text-muted-foreground">
                   {label(
                     'allowRootHint',
                     'Authenticated Agent commands may run as root without a password.',
@@ -351,7 +351,7 @@
                               {label('managedTunnelSetupTitle', 'Configure managed tunnels')}
                             </h3>
                             <div
-                              class="rounded-lg border border-border bg-background px-3 py-2 font-mono text-[11px] text-foreground shadow-sm"
+                              class="rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs text-foreground shadow-sm"
                             >
                               {managedTunnelSetupCommand}
                             </div>
@@ -360,7 +360,7 @@
                                 href={cloudflareApiTokenGuideUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                class="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                                class="inline-flex min-h-11 items-center gap-1 text-xs font-medium text-primary hover:underline"
                                 >{label(
                                   'openCloudflareApiTokenGuide',
                                   'Cloudflare API token guide',
@@ -451,7 +451,9 @@
                                   'Stable tunnel ready',
                                 )}
                               </div>
-                              <p class="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                              <p
+                                class="managed-ready-url mt-1 font-mono text-xs text-muted-foreground"
+                              >
                                 {managedProvision.backendId} · {managedProvision.publicUrl}
                               </p>
                             </div>
@@ -638,7 +640,7 @@
     min-width: 0;
     flex: 1 1 auto;
     overflow: hidden;
-    font-size: clamp(0.625rem, 2.85vw, 0.75rem);
+    font-size: 0.75rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -689,7 +691,7 @@
   }
   .field-label {
     color: var(--muted-foreground);
-    font-size: 10px;
+    font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: 0.08em;
     line-height: 1.3;
@@ -772,7 +774,7 @@
   }
   .progress-rail strong {
     overflow: hidden;
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: 0.01em;
     text-overflow: ellipsis;
@@ -840,7 +842,7 @@
     background: var(--foreground);
     color: var(--background);
     font:
-      600 10px/1 ui-monospace,
+      600 0.75rem/1 ui-monospace,
       monospace;
   }
   .step-index.done {
@@ -994,16 +996,55 @@
     font-weight: 600;
     letter-spacing: 0.01em;
   }
+  .managed-ready-url {
+    overflow-wrap: anywhere;
+  }
   @media (max-width: 640px) {
-    .progress-rail {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+    :global(.tunnel-option) {
+      justify-content: center;
+      padding-inline: 0.5rem;
+      white-space: normal;
     }
-    .progress-rail > div:nth-child(3) {
+    .tunnel-option-label {
+      flex: 0 1 auto;
+      overflow: visible;
+      line-height: 1.15;
+      text-overflow: clip;
+      white-space: normal;
+    }
+    .mode-check {
+      display: none;
+    }
+    .token-row {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .token-headline {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    :global(.token-generate-button) {
+      width: 100%;
+      min-height: 2.75rem;
+    }
+    .progress-rail {
+      grid-template-columns: 1fr;
+    }
+    .progress-rail > div + div {
       border-left: 0;
       border-top: 1px solid var(--border);
     }
-    .progress-rail > div:nth-child(4) {
-      border-top: 1px solid var(--border);
+    .progress-rail > div {
+      min-height: 2.75rem;
+      padding: 0.625rem 0.75rem;
+    }
+    .progress-rail span {
+      width: 1.5rem;
+      height: 1.5rem;
+      font-size: 0.75rem;
+    }
+    .connection-state {
+      padding: 0.75rem;
     }
     .step-line {
       align-items: flex-start;

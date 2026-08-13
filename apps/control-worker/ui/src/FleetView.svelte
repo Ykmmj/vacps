@@ -1399,11 +1399,15 @@
     }
   }
   @media (max-width: 520px) {
+    .search-shell input {
+      font-size: 1rem;
+    }
     .status-segment {
       width: 100%;
     }
     :global(.segment-button) {
       flex: 1;
+      height: 2.75rem;
       padding-inline: 0.5rem;
     }
     .segment-count {
@@ -1414,21 +1418,108 @@
     :global(.fleet-card) {
       padding: 0.875rem;
     }
+    .node-card-head {
+      align-items: flex-start;
+    }
+    .status-orb {
+      margin-top: 0.45rem;
+    }
+    .node-identity-row {
+      display: grid;
+      gap: 0.25rem;
+      overflow: visible;
+    }
+    .node-identity h2 {
+      display: -webkit-box;
+      max-width: 100%;
+      overflow: hidden;
+      line-clamp: 2;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+    .identity-separator {
+      display: none;
+    }
+    .node-location {
+      max-width: 100%;
+      font-size: 0.75rem;
+      line-height: 1.35;
+    }
+    .location-group {
+      align-items: flex-start;
+    }
+    .location-name {
+      overflow: visible;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+    }
     .node-card-actions {
       gap: 0.125rem;
     }
+    .node-ip {
+      font-size: 0.75rem;
+    }
+    .metrics {
+      grid-template-columns: 1fr;
+    }
     .metric {
-      padding-inline: 0.375rem;
+      display: grid;
+      grid-template-columns: 1.375rem minmax(0, 1fr);
+      align-items: center;
+      column-gap: 0.5rem;
+      padding: 0.5625rem 0;
     }
-    .metric:first-child {
-      padding-left: 0;
-    }
-    .metric:last-child {
-      padding-right: 0;
+    .metric + .metric {
+      border-top: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
+      border-left: 0;
     }
     .metric-label {
-      width: 1.375rem;
-      height: 1.375rem;
+      grid-row: 1 / 3;
+    }
+    .metric strong {
+      font-size: 0.875rem;
+    }
+    .metric em {
+      font-size: 0.75rem;
+    }
+    .meter {
+      grid-column: 2;
+      margin-top: 0.25rem;
+    }
+    .node-secondary-details {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      row-gap: 0.5rem;
+    }
+    .system-detail {
+      grid-column: 1 / -1;
+    }
+    .system-detail span:last-child {
+      overflow: visible;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+    }
+    .secondary-detail {
+      font-size: 0.75rem;
+      line-height: 1.25rem;
+    }
+    .network-detail {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .node-context :global([data-slot='badge']) {
+      max-width: 100%;
+      min-height: 1.75rem;
+      font-size: 0.75rem;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
     }
     .pending-actions {
       width: 100%;
@@ -1440,6 +1531,37 @@
     .node-footer {
       align-items: flex-start;
       flex-direction: column;
+    }
+    :global(.sheet-heading),
+    .sheet-body {
+      padding: 1rem;
+    }
+    .sheet-title-row :global([data-slot='sheet-title']) {
+      display: -webkit-box;
+      overflow: hidden;
+      line-clamp: 2;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+    .sheet-ip {
+      font-size: 0.75rem;
+    }
+    .detail-grid dt,
+    .detail-grid dd {
+      font-size: 0.75rem;
+    }
+    .detail-grid dd {
+      overflow: visible;
+      overflow-wrap: anywhere;
+      text-overflow: clip;
+      white-space: normal;
+    }
+    :global(.sheet-footer) {
+      padding: 0.75rem 1rem;
     }
   }
   @media (prefers-reduced-motion: reduce) {
