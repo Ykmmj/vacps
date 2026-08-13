@@ -1,6 +1,16 @@
 @import 'tailwindcss';
+/* Tailwind v4 dropped the bundled animate plugin; bits-ui popovers need these utilities. */
+@import 'tw-animate-css';
 
 @custom-variant dark (&:where(.dark, .dark *, [data-theme='dark'], [data-theme='dark'] *));
+
+/*
+ * Tailwind's stock `data-open` / `data-closed` variants target a bare attribute,
+ * but Bits UI reports visibility through `data-state`. Without this remap every
+ * popover's enter/exit animation silently resolves to nothing.
+ */
+@custom-variant data-open (&[data-state='open']);
+@custom-variant data-closed (&[data-state='closed']);
 
 /*
  * The control plane's visual foundation. These values intentionally mirror the
