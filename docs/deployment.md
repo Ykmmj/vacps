@@ -13,6 +13,64 @@ unset CONTROL_PANEL_PASSWORD
 
 It logs in to Cloudflare, creates D1 and KV, updates local bindings, stores the control-panel authentication secrets, generates a control-plane Ed25519 signing identity, applies migrations, and deploys the Worker. On a first-time account (when the `vacps` Worker does not exist yet), it performs an initial deploy so Cloudflare will accept Worker secrets, then writes secrets and redeploys. The control-panel password must be at least 12 non-whitespace characters. The private signing key never leaves the Worker; its public key is included automatically with each one-time Agent registration Token. The session signing secret is generated and stored without being printed.
 
+### Optional Custom Domain
+
+The committed Wrangler configuration explicitly keeps the
+`https://<worker>.<account>.workers.dev` endpoint enabled so existing Agents do
+not lose their control plane during a domain migration. Custom hostnames are
+supplied only at deploy time and do not need to be committed.
+
+Deploy to a zone with the default `vacps` prefix:
+
+```bash
+VACPS_CUSTOM_DOMAIN_ZONE=803800.xyz \
+  pnpm --filter @vacps/control-worker run deploy
+```
+
+Use a different prefix, or supply a complete hostname:
+
+```bash
+VACPS_CUSTOM_DOMAIN_ZONE=803800.xyz VACPS_CUSTOM_DOMAIN_PREFIX=control \
+  pnpm --filter @vacps/control-worker run deploy
+
+VACPS_CUSTOM_DOMAIN=vacps.803800.xyz \
+  pnpm --filter @vacps/control-worker run deploy
+```
+
+For multiple Custom Domains, provide the complete comma-separated set:
+
+```bash
+VACPS_CUSTOM_DOMAINS=vacps.803800.xyz,vacps.example.com \
+  pnpm --filter @vacps/control-worker run deploy
+```
+
+The same settings are available as non-interactive command arguments:
+
+```bash
+pnpm --filter @vacps/control-worker run deploy -- \
+  --custom-domain-zone 803800.xyz \
+  --custom-domain-prefix vacps
+```
+
+When no Custom Domain option or environment variable is supplied, deployment
+does not update existing Custom Domain bindings. Supplying domains updates the
+complete Custom Domain set for this Worker, so include every hostname that
+should remain attached. Remove any manually created DNS record with the same
+hostname before the first Custom Domain deployment; Cloudflare creates and
+manages the required DNS record and certificate.
+
+Existing Agents may continue using the workers.dev URL. To migrate one while
+upgrading, pass `--control-plane-url https://<custom-domain>` to `agent.sh
+upgrade`; the Agent identity, backend ID, data, and logs are preserved.
+
+The Managed Tunnel OAuth callback may remain registered on the original
+workers.dev URL. An authenticated connect request binds the panel's current
+origin to a short-lived, one-time OAuth state; the callback validates that
+state without relying on a cross-domain session cookie and returns the browser
+to the initiating hostname. Attaching a Custom Domain therefore does not
+require rotating the Cloudflare OAuth Client or changing
+`CLOUDFLARE_OAUTH_REDIRECT_URL`.
+
 To secure an existing production Worker before its next deploy, set the two Worker Secrets without placing either value in a command argument:
 
 ```bash

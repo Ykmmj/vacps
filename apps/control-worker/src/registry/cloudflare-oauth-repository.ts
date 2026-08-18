@@ -15,6 +15,7 @@ export interface CloudflareOAuthState {
   accountId: string;
   zoneId: string;
   baseDomain: string;
+  returnUrl?: string;
   expiresAt: string;
   createdAt: string;
 }
@@ -36,6 +37,7 @@ interface CloudflareOAuthStateRow {
   account_id: string;
   zone_id: string;
   base_domain: string;
+  return_url: string | null;
   expires_at: string;
   created_at: string;
 }
@@ -96,14 +98,15 @@ export class CloudflareOAuthRepository {
     await this.db
       .prepare(
         `INSERT INTO cloudflare_oauth_states (
-           state, account_id, zone_id, base_domain, expires_at, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
+           state, account_id, zone_id, base_domain, return_url, expires_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         input.state,
         input.accountId,
         input.zoneId,
         input.baseDomain,
+        input.returnUrl ?? null,
         input.expiresAt,
         createdAt,
       )
@@ -151,6 +154,7 @@ function toState(row: CloudflareOAuthStateRow): CloudflareOAuthState {
     accountId: row.account_id,
     zoneId: row.zone_id,
     baseDomain: row.base_domain,
+    ...(row.return_url ? { returnUrl: row.return_url } : {}),
     expiresAt: row.expires_at,
     createdAt: row.created_at,
   };

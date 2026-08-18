@@ -18,7 +18,10 @@ import {
   passwordMatches,
   requireAuthenticated,
 } from './auth/session.js';
-import { CloudflareOAuthService } from './cloudflare/oauth-service.js';
+import {
+  CloudflareOAuthService,
+  isCloudflareOAuthCallbackRoute,
+} from './cloudflare/oauth-service.js';
 import type { Env } from './env.js';
 import { AppError, errorResponse, json, readJson } from './lib/http.js';
 import { handleAuthorize } from './mcp/authorize-page.js';
@@ -156,6 +159,12 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     const subAction = segments[4];
 
     if (resource === 'auth') return handleAuth(request, env, id);
+    // OAuth callbacks can arrive on a different hostname from the panel that started the flow, so
+    // they cannot rely on its host-only session cookie. The service instead consumes the
+    // cryptographically random, short-lived state created by the authenticated connect request.
+    if (isCloudflareOAuthCallbackRoute(resource, id, action, request.method)) {
+      return services.cloudflareOAuth.callback(request);
+    }
 
     const isScheduleOccurrenceAck =
       resource === 'schedules' &&
@@ -433,12 +442,10 @@ async function handleApi(request: Request, env: Env, requestId: string): Promise
     }
 
     if (resource === 'cloudflare' && id === 'oauth') {
-      if (action === 'callback' && request.method === 'GET')
-        return services.cloudflareOAuth.callback(request);
       if (action === 'status' && request.method === 'GET')
         return json(await services.cloudflareOAuth.status());
       if (action === 'connect' && request.method === 'POST')
-        return json(await services.cloudflareOAuth.begin());
+        return json(await services.cloudflareOAuth.begin(request));
       if (action === 'zones' && request.method === 'GET')
         return json(await services.cloudflareOAuth.zones());
       if (action === 'zone' && request.method === 'POST') {

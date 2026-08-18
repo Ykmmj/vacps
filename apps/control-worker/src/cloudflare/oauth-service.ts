@@ -27,6 +27,15 @@ export interface CloudflareTunnelCredentials extends CloudflareConnectionInput {
   accessToken: string;
 }
 
+export function isCloudflareOAuthCallbackRoute(
+  resource: string | undefined,
+  id: string | undefined,
+  action: string | undefined,
+  method: string,
+): boolean {
+  return resource === 'cloudflare' && id === 'oauth' && action === 'callback' && method === 'GET';
+}
+
 export interface CloudflareZone {
   id: string;
   name: string;
@@ -97,7 +106,7 @@ export class CloudflareOAuthService {
     };
   }
 
-  async begin(): Promise<{ authorizationUrl: string }> {
+  async begin(request: Request): Promise<{ authorizationUrl: string }> {
     const configuration = this.configuration();
     const accountId = this.env.CLOUDFLARE_ACCOUNT_ID;
     if (!accountId)
@@ -113,6 +122,7 @@ export class CloudflareOAuthService {
       accountId,
       zoneId: '',
       baseDomain: '',
+      returnUrl: returnUrlFor(request.url).toString(),
       expiresAt: new Date(Date.now() + STATE_TTL_MILLISECONDS).toISOString(),
     });
     const authorizationUrl = new URL(AUTHORIZATION_ENDPOINT);
@@ -128,9 +138,12 @@ export class CloudflareOAuthService {
     const configuration = this.configuration();
     const url = new URL(request.url);
     const state = url.searchParams.get('state');
-    const returnUrl = returnUrlFor(configuration.redirectUrl);
-    if (!state) return redirect(returnUrl, 'missing_state');
+    const fallbackReturnUrl = returnUrlFor(configuration.redirectUrl);
+    if (!state) return redirect(fallbackReturnUrl, 'missing_state');
     const pending = await this.repository.consumeState(state);
+    const returnUrl = pending?.returnUrl
+      ? safeReturnUrlFor(pending.returnUrl, fallbackReturnUrl)
+      : fallbackReturnUrl;
     if (!pending || Date.parse(pending.expiresAt) <= Date.now())
       return redirect(returnUrl, 'expired');
     if (url.searchParams.has('error')) return redirect(returnUrl, 'denied');
@@ -475,10 +488,21 @@ function arrayBuffer(value: Uint8Array): ArrayBuffer {
 
 function returnUrlFor(redirectUrl: string): URL {
   const url = new URL(redirectUrl);
+  const localhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  if (url.protocol !== 'https:' && !localhost)
+    throw new Error('A public return URL requires HTTPS.');
   url.pathname = '/';
   url.search = '';
   url.hash = '';
   return url;
+}
+
+function safeReturnUrlFor(value: string, fallback: URL): URL {
+  try {
+    return returnUrlFor(value);
+  } catch {
+    return new URL(fallback);
+  }
 }
 
 function redirect(url: URL, result: string): Response {
