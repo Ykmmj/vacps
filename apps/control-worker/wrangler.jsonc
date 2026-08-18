@@ -3,6 +3,9 @@
   "name": "vacps",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-17",
+  // Keep the stable workers.dev endpoint available while operators migrate existing Agents to a
+  // Custom Domain supplied at deploy time.
+  "workers_dev": true,
   // `global_fetch_strictly_public` is required by @cloudflare/workers-oauth-provider for its
   // client-ID-metadata-document (CIMD) support.
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],

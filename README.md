@@ -41,6 +41,19 @@ unset CONTROL_PANEL_PASSWORD
 
 `CONTROL_PANEL_PASSWORD` must contain at least 12 non-whitespace characters. The setup creates or binds D1 and KV, configures Worker secrets and the control-plane Ed25519 identity, applies migrations, and deploys the Worker.
 
+The workers.dev endpoint remains enabled during Custom Domain migrations.
+Attach a private hostname without committing it to the repository:
+
+```bash
+VACPS_CUSTOM_DOMAIN_ZONE=example.com \
+  pnpm --filter @vacps/control-worker run deploy
+```
+
+This uses the default `vacps` prefix. Set `VACPS_CUSTOM_DOMAIN_PREFIX` or
+provide a complete `VACPS_CUSTOM_DOMAIN` when needed. See
+[`docs/deployment.md`](docs/deployment.md#optional-custom-domain) for
+non-interactive deployment and existing-Agent migration options.
+
 Open the deployed Web UI, choose Managed Tunnel or Quick Tunnel, generate a one-time registration token, and copy the generated native installer command. The Agent runs as the user who invoked deployment (`SUDO_USER` when invoked through `sudo`); the installer does not create a login account.
 
 Lifecycle commands are served from the same `agent.sh` endpoint:

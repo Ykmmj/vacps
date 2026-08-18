@@ -9,7 +9,7 @@
     "check:ui": "pnpm run generate:i18n && svelte-check --tsconfig tsconfig.ui.json",
     "copy:installer": "node scripts/copy-installer.mjs",
     "dev": "pnpm run build:ui && pnpm run copy:installer && wrangler dev",
-    "deploy": "pnpm run ensure:control-plane-identity && pnpm run migrate:remote && pnpm run build:ui && pnpm run copy:installer && wrangler deploy",
+    "deploy": "pnpm run ensure:control-plane-identity && pnpm run migrate:remote && pnpm run build:ui && pnpm run copy:installer && node scripts/deploy-worker.mjs",
     "ensure:control-plane-identity": "node scripts/ensure-control-plane-identity.mjs",
     "generate:i18n": "node scripts/generate-i18n.mjs",
     "migrate:remote": "wrangler d1 migrations apply vacps-control --remote",
